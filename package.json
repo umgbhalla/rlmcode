@@ -11,7 +11,8 @@
     "check": "tsc --noEmit",
     "analyze": "bun scripts/design-check.ts",
     "debt": "bun scripts/ponytail-debt.ts",
-    "lint": "bun run check && bun run analyze && bun run debt"
+    "lint": "bun run check && bun run analyze && bun run debt",
+    "prepare": "effect-language-service patch"
   },
   "dependencies": {
     "@ax-llm/ax": "^22.0.5",
@@ -33,6 +34,7 @@
     "react": "^19.2.7"
   },
   "devDependencies": {
+    "@effect/language-service": "^0.86.2",
     "@types/bun": "^1.3.14",
     "@types/node": "^26.0.0",
     "@types/react": "^19.2.17",

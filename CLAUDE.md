@@ -24,7 +24,25 @@ Bun + TypeScript. Effect v4 core, opentui (React) UI, real OpenTelemetry → loc
     bun run motel:tui    # motel TUI
     bun run chat         # the agent
     bun run emit         # headless trace smoke
-    bun run check        # tsc --noEmit
+    bun run lint         # check + analyze + debt (run before commit)
+    bun run check        # tsc --noEmit + Effect LS (Effect anti-patterns)
+    bun run analyze      # yuku semantic design analysis
+    bun run debt         # ponytail debt ledger
+
+## Static analysis
+
+- `check` — `tsc` patched with `@effect/language-service`: catches Effect
+  anti-patterns (floating effects, missing service deps, error-channel bugs).
+- `analyze` — `scripts/design-check.ts` on `yuku-analyzer`: dead exports,
+  unused imports, circular deps, per-function cyclomatic/nesting/param budgets.
+- `debt` — `scripts/ponytail-debt.ts`: harvests `ponytail:` markers, fails on any
+  with no `Upgrade:` trigger.
+
+## Effect best practices
+
+Before writing Effect code, consult `../effect-solutions/packages/website/docs`
+(project-setup, tsconfig, services-and-layers, error-handling). Real impls +
+types: `../effect-smol`. Don't guess Effect patterns — check the source.
 
 ## Notes
 
