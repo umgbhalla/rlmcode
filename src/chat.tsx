@@ -35,13 +35,16 @@ const oneLine = (s: string, n = 90) => {
   return t.length > n ? `${t.slice(0, n)}…` : t
 }
 
+// Per-turn provenance only (model lives in the status line, not repeated here).
 const fmtMeta = (m: TurnMeta): string => {
-  const parts: string[] = [m.model.split("/").pop() ?? m.model, `${(m.ms / 1000).toFixed(1)}s`]
+  const parts: string[] = [`${(m.ms / 1000).toFixed(1)}s`]
   if (typeof m.tokens === "number") parts.push(m.tokens >= 1000 ? `${(m.tokens / 1000).toFixed(1)}k tok` : `${m.tokens} tok`)
   if (m.finishReason && m.finishReason !== "stop") parts.push(m.finishReason)
   if (m.budget) parts.push("budget")
   return parts.join(" · ")
 }
+
+const INDENT = 2 // single source of truth for transcript nesting
 
 function toTurns(messages: readonly Msg[]): Turn[] {
   const turns: Turn[] = []
@@ -89,21 +92,23 @@ function ToolView({ m, expanded, cols, onToggle }: { m: ToolMsg; expanded: boole
   return (
     <box flexDirection="column" style={{ marginTop: expanded && hasBody ? 1 : 0 }}>
       <text fg={color} onMouseDown={(hasBody ? onToggle : undefined) as any}>
-        {`    ${mark} `}
+        <span fg={color}>{`${mark} `}</span>
         <span fg="#cdd6f4">{label}</span>
         <span fg="#585b70">{`  ${summary}`}</span>
-        {hasBody ? <span fg="#585b70">{expanded ? "  ▾" : "  ▸"}</span> : <span> </span>}
+        {hasBody ? <span fg="#585b70">{expanded ? "  ▾" : "  ▸"}</span> : null}
       </text>
       {diff ? (
-        <box style={{ marginLeft: 6 }}>
+        <box style={{ paddingLeft: INDENT, paddingTop: 1 }}>
           <diff diff={diff.diff} view={cols > 120 ? "split" : "unified"} filetype={diff.filetype} showLineNumbers syntaxStyle={mdStyle} />
         </box>
       ) : (
-        preview.map((p, i) => (
-          <text key={i} fg={p.tone === "add" ? "#a6e3a1" : p.tone === "del" ? "#f38ba8" : "#6c7086"}>
-            {`      ${p.tone === "add" ? "+" : p.tone === "del" ? "-" : "│"} ${p.text}`}
-          </text>
-        ))
+        <box flexDirection="column" style={{ paddingLeft: INDENT }}>
+          {preview.map((p, i) => (
+            <text key={i} fg={p.tone === "add" ? "#a6e3a1" : p.tone === "del" ? "#f38ba8" : "#6c7086"}>
+              {`${p.tone === "add" ? "+" : p.tone === "del" ? "-" : "│"} ${p.text}`}
+            </text>
+          ))}
+        </box>
       )}
     </box>
   )
@@ -132,19 +137,22 @@ function TurnView({
         <text fg="#66aaff">{t.user}</text>
       </box>
       {t.steps.length > 0 && (
-        <box flexDirection="column">
+        <box flexDirection="column" style={{ paddingLeft: INDENT }}>
           <text fg="#7f849c" onMouseDown={onToggleTurn as any}>
-            {`  ${expanded ? "▾" : "▸"} ${t.steps.length} step${t.steps.length > 1 ? "s" : ""}`}
+            {`${expanded ? "▾" : "▸"} ${t.steps.length} step${t.steps.length > 1 ? "s" : ""}`}
             {!expanded ? `   ${toolsUsed(t.steps)}` : ""}
           </text>
-          {expanded &&
-            t.steps.map((s, i) =>
-              s.kind === "tool" ? (
-                <ToolView key={s.id} m={s} expanded={expTools.has(s.id)} cols={cols} onToggle={() => onToggleTool(s.id)} />
-              ) : (
-                <text key={i} fg="#9399b2">{`    · ${oneLine(s.text)}`}</text>
-              ),
-            )}
+          {expanded && (
+            <box flexDirection="column" style={{ paddingLeft: INDENT }}>
+              {t.steps.map((s, i) =>
+                s.kind === "tool" ? (
+                  <ToolView key={s.id} m={s} expanded={expTools.has(s.id)} cols={cols} onToggle={() => onToggleTool(s.id)} />
+                ) : (
+                  <text key={i} fg="#9399b2">{`· ${oneLine(s.text)}`}</text>
+                ),
+              )}
+            </box>
+          )}
         </box>
       )}
       {t.final !== null ? (
@@ -153,7 +161,11 @@ function TurnView({
             <text fg="#a6e3a1">{"⏺ "}</text>
             <markdown content={t.final} syntaxStyle={mdStyle} />
           </box>
-          {t.meta && <text fg="#585b70">{`  ${fmtMeta(t.meta)}`}</text>}
+          {t.meta && (
+            <box style={{ paddingLeft: INDENT }}>
+              <text fg="#585b70">{fmtMeta(t.meta)}</text>
+            </box>
+          )}
         </box>
       ) : (
         <Spinner />
@@ -385,20 +397,25 @@ function App() {
     )
   }
 
-  const hint = note
-    ? note
-    : busy
-      ? armed
-        ? "esc again to interrupt"
-        : "working… · esc to interrupt"
-      : `${active.title} · ↑↓ history · PgUp/PgDn scroll · click to expand · esc back${projectDoc ? ` · ${projectDoc}` : ""}`
+  // ONE status line at the bottom: left = context (model · session), right =
+  // live state or key hints. No top bar, no scattered metadata.
+  const statusLeft = `kimi · ${active.title}${projectDoc ? ` · ${projectDoc}` : ""}`
+  const statusRight = busy
+    ? armed
+      ? "esc again to interrupt"
+      : "working… · esc interrupt"
+    : (note ?? "↑↓ history · PgUp/PgDn scroll · click expand · esc back")
+  const statusTone = armed ? "#f38ba8" : busy ? "#ffd166" : note ? "#a6e3a1" : "#585b70"
 
   return (
     <box flexDirection="column" style={{ height: "100%" }}>
-      <text fg={armed ? "#f38ba8" : note ? "#a6e3a1" : "#888888"} style={{ paddingLeft: 1, paddingTop: 1 }}>
-        {hint}
-      </text>
-      <scrollbox ref={scrollRef} style={{ flexGrow: 1, paddingLeft: 1, paddingRight: 1 }} stickyScroll stickyStart="bottom" scrollY>
+      <scrollbox
+        ref={scrollRef}
+        style={{ flexGrow: 1, paddingLeft: 1, paddingRight: 1, paddingTop: 1 }}
+        stickyScroll
+        stickyStart="bottom"
+        scrollY
+      >
         {turns.map((t, i) => (
           <TurnView
             key={t.idx}
@@ -412,7 +429,7 @@ function App() {
           />
         ))}
       </scrollbox>
-      <box style={{ paddingLeft: 1, paddingRight: 1, paddingBottom: 1 }}>
+      <box style={{ paddingLeft: 1, paddingRight: 1, paddingTop: 1 }}>
         <textarea
           ref={taRef}
           minHeight={1}
@@ -422,8 +439,12 @@ function App() {
           onSubmit={submit as any}
           onPaste={onPaste as any}
           focused
-          placeholder="message kimi (shift+enter newline · esc back when empty)"
+          placeholder="message kimi"
         />
+      </box>
+      <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1, paddingBottom: 1 }}>
+        <text fg="#585b70">{statusLeft}</text>
+        <text fg={statusTone}>{statusRight}</text>
       </box>
     </box>
   )
