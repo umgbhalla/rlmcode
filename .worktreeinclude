@@ -1,0 +1,13 @@
+# Gitignored files copied into new git worktrees so they run immediately.
+# .gitignore syntax; only files that match AND are gitignored get copied
+# (tracked files are never duplicated). Read by --worktree / EnterWorktree /
+# subagent isolation: worktree.
+
+# Secrets — required to run (CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID).
+.env
+
+# Deps — carries the patched typescript (effect-language-service), native
+# bindings (opentui zig, yuku), and the installed tree, so a fresh worktree
+# runs `bun run chat`/`lint` with no `bun install` + `prepare` re-patch.
+# Heavy (~hundreds of MB/worktree); drop this line if you'd rather reinstall.
+node_modules/
