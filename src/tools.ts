@@ -180,8 +180,12 @@ export const tools: AxFunction[] = [
         const sliced = lines.slice(start, start + limit)
         const suffix = lines.length - start > limit ? `\n…[truncated ${lines.length - start - limit} more]` : ""
         return cap(sliced.join("\n") + suffix, 12000) || "(no matches)"
-      } catch {
-        return "(no matches)"
+      } catch (e: any) {
+        // rg exit 1 = no matches (not an error). exit >=2 = real failure
+        // (bad regex, unreadable path) -> surface as a tool error, not a silent
+        // "(no matches)" that hides the bug from the model and the trace.
+        if (e?.exitCode === 1) return "(no matches)"
+        return fail("pattern", `ripgrep error: ${String(e?.stderr ?? e?.message ?? e).slice(0, 500)}`)
       }
     },
   },

@@ -69,8 +69,17 @@ answerGen.setDescription(
 
 // ponytail: brittle string-match — ax throws no typed/coded error for the step
 // limit. Ceiling: breaks if ax rewords the message. Upgrade: switch to a typed error code when ax adds one.
-const isMaxSteps = (e: unknown): boolean =>
-  e instanceof ChatError && /max steps reached/i.test(String((e.cause as { message?: string } | undefined)?.message ?? ""))
+// Walk the cause chain (ChatError -> AxGenerateError -> inner Error) so a deeper
+// wrap doesn't hide the signal.
+const isMaxSteps = (e: unknown): boolean => {
+  if (!(e instanceof ChatError)) return false
+  let cur: { message?: string; cause?: unknown } | undefined = e.cause as any
+  for (let i = 0; i < 5 && cur; i++) {
+    if (/max steps reached/i.test(String(cur.message ?? ""))) return true
+    cur = cur.cause as any
+  }
+  return false
+}
 
 class ChatError {
   readonly _tag = "ChatError"
@@ -150,6 +159,15 @@ const sumUsage = (...us: ReadonlyArray<Usage | undefined>): Usage | undefined =>
   return { promptTokens: add("promptTokens"), completionTokens: add("completionTokens"), totalTokens: add("totalTokens") }
 }
 
+// ponytail: provider response id read off ax's getChatLog() (remoteId). ax doesn't
+// expose finish_reason publicly (it's on ax's own gen_ai child span already), so
+// we only surface the id here. Ceiling: yields nothing if ax changes the log shape.
+const readResponseId = (gen: typeof chat): string | undefined => {
+  const log = (gen as any).getChatLog?.()
+  const last = Array.isArray(log) ? log[log.length - 1] : undefined
+  return last?.remoteId ?? undefined
+}
+
 /**
  * Build a traced turn for a session. `chat.turn` (our Effect.fn span, kind=client,
  * gen_ai semconv) parents the ax gen_ai child; the whole thing parents the
@@ -193,16 +211,19 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
           catch: (e) => new ChatError(e),
         })
 
-      // If the tool-call budget is hit, don't fail — tell the model to stop
-      // calling tools and answer from what it has, then await the next turn.
+      // If the tool-call budget is hit, ax throws "max steps reached"; don't fail
+      // — recover with a NO-TOOLS generator that answers from the conversation/
+      // tool history already in memory. (Tried stripping tools mid-loop via a
+      // beforeStep hook to avoid the throw + its red gen_ai span, but kimi then
+      // emits raw <|tool_call_begin|> tokens as text — a fresh no-tools generator
+      // with an explicit "answer now" nudge gives clean prose. The red child span
+      // on the abandoned attempt is the documented cost; chat.budget_exhausted
+      // marks the turn so it's not mistaken for an unrecovered failure.)
       let budgetExhausted = false
       const res = yield* runForward(chat, message).pipe(
         Effect.catchIf(isMaxSteps, () =>
           Effect.gen(function* () {
             budgetExhausted = true
-            // Mark the nudge ON THE TRACE: a span attribute (queryable in motel)
-            // + a correlated warning log. Without this the recovery is invisible —
-            // the turn just shows a failed gen_ai child then a mysterious 2nd one.
             yield* Effect.annotateCurrentSpan({ "chat.budget_exhausted": true, "chat.max_steps": MAX_STEPS })
             yield* Effect.logWarning("tool budget reached -> asking model to answer").pipe(
               Effect.annotateLogs({ "session.id": sessionId, "chat.max_steps": MAX_STEPS }),
@@ -213,12 +234,14 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       )
 
       // Canonical gen_ai annotations via Effect's own helper (no hand-typed keys).
+      // response.id = provider completion id (from ax's chat log) so a turn can be
+      // cross-referenced with provider-side logs.
       const span = yield* Effect.currentSpan
       Telemetry.addGenAIAnnotations(span, {
         system: PROVIDER as any,
         operation: { name: "chat" },
         request: { model: MODEL },
-        response: { model: MODEL },
+        response: { model: MODEL, id: readResponseId(budgetExhausted ? answerGen : chat) },
       })
       const usage = budgetExhausted ? sumUsage(readUsage(chat), readUsage(answerGen)) : readUsage(chat)
       if (usage) {
@@ -230,12 +253,15 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
 
       // Put the REAL conversation content on chat.turn (the readable parent span)
       // so motel shows prompt + reply, not just metadata. (ax buries content in
-      // AxGen events.) Truncate to keep spans sane.
+      // AxGen events.) Truncate to keep spans sane. NB: these are app-local keys
+      // (chat.*), NOT the gen_ai.* semconv — the canonical message records live as
+      // events on ax's gen_ai child span; squatting gen_ai.prompt would mislead
+      // semconv-aware tooling.
       const reply = res.reply ?? ""
       const clip = (s: string, n = 4000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
       yield* Effect.annotateCurrentSpan({
-        "gen_ai.prompt": clip(message),
-        "gen_ai.completion": clip(reply),
+        "chat.prompt": clip(message),
+        "chat.reply": clip(reply),
         "chat.budget_exhausted": budgetExhausted,
       })
 
