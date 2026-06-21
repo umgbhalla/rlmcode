@@ -86,14 +86,12 @@ class ChatError {
   constructor(readonly cause: unknown) {}
 }
 
-const argStr = (p: unknown) => {
-  const s = typeof p === "string" ? p : JSON.stringify(p ?? {})
-  // ponytail: de-doubles only exact 2x repeats (ax stream-chunk quirk). Ceiling:
-  // won't catch other duplication shapes. Upgrade: fix in ax / drop if ax stops doubling.
-  const h = s.length / 2
-  if (s.length % 2 === 0 && s.slice(0, h) === s.slice(h)) return s.slice(0, h)
-  return s
-}
+// Tool-call args as a string for the UI. No de-double needed: the only place ax
+// doubles params (mergeFunctionCalls, params += params) is the STREAMING done-cb
+// path; we run stream:false (see runForward), where ChatResponseResults carries
+// the provider's single tool_calls[].function.arguments verbatim. (A doubled
+// '{…}{…}' would also fail ax's own JSON.parse and never execute.)
+const argStr = (p: unknown) => (typeof p === "string" ? p : JSON.stringify(p ?? {}))
 
 // ax's NATIVE step feed. ax calls this during forward() as steps complete:
 // per-step agent narration, tool calls, tool results. We map them to UI
@@ -125,9 +123,34 @@ const liveLogger: AxLoggerFunction = (m) => {
   }
 }
 
+// gen_ai.response.finish_reason is the one signal ax exposes nowhere on its
+// public program API (getUsage gives tokens, getChatLog gives the response id,
+// but finish_reason lives only on ax's internal gen_ai child-span event). The
+// only no-ax-patch way to read it is the raw /chat/completions JSON, so we wrap
+// fetch and skim choices[0].finish_reason off a clone (ax still consumes the
+// real body). Turns are serialized (busyAtom), so a module-level latch is safe;
+// turn() resets it before each forward and reads it after.
+let lastFinishReason: string | undefined
+// Cast: Bun's `typeof fetch` carries a `.preconnect` member ax never calls.
+const captureFetch = (async (input: any, init: any): Promise<Response> => {
+  const res = await fetch(input, init)
+  try {
+    if (res.ok) {
+      const j: any = await res.clone().json()
+      const fr = j?.choices?.[0]?.finish_reason
+      if (typeof fr === "string") lastFinishReason = fr
+    }
+  } catch {
+    /* non-JSON / streaming / error body — ignore, finish_reason just stays unset */
+  }
+  return res
+}) as typeof fetch
+
 // The logger lives on the AI service (not forward opts) and only fires with
 // debug enabled. Custom logger replaces ax's console printer -> no TUI spam.
-llm.setOptions({ debug: true, logger: liveLogger })
+// fetch MUST be set in THIS same call: setOptions reassigns every field, so a
+// later bare setOptions would wipe a fetch passed only to ai().
+llm.setOptions({ debug: true, logger: liveLogger, fetch: captureFetch })
 
 // Metrics -> OTLP /v1/metrics via the PeriodicExportingMetricReader.
 const turnsTotal = Metric.counter("chat_turns_total", { description: "completed chat turns" })
@@ -137,10 +160,10 @@ const turnDuration = Metric.timer("chat_turn_duration", { description: "per-turn
 
 type Usage = { promptTokens?: number; completionTokens?: number; totalTokens?: number }
 
-// ponytail: token usage read off ax's undocumented getUsage(). Load-bearing —
-// it's the only source feeding gen_ai.usage.* + the token metric (ax's AxGen span
-// doesn't carry usage). Ceiling: silently yields nothing if ax changes the shape
-// (guarded, non-fatal). Upgrade: a public ax usage API.
+// Token usage off AxProgram.getUsage() (AxGen extends AxProgram) — a real, if
+// lightly-documented, API returning AxProgramUsage[] with .tokens per call. It's
+// the source for gen_ai.usage.* + the token metric (ax's own span carries usage
+// only as an event). Guarded: yields nothing if ax changes the shape (non-fatal).
 const readUsage = (gen: typeof chat): Usage | undefined => {
   const u = (gen as any).getUsage?.()
   const last = Array.isArray(u) ? u[u.length - 1] : u
@@ -195,6 +218,8 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       const otelSpan = yield* OtelTracer.currentOtelSpan
       const traceContext = otelTrace.setSpan(otelContext.active(), otelSpan)
 
+      lastFinishReason = undefined // reset the captureFetch latch for this turn
+
       yield* Effect.logInfo("turn.start").pipe(
         Effect.annotateLogs({ "session.id": sessionId, "message.chars": message.length }),
       )
@@ -241,7 +266,11 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
         system: PROVIDER as any,
         operation: { name: "chat" },
         request: { model: MODEL },
-        response: { model: MODEL, id: readResponseId(budgetExhausted ? answerGen : chat) },
+        response: {
+          model: MODEL,
+          id: readResponseId(budgetExhausted ? answerGen : chat),
+          finishReasons: lastFinishReason ? [lastFinishReason] : undefined,
+        },
       })
       const usage = budgetExhausted ? sumUsage(readUsage(chat), readUsage(answerGen)) : readUsage(chat)
       if (usage) {
