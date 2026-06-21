@@ -6,13 +6,24 @@ import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import * as Tracer from "effect/Tracer"
 import * as Atom from "effect/unstable/reactivity/Atom"
+import { setActivitySink } from "./activity.ts"
 import { turn } from "./agent.ts"
 import { appRuntime } from "./otel.ts"
 import { sessionsRT } from "./sessions.ts"
 
 const MODEL = "@cf/moonshotai/kimi-k2.7-code"
 
-export type Msg = { readonly who: "you" | "kimi"; readonly text: string }
+export type Msg =
+  | { readonly kind: "you"; readonly text: string }
+  | { readonly kind: "agent"; readonly text: string }
+  | {
+      readonly kind: "tool"
+      readonly id: string
+      readonly name: string
+      readonly args: string
+      readonly status: "running" | "ok" | "error"
+      readonly result: string
+    }
 export type SessionView = { readonly id: string; readonly title: string; readonly messages: readonly Msg[] }
 export type View = "list" | "chat"
 export type AppState = {
@@ -28,6 +39,9 @@ export const appAtom = Atom.make<AppState>({
   cursor: 0,
   sessions: [],
 }).pipe(Atom.keepAlive)
+
+// True while a turn is in flight (drives the thinking spinner).
+export const busyAtom = Atom.make(false).pipe(Atom.keepAlive)
 
 let seq = 0
 const newId = () => `s${++seq}-${Date.now().toString(36)}`
@@ -75,10 +89,41 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
       })
     }
 
-    patch((m) => [...m, { who: "you", text }])
+    patch((m) => [...m, { kind: "you", text }])
+    get.set(busyAtom, true)
+
+    // Step-by-step activity from ax's native logger: agent narration, tool
+    // calls (in-flight), and results (which update the matching row in place).
+    setActivitySink((a) => {
+      switch (a.kind) {
+        case "text":
+          patch((m) => [...m, { kind: "agent", text: a.text }])
+          break
+        case "tool":
+          patch((m) => [...m, { kind: "tool", id: a.id, name: a.name, args: a.args, status: "running", result: "" }])
+          break
+        case "result":
+          patch((m) =>
+            m.map((x) => (x.kind === "tool" && x.id === a.id ? { ...x, status: a.isError ? "error" : "ok", result: a.result } : x)),
+          )
+          break
+      }
+    })
+
     const reply = yield* turn(rt.mem, rt.parent, id)(text).pipe(
-      Effect.catchCause((c) => Effect.succeed(`⚠ ${Cause.pretty(c)}`)),
+      // Clean, one-line error instead of dumping the whole Cause/stack.
+      Effect.catchCause((c) => {
+        const e = Cause.squash(c) as { cause?: { message?: string }; message?: string }
+        const raw = e?.cause?.message ?? e?.message ?? String(e)
+        const msg = /max steps reached/i.test(raw)
+          ? "Hit the step limit while working — see the steps above. Narrow the task, or ask me to continue."
+          : raw.split("\n")[0]!.slice(0, 240)
+        return Effect.succeed(`⚠ ${msg}`)
+      }),
     )
-    patch((m) => [...m, { who: "kimi", text: reply }])
+
+    setActivitySink(null)
+    get.set(busyAtom, false)
+    patch((m) => [...m, { kind: "agent", text: reply }])
   }),
 )
