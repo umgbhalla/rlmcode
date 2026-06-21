@@ -25,6 +25,22 @@ const readText = async (path: string) => {
   }
 }
 
+type RgOpts = { pattern: string; output_mode?: "content" | "files_with_matches" | "count"; glob?: string; context?: number; where: string }
+const buildRgArgs = ({ pattern, output_mode = "files_with_matches", glob, context, where }: RgOpts): string[] => {
+  const args = ["--hidden", "--max-columns", "500"]
+  if (output_mode === "files_with_matches") args.push("-l")
+  else if (output_mode === "count") args.push("-c")
+  else {
+    args.push("-n")
+    if (context && context > 0) args.push("-C", String(context))
+  }
+  if (glob) args.push("--glob", glob)
+  if (pattern.startsWith("-")) args.push("-e", pattern)
+  else args.push(pattern)
+  args.push(where)
+  return args
+}
+
 export const tools: AxFunction[] = [
   {
     name: "bash",
@@ -159,24 +175,12 @@ export const tools: AxFunction[] = [
       head_limit?: number
       offset?: number
     }) => {
-      const where = path ?? "."
-      const args = ["--hidden", "--max-columns", "500"]
-      if (output_mode === "files_with_matches") args.push("-l")
-      if (output_mode === "count") args.push("-c")
-      if (output_mode === "content") {
-        args.push("-n")
-        if (context && context > 0) args.push("-C", String(context))
-      }
-      if (glob) args.push("--glob", glob)
-      if (pattern.startsWith("-")) args.push("-e", pattern)
-      else args.push(pattern)
-      args.push(where)
-
+      const args = buildRgArgs({ pattern, output_mode, glob, context, where: path ?? "." })
       try {
         const out = await $`rg ${args}`.text()
         const lines = out.split("\n").filter((l) => l.length > 0)
         const start = offset && offset > 0 ? offset : 0
-        const limit = head_limit && head_limit > 0 ? head_limit : output_mode === "files_with_matches" ? 250 : 250
+        const limit = head_limit && head_limit > 0 ? head_limit : 250
         const sliced = lines.slice(start, start + limit)
         const suffix = lines.length - start > limit ? `\n…[truncated ${lines.length - start - limit} more]` : ""
         return cap(sliced.join("\n") + suffix, 12000) || "(no matches)"

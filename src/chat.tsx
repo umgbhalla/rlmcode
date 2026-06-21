@@ -199,33 +199,31 @@ function App() {
       return n
     })
 
-  useKeyboard((k) => {
-    if (k.ctrl && k.name === "c") process.exit(0)
-    if (state.view === "list") {
-      if (k.name === "q" || k.name === "escape") process.exit(0)
-      if (k.name === "n") return void newSession()
-      if (k.name === "up" || k.name === "k") return setApp((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) }))
-      if (k.name === "down" || k.name === "j")
-        return setApp((s) => ({ ...s, cursor: Math.min(s.sessions.length - 1, s.cursor + 1) }))
-      if (k.name === "return") {
-        const target = state.sessions[state.cursor]
-        if (target) setApp((s) => ({ ...s, view: "chat", activeId: target.id }))
-      }
-      return
+  const onListKey = (k: any) => {
+    if (k.name === "q" || k.name === "escape") return process.exit(0)
+    if (k.name === "n") return void newSession()
+    if (k.name === "up" || k.name === "k") return setApp((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) }))
+    if (k.name === "down" || k.name === "j")
+      return setApp((s) => ({ ...s, cursor: Math.min(s.sessions.length - 1, s.cursor + 1) }))
+    if (k.name === "return") {
+      const target = state.sessions[state.cursor]
+      if (target) setApp((s) => ({ ...s, view: "chat", activeId: target.id }))
     }
-    // chat view
+  }
+  const onChatKey = (k: any) => {
     const typing = text.length > 0
     if (k.name === "escape" || (!typing && k.name === "left")) {
       setText("")
       return setApp((s) => ({ ...s, view: "list" }))
     }
-    if (typing) return // let the input handle typing + submit
+    if (typing) return // input handles typing + submit
     if (k.name === "up") return setFocus((f) => Math.max(0, f - 1))
     if (k.name === "down") return setFocus((f) => Math.min(focusables.length - 1, f + 1))
-    if (k.name === "return" && focused) {
-      if (focused.kind === "turn") toggleTurn(focused.idx)
-      else toggleTool(focused.id)
-    }
+    if (k.name === "return" && focused) (focused.kind === "turn" ? toggleTurn(focused.idx) : toggleTool(focused.id))
+  }
+  useKeyboard((k) => {
+    if (k.ctrl && k.name === "c") return process.exit(0)
+    return state.view === "list" ? onListKey(k) : onChatKey(k)
   })
 
   if (!inChat) {

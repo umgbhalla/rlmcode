@@ -185,6 +185,7 @@ const sumUsage = (...us: ReadonlyArray<Usage | undefined>): Usage | undefined =>
 // ponytail: provider response id read off ax's getChatLog() (remoteId). ax doesn't
 // expose finish_reason publicly (it's on ax's own gen_ai child span already), so
 // we only surface the id here. Ceiling: yields nothing if ax changes the log shape.
+// Upgrade: ax public response-metadata API (id + finish_reason).
 const readResponseId = (gen: typeof chat): string | undefined => {
   const log = (gen as any).getChatLog?.()
   const last = Array.isArray(log) ? log[log.length - 1] : undefined
