@@ -11,7 +11,8 @@
     "check": "tsc --noEmit",
     "analyze": "bun scripts/design-check.ts",
     "debt": "bun scripts/ponytail-debt.ts",
-    "lint": "bun run check && bun run analyze && bun run debt",
+    "test": "bun scripts/design-check.test.ts && bun scripts/ponytail-debt.test.ts",
+    "lint": "bun run check && bun run test && bun run analyze && bun run debt",
     "prepare": "effect-language-service patch"
   },
   "dependencies": {

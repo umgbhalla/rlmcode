@@ -26,8 +26,9 @@ assert(
 // native dependency dupe
 assert(has(an([{ path: "src/x.ts", source: 'import moment from "moment"\nexport const z = moment' }]), "native", "moment"), "native dupe not flagged")
 
-// complex function (20 branches > budget 18)
-const ifs = Array.from({ length: 20 }, (_, i) => `if (x === ${i}) {}`).join("\n")
+// complex function — 40 branches, intentionally far over any sane budget so
+// tuning CC_BUDGET doesn't false-fail this (decoupled from the exact number).
+const ifs = Array.from({ length: 40 }, (_, i) => `if (x === ${i}) {}`).join("\n")
 assert(has(an([{ path: "src/x.ts", source: `export function big(x: number) { ${ifs}; return x }` }]), "shrink", "cyclomatic"), "complexity not flagged")
 
 // long parameter list (7 > budget 6)
