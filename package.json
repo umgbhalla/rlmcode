@@ -8,7 +8,10 @@
     "emit": "bun --env-file=.env smoke-emit.ts",
     "motel": "bun --cwd ../motel run src/motel.ts server",
     "motel:tui": "bun --cwd ../motel run src/motel.ts tui",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "analyze": "bun scripts/design-check.ts",
+    "debt": "bun scripts/ponytail-debt.ts",
+    "lint": "bun run check && bun run analyze && bun run debt"
   },
   "dependencies": {
     "@ax-llm/ax": "^22.0.5",
@@ -33,6 +36,7 @@
     "@types/bun": "^1.3.14",
     "@types/node": "^26.0.0",
     "@types/react": "^19.2.17",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "yuku-analyzer": "^0.5.39"
   }
 }
