@@ -29,14 +29,18 @@ Bun + TypeScript. Effect v4 core, opentui (React) UI, real OpenTelemetry → loc
     bun run analyze      # yuku semantic design analysis
     bun run debt         # ponytail debt ledger
 
-## Static analysis
+## Static analysis — what & WHEN to run
 
-- `check` — `tsc` patched with `@effect/language-service`: catches Effect
-  anti-patterns (floating effects, missing service deps, error-channel bugs).
-- `analyze` — `scripts/design-check.ts` on `yuku-analyzer`: dead exports,
-  unused imports, circular deps, per-function cyclomatic/nesting/param budgets.
-- `debt` — `scripts/ponytail-debt.ts`: harvests `ponytail:` markers, fails on any
-  with no `Upgrade:` trigger.
+| command | what it checks | run it when |
+|---|---|---|
+| `bun run check` | `tsc` + `@effect/language-service` — types + Effect anti-patterns (floating effects, missing service deps, error-channel bugs) | after **any** edit to `.ts`/`.tsx`, especially Effect code (`agent.ts`, `atoms.ts`, `otel.ts`, `sessions.ts`). The fast inner loop. |
+| `bun run analyze` | `yuku-analyzer` — dead exports, unused imports, circular deps, per-function cyclomatic/nesting/param budgets | after adding/removing exports or modules, or when a function grows branchy. Before committing structural changes. |
+| `bun run debt` | `ponytail:` marker ledger — fails on any marker with no `Upgrade:` line | after adding a `ponytail:` shortcut comment; it forces every shortcut to name its upgrade path. |
+| `bun run lint` | `check` + `analyze` + `debt` (all of the above) | **before every commit**, and in CI. One gate. Must be green to ship. |
+
+Workflow: edit → `bun run check` (tight loop) → when done → `bun run lint` → commit.
+Budgets in `scripts/design-check.ts` (CC 18, nest 5, params 6) are tunable; raise only
+with a reason, not to silence a real smell.
 
 ## Effect best practices
 
