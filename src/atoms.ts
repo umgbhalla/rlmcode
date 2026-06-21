@@ -25,7 +25,7 @@ export type Msg =
       readonly result: string
     }
 export type SessionView = { readonly id: string; readonly title: string; readonly messages: readonly Msg[] }
-export type View = "list" | "chat"
+type View = "list" | "chat"
 export type AppState = {
   readonly view: View
   readonly activeId: string | null

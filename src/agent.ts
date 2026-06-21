@@ -72,7 +72,7 @@ answerGen.setDescription(
 const isMaxSteps = (e: unknown): boolean =>
   e instanceof ChatError && /max steps reached/i.test(String((e.cause as { message?: string } | undefined)?.message ?? ""))
 
-export class ChatError {
+class ChatError {
   readonly _tag = "ChatError"
   constructor(readonly cause: unknown) {}
 }
@@ -180,11 +180,20 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
 
       // If the tool-call budget is hit, don't fail — tell the model to stop
       // calling tools and answer from what it has, then await the next turn.
+      let budgetExhausted = false
       const res = yield* runForward(chat, message).pipe(
         Effect.catchIf(isMaxSteps, () =>
-          Effect.flatMap(Effect.logWarning("tool budget reached -> asking model to answer"), () =>
-            runForward(answerGen, BUDGET_NUDGE),
-          ),
+          Effect.gen(function* () {
+            budgetExhausted = true
+            // Mark the nudge ON THE TRACE: a span attribute (queryable in motel)
+            // + a correlated warning log. Without this the recovery is invisible —
+            // the turn just shows a failed gen_ai child then a mysterious 2nd one.
+            yield* Effect.annotateCurrentSpan({ "chat.budget_exhausted": true, "chat.max_steps": MAX_STEPS })
+            yield* Effect.logWarning("tool budget reached -> asking model to answer").pipe(
+              Effect.annotateLogs({ "session.id": sessionId, "chat.max_steps": MAX_STEPS }),
+            )
+            return yield* runForward(answerGen, BUDGET_NUDGE)
+          }),
         ),
       )
 
@@ -212,6 +221,7 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       yield* Effect.annotateCurrentSpan({
         "gen_ai.prompt": clip(message),
         "gen_ai.completion": clip(reply),
+        "chat.budget_exhausted": budgetExhausted,
       })
 
       yield* Metric.update(turnsTotal, 1)

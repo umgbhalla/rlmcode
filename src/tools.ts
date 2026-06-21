@@ -4,16 +4,24 @@
 // Each call also emits a ToolEvent so the TUI can render tool activity live.
 //
 // NOTE: unsandboxed — runs real shell/fs in the process cwd. Local-dev only.
-import type { AxFunction } from "@ax-llm/ax"
+import { AxFunctionError, type AxFunction } from "@ax-llm/ax"
 import { $ } from "bun"
 
 const cap = (s: string, n = 20000) => (s.length > n ? `${s.slice(0, n)}\n…[truncated ${s.length - n} chars]` : s)
+
+// Throw AxFunctionError so ax records a `function.error` span event, marks the
+// tool result isError (-> red row in the TUI), and feeds the message back to the
+// model as fixing instructions. Returning an "error:" string instead would make
+// ax mark the Tool span green -> the failure is invisible in motel and the UI.
+const fail = (field: string, message: string): never => {
+  throw new AxFunctionError([{ field, message }])
+}
 
 const readText = async (path: string) => {
   try {
     return await Bun.file(path).text()
   } catch (e: any) {
-    return `error: ${e.message}`
+    return fail("path", `cannot read ${path}: ${e.message}`)
   }
 }
 
@@ -51,7 +59,6 @@ export const tools: AxFunction[] = [
     },
     func: async ({ path, offset, limit }: { path: string; offset?: number; limit?: number }) => {
       const raw = await readText(path)
-      if (raw.startsWith("error:")) return cap(raw, 40000)
       const lines = raw.split("\n")
       const total = lines.length
       const start = offset && offset > 0 ? offset - 1 : 0
@@ -74,7 +81,7 @@ export const tools: AxFunction[] = [
         await Bun.write(path, content)
         return `wrote ${content.length} bytes to ${path}`
       } catch (e: any) {
-        return `error: ${e.message}`
+        return fail("path", `cannot write ${path}: ${e.message}`)
       }
     },
   },
@@ -95,12 +102,13 @@ export const tools: AxFunction[] = [
     func: async ({ path, old_string, new_string, replace_all }: { path: string; old_string: string; new_string: string; replace_all?: boolean }) => {
       try {
         const cur = await Bun.file(path).text()
-        if (!cur.includes(old_string)) return `error: old_string not found in ${path}`
+        if (!cur.includes(old_string)) return fail("old_string", `old_string not found in ${path}`)
         const next = replace_all ? cur.split(old_string).join(new_string) : cur.replace(old_string, new_string)
         await Bun.write(path, next)
         return `edited ${path}`
       } catch (e: any) {
-        return `error: ${e.message}`
+        if (e instanceof AxFunctionError) throw e
+        return fail("path", `cannot edit ${path}: ${e.message}`)
       }
     },
   },
@@ -113,7 +121,7 @@ export const tools: AxFunction[] = [
         const hits = await Array.fromAsync(new Bun.Glob(pattern).scan({ dot: false }))
         return cap(hits.slice(0, 200).join("\n"), 8000) || "(no matches)"
       } catch (e: any) {
-        return `error: ${e.message}`
+        return fail("pattern", `bad glob '${pattern}': ${e.message}`)
       }
     },
   },
@@ -188,11 +196,12 @@ export const tools: AxFunction[] = [
     func: async ({ url }: { url: string }) => {
       try {
         const res = await fetch(url, { redirect: "follow" })
-        if (!res.ok) return `error: HTTP ${res.status} ${res.statusText}`
+        if (!res.ok) return fail("url", `HTTP ${res.status} ${res.statusText}`)
         const text = await res.text()
         return cap(text, 20000) || "(empty response)"
       } catch (e: any) {
-        return `error: ${e.message}`
+        if (e instanceof AxFunctionError) throw e
+        return fail("url", `fetch failed: ${e.message}`)
       }
     },
   },
