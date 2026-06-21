@@ -16,7 +16,7 @@ import * as Telemetry from "effect/unstable/ai/Telemetry"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { tools } from "./tools.ts"
 
-const MAX_STEPS = 50 // max tool-call iterations per turn
+const MAX_STEPS = Number(process.env.AX2_MAX_STEPS ?? 50) // max tool-call iterations per turn
 
 const BUDGET_NUDGE =
   "Your tool-call budget for this turn is used up. Do NOT call any more tools. Using everything you've gathered so far, give the user your best, concise answer now."
