@@ -46,15 +46,31 @@ const resourceCfg = {
 // re-surfaced provider below, so both flush to the same exporter.
 const spanProcessor = new SimpleSpanProcessor(new OTLPTraceExporter({ url: `${BASE}/v1/traces` }))
 
+// Hoisted so we can forceFlush on exit. Metrics export on a 5s interval, so a
+// short-lived process (e.g. `bun run emit`) would otherwise drop the final
+// window's counters/timers. Traces + logs use Simple processors (flush per
+// record) and don't need this.
+const metricReader = new PeriodicExportingMetricReader({
+  exporter: new OTLPMetricExporter({ url: `${BASE}/v1/metrics` }),
+  exportIntervalMillis: 5000,
+})
+
+// beforeExit only (fires on natural drain — `emit` finishing, TUI Esc-quit).
+// NOT SIGINT/SIGTERM: registering those would swallow Ctrl-C and leave the TUI
+// hung. Best-effort; motel is local so the flush usually lands before exit.
+let flushed = false
+process.once("beforeExit", () => {
+  if (flushed) return
+  flushed = true
+  void metricReader.forceFlush().catch(() => {})
+})
+
 const SdkLive = NodeSdk.layer(() => ({
   resource: resourceCfg,
   spanProcessor,
   logRecordProcessor: new SimpleLogRecordProcessor(new OTLPLogExporter({ url: `${BASE}/v1/logs` })),
   loggerMergeWithExisting: false, // replace console logger so the TUI isn't spammed
-  metricReader: new PeriodicExportingMetricReader({
-    exporter: new OTLPMetricExporter({ url: `${BASE}/v1/metrics` }),
-    exportIntervalMillis: 5000,
-  }),
+  metricReader,
   metricTemporality: "cumulative",
 }))
 

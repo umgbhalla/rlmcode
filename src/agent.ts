@@ -122,17 +122,32 @@ llm.setOptions({ debug: true, logger: liveLogger })
 
 // Metrics -> OTLP /v1/metrics via the PeriodicExportingMetricReader.
 const turnsTotal = Metric.counter("chat_turns_total", { description: "completed chat turns" })
+const turnsFailed = Metric.counter("chat_turns_failed", { description: "turns that ended in failure" })
 const tokensTotal = Metric.counter("chat_tokens_total", { description: "total LLM tokens used" })
 const turnDuration = Metric.timer("chat_turn_duration", { description: "per-turn latency" })
+
+type Usage = { promptTokens?: number; completionTokens?: number; totalTokens?: number }
 
 // ponytail: token usage read off ax's undocumented getUsage(). Load-bearing —
 // it's the only source feeding gen_ai.usage.* + the token metric (ax's AxGen span
 // doesn't carry usage). Ceiling: silently yields nothing if ax changes the shape
 // (guarded, non-fatal). Upgrade: a public ax usage API.
-const readUsage = (): { promptTokens?: number; completionTokens?: number; totalTokens?: number } | undefined => {
-  const u = (chat as any).getUsage?.()
+const readUsage = (gen: typeof chat): Usage | undefined => {
+  const u = (gen as any).getUsage?.()
   const last = Array.isArray(u) ? u[u.length - 1] : u
   return last?.tokens ?? last
+}
+
+// Sum usage across generators (chat + answerGen on the budget-recovery path) so
+// the token metric / gen_ai.usage.* cover the WHOLE turn, not just the first gen.
+const sumUsage = (...us: ReadonlyArray<Usage | undefined>): Usage | undefined => {
+  const present = us.filter((u): u is Usage => u !== undefined)
+  if (present.length === 0) return undefined
+  const add = (k: keyof Usage) => {
+    const vals = present.map((u) => u[k]).filter((n): n is number => typeof n === "number")
+    return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) : undefined
+  }
+  return { promptTokens: add("promptTokens"), completionTokens: add("completionTokens"), totalTokens: add("totalTokens") }
 }
 
 /**
@@ -205,7 +220,7 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
         request: { model: MODEL },
         response: { model: MODEL },
       })
-      const usage = readUsage()
+      const usage = budgetExhausted ? sumUsage(readUsage(chat), readUsage(answerGen)) : readUsage(chat)
       if (usage) {
         Telemetry.addGenAIAnnotations(span, {
           usage: { inputTokens: usage.promptTokens, outputTokens: usage.completionTokens },
@@ -231,11 +246,14 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
     // Latency metric for the whole turn.
     (eff) => Effect.trackDuration(eff, turnDuration),
     // Record failures: withSpan already sets status=ERROR + recordException;
-    // this adds a correlated structured log line for motel's logs tab.
+    // this adds a correlated structured log line for motel's logs tab + a
+    // failure metric so the failed-turn rate is chartable alongside chat_turns_total.
     (eff) =>
       Effect.tapCause(eff, (cause) =>
-        Effect.logError("turn.failed").pipe(
-          Effect.annotateLogs({ "session.id": sessionId, "exception.message": Cause.pretty(cause) }),
+        Effect.flatMap(Metric.update(turnsFailed, 1), () =>
+          Effect.logError("turn.failed").pipe(
+            Effect.annotateLogs({ "session.id": sessionId, "exception.message": Cause.pretty(cause) }),
+          ),
         ),
       ),
   )
