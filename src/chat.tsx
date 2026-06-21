@@ -91,7 +91,7 @@ function ToolView({ m, expanded, cols, onToggle }: { m: ToolMsg; expanded: boole
   const preview = expanded && hasBody && !diff ? toolPreview(m.name, m.args, m.result, isError, Math.max(20, cols - 10)) : []
   return (
     <box flexDirection="column" style={{ marginTop: expanded && hasBody ? 1 : 0 }}>
-      <text fg={color} onMouseDown={(hasBody ? onToggle : undefined) as any}>
+      <text fg={color} selectable={false} onMouseDown={(hasBody ? onToggle : undefined) as any}>
         <span fg={color}>{`${mark} `}</span>
         <span fg="#cdd6f4">{label}</span>
         <span fg="#585b70">{`  ${summary}`}</span>
@@ -133,12 +133,12 @@ function TurnView({
 }) {
   return (
     <box flexDirection="column" style={{ marginTop: first ? 0 : 1 }}>
-      <box border={["left"]} borderColor="#45475a" style={{ paddingLeft: 1 }}>
+      <box border={["left"]} borderColor="#45475a" style={{ paddingLeft: 1, width: "100%" }}>
         <text fg="#66aaff">{t.user}</text>
       </box>
       {t.steps.length > 0 && (
         <box flexDirection="column" style={{ paddingLeft: INDENT }}>
-          <text fg="#7f849c" onMouseDown={onToggleTurn as any}>
+          <text fg="#7f849c" selectable={false} onMouseDown={onToggleTurn as any}>
             {`${expanded ? "▾" : "▸"} ${t.steps.length} step${t.steps.length > 1 ? "s" : ""}`}
             {!expanded ? `   ${toolsUsed(t.steps)}` : ""}
           </text>
@@ -157,9 +157,11 @@ function TurnView({
       )}
       {t.final !== null ? (
         <box flexDirection="column" style={{ marginTop: 1 }}>
-          <box flexDirection="row">
+          <box flexDirection="row" style={{ width: "100%" }}>
             <text fg="#a6e3a1">{"⏺ "}</text>
-            <markdown content={t.final} syntaxStyle={mdStyle} />
+            <box style={{ flexGrow: 1, flexShrink: 1 }}>
+              <markdown content={t.final} syntaxStyle={mdStyle} />
+            </box>
           </box>
           {t.meta && (
             <box style={{ paddingLeft: INDENT }}>
@@ -429,18 +431,28 @@ function App() {
           />
         ))}
       </scrollbox>
-      <box style={{ paddingLeft: 1, paddingRight: 1, paddingTop: 1 }}>
-        <textarea
-          ref={taRef}
-          minHeight={1}
-          maxHeight={8}
-          keyBindings={inputKeys}
-          onContentChange={() => setText(taRef.current?.plainText ?? "")}
-          onSubmit={submit as any}
-          onPaste={onPaste as any}
-          focused
-          placeholder="message kimi"
-        />
+      <box style={{ paddingLeft: 1, paddingRight: 1, paddingTop: 1, width: "100%" }}>
+        <box
+          border={["left"]}
+          borderColor={busy ? "#45475a" : "#66aaff"}
+          style={{ paddingLeft: 1, flexShrink: 0, width: "100%" }}
+        >
+          <textarea
+            ref={taRef}
+            width="100%"
+            minHeight={1}
+            maxHeight={8}
+            keyBindings={inputKeys}
+            onContentChange={() => setText(taRef.current?.plainText ?? "")}
+            onSubmit={submit as any}
+            onPaste={onPaste as any}
+            focused
+            cursorColor="#66aaff"
+            focusedTextColor="#cdd6f4"
+            placeholder="message kimi"
+            placeholderColor="#585b70"
+          />
+        </box>
       </box>
       <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1, paddingBottom: 1 }}>
         <text fg="#585b70">{statusLeft}</text>
