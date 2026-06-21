@@ -13,9 +13,12 @@ import { sessionsRT } from "./sessions.ts"
 
 const MODEL = "@cf/moonshotai/kimi-k2.7-code"
 
+// Provenance for a completed reply, rendered as one muted line under the turn.
+export type TurnMeta = { readonly model: string; readonly ms: number; readonly tokens?: number; readonly finishReason?: string; readonly budget: boolean }
+
 export type Msg =
   | { readonly kind: "you"; readonly text: string }
-  | { readonly kind: "agent"; readonly text: string }
+  | { readonly kind: "agent"; readonly text: string; readonly meta?: TurnMeta }
   | {
       readonly kind: "tool"
       readonly id: string
@@ -110,20 +113,30 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
       }
     })
 
-    const reply = yield* turn(rt.mem, rt.parent, id)(text).pipe(
+    const startedAt = Date.now()
+    const res = yield* turn(rt.mem, rt.parent, id)(text).pipe(
       // Clean, one-line error instead of dumping the whole Cause/stack.
       Effect.catchCause((c) => {
         const e = Cause.squash(c) as { cause?: { message?: string }; message?: string }
         const raw = e?.cause?.message ?? e?.message ?? String(e)
-        const msg = /max steps reached/i.test(raw)
-          ? "Hit the step limit while working — see the steps above. Narrow the task, or ask me to continue."
-          : raw.split("\n")[0]!.slice(0, 240)
-        return Effect.succeed(`⚠ ${msg}`)
+        const msg = /abort/i.test(raw)
+          ? "Interrupted."
+          : /max steps reached/i.test(raw)
+            ? "Hit the step limit while working — see the steps above. Narrow the task, or ask me to continue."
+            : raw.split("\n")[0]!.slice(0, 240)
+        return Effect.succeed({ reply: `⚠ ${msg}`, tokens: undefined, finishReason: undefined, budget: false })
       }),
     )
 
     setActivitySink(null)
     get.set(busyAtom, false)
-    patch((m) => [...m, { kind: "agent", text: reply }])
+    const meta: TurnMeta = {
+      model: MODEL,
+      ms: Date.now() - startedAt,
+      tokens: res.tokens,
+      finishReason: res.finishReason,
+      budget: res.budget,
+    }
+    patch((m) => [...m, { kind: "agent", text: res.reply, meta }])
   }),
 )

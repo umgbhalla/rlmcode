@@ -22,6 +22,27 @@ const lines = (s: string) => {
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
+// One glyph per tool TYPE so a transcript that's mostly tool rows is scannable at
+// a glance. Used as the "done" status mark (running keeps the spinner, error ✗).
+export const toolIcon = (name: string): string => {
+  switch (name) {
+    case "bash":
+      return "$"
+    case "read_file":
+      return "→"
+    case "write_file":
+    case "edit_file":
+      return "←"
+    case "glob":
+    case "grep":
+      return "✱"
+    case "web_fetch":
+      return "%"
+    default:
+      return "⏺"
+  }
+}
+
 export const toolLabel = (name: string, args: string): string => {
   switch (name) {
     case "bash":
@@ -45,25 +66,82 @@ export const toolLabel = (name: string, args: string): string => {
 
 export type PreviewLine = { readonly text: string; readonly tone: "add" | "del" | "dim" }
 
-const headLines = (s: string, n: number): PreviewLine[] => {
+// Width-aware: clamp each line to `cols` so one 5000-char line can't blow the
+// inline layout, independent of the `n` line cap.
+const headLines = (s: string, n: number, cols = 200): PreviewLine[] => {
+  const clamp = (l: string) => (l.length > cols ? `${l.slice(0, cols - 1)}…` : l)
   const all = s.replace(/\s+$/, "").split("\n")
-  const out: PreviewLine[] = all.slice(0, n).map((l) => ({ text: l, tone: "dim" as const }))
+  const out: PreviewLine[] = all.slice(0, n).map((l) => ({ text: clamp(l), tone: "dim" as const }))
   if (all.length > n) out.push({ text: `… +${all.length - n} more`, tone: "dim" })
   return out
 }
 
-/** The explicit, per-tool detail body shown when a tool row is expanded. */
-export const toolPreview = (name: string, args: string, result: string, isError: boolean): PreviewLine[] => {
+// A synthesized unified diff for edits/writes, fed to opentui's native <diff>.
+// Crude (no LCS — full old block removed, full new block added) but renders as a
+// real line-numbered diff. Returns null for tools that aren't a file mutation.
+export const toolDiff = (
+  name: string,
+  args: string,
+  isError: boolean,
+): { diff: string; filetype: string } | null => {
+  if (isError) return null
+  const ext = (p: string) => (p.includes(".") ? p.split(".").pop()! : "txt")
+  if (name === "edit_file") {
+    const path = field(args, "path")
+    const o = field(args, "old_string").split("\n")
+    const n = field(args, "new_string").split("\n")
+    if (o.length + n.length > 120) return null // too big — fall back to text preview
+    const diff =
+      `--- a/${path}\n+++ b/${path}\n@@ -1,${o.length} +1,${n.length} @@\n` +
+      [...o.map((l) => `-${l}`), ...n.map((l) => `+${l}`)].join("\n") +
+      "\n"
+    return { diff, filetype: ext(path) }
+  }
+  if (name === "write_file") {
+    const path = field(args, "path")
+    const c = field(args, "content").split("\n")
+    if (!c.length || c.length > 120) return null
+    const diff = `--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${c.length} @@\n` + c.map((l) => `+${l}`).join("\n") + "\n"
+    return { diff, filetype: ext(path) }
+  }
+  return null
+}
+
+// Whether an expanded body is even worth offering. Cheap reads/searches whose
+// one-line summary already says everything get NO expander (keeps scrollback
+// compact); bash-with-output, file mutations, and errors keep the drill-down.
+export const toolHasBody = (name: string, result: string, isError: boolean): boolean => {
+  if (isError) return true
+  const empty = /^\(no (output|matches)\)/.test(result.trim()) || result.trim() === ""
+  switch (name) {
+    case "read_file":
+    case "glob":
+    case "grep":
+      return !empty
+    case "bash":
+      return !empty
+    case "write_file":
+    case "edit_file":
+      return true
+    default:
+      return !empty
+  }
+}
+
+/** The explicit, per-tool detail body shown when a tool row is expanded. `cols`
+ * = char budget per line (width-aware truncation). edit_file/write_file render
+ * via toolDiff (native <diff>) so they fall through here only as a text fallback. */
+export const toolPreview = (name: string, args: string, result: string, isError: boolean, cols = 200): PreviewLine[] => {
   if (isError || /^error:/.test(result.trim())) return [{ text: result.trim().slice(0, 200), tone: "del" }]
   const empty = /^\(no (output|matches)\)/.test(result.trim()) || result.trim() === ""
   switch (name) {
     case "bash":
-      return empty ? [{ text: "(no output)", tone: "dim" }] : headLines(result, 10)
+      return empty ? [{ text: "(no output)", tone: "dim" }] : headLines(result, 10, cols)
     case "read_file":
-      return headLines(result, 8)
+      return headLines(result, 8, cols)
     case "write_file": {
       const content = field(args, "content")
-      return content ? headLines(content, 8) : [{ text: result, tone: "dim" }]
+      return content ? headLines(content, 8, cols) : [{ text: result, tone: "dim" }]
     }
     case "edit_file": {
       const del: PreviewLine[] = field(args, "old_string").split("\n").slice(0, 6).map((l) => ({ text: l, tone: "del" as const }))
@@ -72,11 +150,11 @@ export const toolPreview = (name: string, args: string, result: string, isError:
     }
     case "glob":
     case "grep":
-      return empty ? [{ text: "(no matches)", tone: "dim" }] : headLines(result, 10)
+      return empty ? [{ text: "(no matches)", tone: "dim" }] : headLines(result, 10, cols)
     case "web_fetch":
-      return empty ? [{ text: "(empty response)", tone: "dim" }] : headLines(result, 10)
+      return empty ? [{ text: "(empty response)", tone: "dim" }] : headLines(result, 10, cols)
     default:
-      return headLines(result, 6)
+      return headLines(result, 6, cols)
   }
 }
 

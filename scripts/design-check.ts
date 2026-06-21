@@ -1,18 +1,39 @@
 #!/usr/bin/env bun
 // Real semantic design analysis on yuku-analyzer (not comment-grep). One
 // cross-file pass over src/, reporting design smells that tsc doesn't:
-//   delete: dead export      — exported symbol referenced nowhere (cross-file)
-//   delete: unused import     — imported binding never used
-//   cycle:  circular dep      — import cycle between modules
-//   shrink: complex function  — cyclomatic complexity over budget
-//   shrink: deep nesting      — block nesting depth over budget
-//   yagni:  long param list   — too many parameters
+//   delete: dead export / unused import / unused dependency
+//   native: a dependency that duplicates a platform/runtime native
+//   cycle:  import cycle between modules
+//   shrink: cyclomatic complexity / nesting depth over budget
+//   yagni:  too many parameters
+//
+// Core logic is exported (buildAnalyzer/analyze/unusedDeps) so scripts/
+// design-check.test.ts can assert it on fixtures — ponytail: non-trivial
+// logic leaves a runnable check.
 import { Analyzer, SymbolFlags } from "yuku-analyzer"
+
+export type Finding = { tag: "delete" | "native" | "cycle" | "shrink" | "yagni"; msg: string }
 
 const ENTRY = new Set(["src/chat.tsx"]) // exports here are reachability roots
 const CC_BUDGET = 18 // cyclomatic complexity per function
 const NEST_BUDGET = 5 // block nesting depth per function
 const PARAM_BUDGET = 6 // parameters per function
+
+// Dependencies that duplicate a Bun/modern-JS native. Curated (low false
+// positive) — flags the package, not "you wrote a manual loop".
+const NATIVE_DUPES: Record<string, string> = {
+  moment: "Intl.DateTimeFormat / Temporal",
+  dayjs: "Intl.DateTimeFormat",
+  uuid: "crypto.randomUUID()",
+  "node-fetch": "global fetch",
+  axios: "fetch",
+  dotenv: "Bun --env-file",
+  "lodash.get": "?. optional chaining",
+  classnames: "template literal",
+  "left-pad": "String.prototype.padStart",
+  querystring: "URLSearchParams",
+  rimraf: "fs.rm({ recursive: true })",
+}
 
 const BRANCH = new Set([
   "IfStatement",
@@ -28,12 +49,27 @@ const BRANCH = new Set([
 ])
 const FN = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"])
 
-const a = new Analyzer()
-for await (const p of new Bun.Glob("src/**/*.{ts,tsx}").scan(".")) a.addFile(p, await Bun.file(p).text())
-a.link()
+export const pkgRoot = (spec: string): string | null => {
+  if (spec.startsWith(".") || spec.startsWith("/") || spec.startsWith("node:")) return null
+  const parts = spec.split("/")
+  return spec.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!
+}
 
-type Finding = { tag: "delete" | "cycle" | "shrink" | "yagni"; msg: string }
-const out: Finding[] = []
+export const buildAnalyzer = (files: { path: string; source: string }[]): Analyzer => {
+  const a = new Analyzer()
+  for (const f of files) a.addFile(f.path, f.source)
+  a.link()
+  return a
+}
+
+export const importedRoots = (a: Analyzer): Set<string> => {
+  const roots = new Set<string>()
+  for (const m of a.modules.values()) for (const imp of m.imports) {
+    const root = pkgRoot(imp.specifier)
+    if (root) roots.add(root)
+  }
+  return roots
+}
 
 const lineOf = (m: any, node: any): number => {
   const off = node?.start ?? node?.range?.[0]
@@ -48,71 +84,69 @@ const lineOf = (m: any, node: any): number => {
   return lo + 1
 }
 
-for (const m of a.modules.values()) {
-  // 1. dead exports (cross-file). Skip entry roots + type-only (referencesOf undercounts type uses).
-  if (!ENTRY.has(m.path)) {
-    for (const s of m.symbols) {
-      if (!s.has(SymbolFlags.Exported)) continue
-      if (s.has(SymbolFlags.TypeSpace) && !s.has(SymbolFlags.ValueSpace)) continue
-      if (a.referencesOf(s).length === 0) out.push({ tag: "delete", msg: `${m.path}: dead export "${s.name}". Referenced nowhere — drop it.` })
-    }
-  }
-
-  // 2. unused imports (value bindings with zero uses; type-only/side-effect excluded).
-  for (const imp of m.imports) {
-    if (imp.isSideEffect || imp.typeOnly || !imp.local) continue
-    if (imp.local.references.length === 0) out.push({ tag: "delete", msg: `${m.path}: unused import "${imp.local.name}". Remove it.` })
-  }
-
-  // 3. per-function complexity, nesting, param count (real AST walk + function stack).
-  const stack: { name: string; line: number; cc: number; params: number; startDepth: number; maxDepth: number }[] = []
-  let depth = 0
-  const fnHooks = {
-    enter: (n: any) => stack.push({ name: n.id?.name ?? "(anonymous)", line: lineOf(m, n), cc: 1, params: n.params?.length ?? 0, startDepth: depth, maxDepth: 0 }),
-    leave: () => {
-      const f = stack.pop()!
-      const where = `${m.path}:${f.line} ${f.name}`
-      if (f.cc > CC_BUDGET) out.push({ tag: "shrink", msg: `${where}: cyclomatic complexity ${f.cc} (budget ${CC_BUDGET}). Extract / flatten.` })
-      if (f.maxDepth > NEST_BUDGET) out.push({ tag: "shrink", msg: `${where}: nesting depth ${f.maxDepth} (budget ${NEST_BUDGET}). Early-return / extract.` })
-      if (f.params > PARAM_BUDGET) out.push({ tag: "yagni", msg: `${where}: ${f.params} params (budget ${PARAM_BUDGET}). Pass an options object.` })
-    },
-  }
-  const visitors: Record<string, unknown> = {}
-  for (const t of FN) visitors[t] = fnHooks
-  for (const t of BRANCH) visitors[t] = () => stack.length && stack[stack.length - 1]!.cc++
-  visitors.BlockStatement = {
-    enter: () => {
-      depth++
-      if (stack.length) {
-        const f = stack[stack.length - 1]!
-        f.maxDepth = Math.max(f.maxDepth, depth - f.startDepth)
+export const analyze = (a: Analyzer): Finding[] => {
+  const out: Finding[] = []
+  for (const m of a.modules.values()) {
+    // dead exports (cross-file). Skip entry roots + type-only (referencesOf undercounts type uses).
+    if (!ENTRY.has(m.path)) {
+      for (const s of m.symbols) {
+        if (!s.has(SymbolFlags.Exported)) continue
+        if (s.has(SymbolFlags.TypeSpace) && !s.has(SymbolFlags.ValueSpace)) continue
+        if (a.referencesOf(s).length === 0) out.push({ tag: "delete", msg: `${m.path}: dead export "${s.name}". Referenced nowhere — drop it.` })
       }
-    },
-    leave: () => depth--,
+    }
+    // unused imports + native-duplicating dependencies.
+    for (const imp of m.imports) {
+      const root = pkgRoot(imp.specifier)
+      if (root && NATIVE_DUPES[root]) out.push({ tag: "native", msg: `${m.path}: "${root}" duplicates a native — use ${NATIVE_DUPES[root]}.` })
+      if (imp.isSideEffect || imp.typeOnly || !imp.local) continue
+      if (imp.local.references.length === 0) out.push({ tag: "delete", msg: `${m.path}: unused import "${imp.local.name}". Remove it.` })
+    }
+    // per-function complexity, nesting, param count (AST walk + function stack).
+    const stack: { name: string; line: number; cc: number; params: number; startDepth: number; maxDepth: number }[] = []
+    let depth = 0
+    const fnHooks = {
+      enter: (n: any) => stack.push({ name: n.id?.name ?? "(anonymous)", line: lineOf(m, n), cc: 1, params: n.params?.length ?? 0, startDepth: depth, maxDepth: 0 }),
+      leave: () => {
+        const f = stack.pop()!
+        const where = `${m.path}:${f.line} ${f.name}`
+        if (f.cc > CC_BUDGET) out.push({ tag: "shrink", msg: `${where}: cyclomatic complexity ${f.cc} (budget ${CC_BUDGET}). Extract / flatten.` })
+        if (f.maxDepth > NEST_BUDGET) out.push({ tag: "shrink", msg: `${where}: nesting depth ${f.maxDepth} (budget ${NEST_BUDGET}). Early-return / extract.` })
+        if (f.params > PARAM_BUDGET) out.push({ tag: "yagni", msg: `${where}: ${f.params} params (budget ${PARAM_BUDGET}). Pass an options object.` })
+      },
+    }
+    const visitors: Record<string, unknown> = {}
+    for (const t of FN) visitors[t] = fnHooks
+    for (const t of BRANCH) visitors[t] = () => stack.length && stack[stack.length - 1]!.cc++
+    visitors.BlockStatement = {
+      enter: () => {
+        depth++
+        if (stack.length) {
+          const f = stack[stack.length - 1]!
+          f.maxDepth = Math.max(f.maxDepth, depth - f.startDepth)
+        }
+      },
+      leave: () => depth--,
+    }
+    m.walk(visitors as any)
   }
-  m.walk(visitors as any)
-}
 
-// 4. circular dependencies (DFS over the resolved import graph).
-{
+  // circular dependencies (DFS over the resolved import graph).
   const edges = new Map<string, string[]>()
   for (const m of a.modules.values()) {
-    edges.set(
-      m.path,
-      m.imports.map((i) => i.resolvedModule?.path).filter((p): p is string => Boolean(p)),
-    )
+    edges.set(m.path, m.imports.map((i) => i.resolvedModule?.path).filter((p): p is string => Boolean(p)))
   }
   const seen = new Set<string>()
-  const stack: string[] = []
-  const onStack = new Set<string>()
+  const path: string[] = []
+  const onPath = new Set<string>()
   const reported = new Set<string>()
   const dfs = (node: string) => {
     seen.add(node)
-    stack.push(node)
-    onStack.add(node)
+    path.push(node)
+    onPath.add(node)
     for (const next of edges.get(node) ?? []) {
-      if (onStack.has(next)) {
-        const cycle = [...stack.slice(stack.indexOf(next)), next]
+      if (onPath.has(next)) {
+        const cycle = [...path.slice(path.indexOf(next)), next]
         const key = [...cycle].sort().join("|")
         if (!reported.has(key)) {
           reported.add(key)
@@ -120,17 +154,36 @@ for (const m of a.modules.values()) {
         }
       } else if (!seen.has(next)) dfs(next)
     }
-    stack.pop()
-    onStack.delete(node)
+    path.pop()
+    onPath.delete(node)
   }
   for (const node of edges.keys()) if (!seen.has(node)) dfs(node)
+
+  return out
 }
 
-if (out.length === 0) {
-  console.log("design-check: lean. ✓")
-  process.exit(0)
+// Dependencies that are real but never statically imported (loaded by a peer /
+// side effect). Without this allow-list they'd false-positive as unused.
+const RUNTIME_ONLY = new Set(["@opentelemetry/sdk-trace-node", "@opentelemetry/resources"])
+
+export const unusedDeps = (imported: Set<string>, deps: string[], allow = RUNTIME_ONLY): Finding[] =>
+  deps
+    .filter((d) => !imported.has(d) && !allow.has(d))
+    .map((d) => ({ tag: "delete" as const, msg: `package.json: dependency "${d}" is never imported. Remove it.` }))
+
+if (import.meta.main) {
+  const files: { path: string; source: string }[] = []
+  for await (const p of new Bun.Glob("src/**/*.{ts,tsx}").scan(".")) files.push({ path: p, source: await Bun.file(p).text() })
+  const a = buildAnalyzer(files)
+  const pkg = await Bun.file("package.json").json()
+  const out = [...analyze(a), ...unusedDeps(importedRoots(a), Object.keys(pkg.dependencies ?? {}))]
+
+  if (out.length === 0) {
+    console.log("design-check: lean. ✓")
+    process.exit(0)
+  }
+  const order = { delete: 0, native: 1, cycle: 2, shrink: 3, yagni: 4 }
+  for (const f of out.sort((x, y) => order[x.tag] - order[y.tag])) console.error(`  ${f.tag}: ${f.msg}`)
+  console.error(`\ndesign-check: ${out.length} finding(s).`)
+  process.exit(1)
 }
-const order = { delete: 0, cycle: 1, shrink: 2, yagni: 3 }
-for (const f of out.sort((x, y) => order[x.tag] - order[y.tag])) console.error(`  ${f.tag}: ${f.msg}`)
-console.error(`\ndesign-check: ${out.length} finding(s).`)
-process.exit(1)

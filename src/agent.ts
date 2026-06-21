@@ -192,6 +192,19 @@ const readResponseId = (gen: typeof chat): string | undefined => {
   return last?.remoteId ?? undefined
 }
 
+export type TurnResult = { reply: string; tokens?: number; finishReason?: string; budget: boolean }
+
+// One in-flight AbortController per session (overwritten each turn). abortTurn()
+// lets the UI cancel a running turn: ax honors abortSignal in forward() and
+// throws AxAIServiceAbortedError, which surfaces as a normal turn failure.
+const turnAborters = new Map<string, AbortController>()
+export const abortTurn = (sessionId: string): boolean => {
+  const c = turnAborters.get(sessionId)
+  if (!c || c.signal.aborted) return false
+  c.abort()
+  return true
+}
+
 /**
  * Build a traced turn for a session. `chat.turn` (our Effect.fn span, kind=client,
  * gen_ai semconv) parents the ax gen_ai child; the whole thing parents the
@@ -220,6 +233,8 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       const traceContext = otelTrace.setSpan(otelContext.active(), otelSpan)
 
       lastFinishReason = undefined // reset the captureFetch latch for this turn
+      const aborter = new AbortController()
+      turnAborters.set(sessionId, aborter)
 
       yield* Effect.logInfo("turn.start").pipe(
         Effect.annotateLogs({ "session.id": sessionId, "message.chars": message.length }),
@@ -228,11 +243,12 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       // Make chat.turn the ACTIVE OTel context during forward so ax's tracer
       // (which reads context.active()) nests its gen_ai span under chat.turn.
       // stream:false -> no token streaming; we render step-by-step.
+      // abortSignal -> ax cancels the in-flight forward when the UI interrupts.
       const runForward = (gen: typeof chat, msg: string) =>
         Effect.tryPromise({
           try: () =>
             otelContext.with(traceContext, () =>
-              gen.forward(llm, { message: msg }, { mem, sessionId, tracer, traceContext, maxSteps: MAX_STEPS, stream: false }),
+              gen.forward(llm, { message: msg }, { mem, sessionId, tracer, traceContext, maxSteps: MAX_STEPS, stream: false, abortSignal: aborter.signal }),
             ),
           catch: (e) => new ChatError(e),
         })
@@ -297,7 +313,13 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
 
       yield* Metric.update(turnsTotal, 1)
       yield* Effect.logInfo("turn.done").pipe(Effect.annotateLogs({ "reply.chars": reply.length }))
-      return reply
+      const result: TurnResult = {
+        reply,
+        tokens: usage?.totalTokens,
+        finishReason: lastFinishReason,
+        budget: budgetExhausted,
+      }
+      return result
     },
     // Latency metric for the whole turn.
     (eff) => Effect.trackDuration(eff, turnDuration),
