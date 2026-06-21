@@ -1,28 +1,46 @@
 // opentui (React) chat, inline mode. Interactive, collapsible transcript:
 //   - each turn shows user + final reply; the middle steps (tools + narration)
 //     collapse by default. In-progress turns auto-expand so you watch it work.
-//   - per-tool rows expand to an explicit, tool-specific detail body.
+//   - per-tool rows expand to a tool-specific detail body (edits render a real
+//     <diff>); cheap reads/searches whose summary says it all get no expander.
 //   list view : ↑/↓ move, Enter open, n new, q quit
-//   chat view : type + Enter send · ↑/↓ move focus · Enter toggle (empty input)
-//               · click a ▸/▾ header to toggle · ← / Esc back to list
+//   chat view : type + Enter send · shift+Enter newline · ↑/↓ history (empty)
+//               · PgUp/PgDn/Home/End scroll · click a ▸/▾ to expand
+//               · Esc back (idle) / Esc-twice interrupt (busy) · select to copy
 import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/atom-react"
-import { createCliRenderer, SyntaxStyle } from "@opentui/core"
-import { createRoot, useKeyboard } from "@opentui/react"
+import { createCliRenderer, decodePasteBytes, SyntaxStyle } from "@opentui/core"
+import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useRef, useState } from "react"
-import { projectDocLoaded } from "./agent.ts"
-import { appAtom, busyAtom, type Msg, newSessionAtom, sendAtom, type SessionView } from "./atoms.ts"
-import { toolLabel, toolPreview, toolSummary } from "./toolui.ts"
+import { abortTurn, projectDocLoaded } from "./agent.ts"
+import { appAtom, busyAtom, type Msg, newSessionAtom, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
+import { copyToClipboard } from "./clipboard.ts"
+import { history } from "./history.ts"
+import { toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
 
 const projectDoc = projectDocLoaded
 const mdStyle = SyntaxStyle.create()
 
+// Enter submits, Shift+Enter inserts a newline (override textarea defaults, which
+// are Enter=newline / Cmd+Enter=submit).
+const inputKeys = [
+  { name: "return", action: "submit" },
+  { name: "return", shift: true, action: "newline" },
+] as any
+
 type ToolMsg = Extract<Msg, { kind: "tool" }>
-type Turn = { idx: number; user: string; steps: Msg[]; final: string | null }
-type Focusable = { kind: "turn"; idx: number } | { kind: "tool"; id: string }
+type Turn = { idx: number; user: string; steps: Msg[]; final: string | null; meta?: TurnMeta }
 
 const oneLine = (s: string, n = 90) => {
   const t = s.replace(/\s+/g, " ").trim()
   return t.length > n ? `${t.slice(0, n)}…` : t
+}
+
+const fmtMeta = (m: TurnMeta): string => {
+  const parts: string[] = [m.model.split("/").pop() ?? m.model, `${(m.ms / 1000).toFixed(1)}s`]
+  if (typeof m.tokens === "number") parts.push(m.tokens >= 1000 ? `${(m.tokens / 1000).toFixed(1)}k tok` : `${m.tokens} tok`)
+  if (m.finishReason && m.finishReason !== "stop") parts.push(m.finishReason)
+  if (m.budget) parts.push("budget")
+  return parts.join(" · ")
 }
 
 function toTurns(messages: readonly Msg[]): Turn[] {
@@ -36,6 +54,7 @@ function toTurns(messages: readonly Msg[]): Turn[] {
       const s = t.steps[i]!
       if (s.kind === "agent") {
         t.final = s.text
+        t.meta = s.meta
         t.steps = [...t.steps.slice(0, i), ...t.steps.slice(i + 1)]
         break
       }
@@ -57,65 +76,71 @@ function Spinner() {
   return <text fg="#ffd166">{`${frames[i % frames.length]} thinking…`}</text>
 }
 
-function ToolView({ m, expanded, focused, onToggle }: { m: ToolMsg; expanded: boolean; focused: boolean; onToggle: () => void }) {
+function ToolView({ m, expanded, cols, onToggle }: { m: ToolMsg; expanded: boolean; cols: number; onToggle: () => void }) {
   const running = m.status === "running"
-  const color = m.status === "error" ? "#f38ba8" : m.status === "ok" ? "#a6e3a1" : "#7f849c"
-  const mark = running ? "◌" : m.status === "error" ? "✗" : "⏺"
+  const isError = m.status === "error"
+  const color = isError ? "#f38ba8" : m.status === "ok" ? "#a6e3a1" : "#7f849c"
+  const mark = running ? "◌" : isError ? "✗" : toolIcon(m.name)
   const label = toolLabel(m.name, m.args)
-  const summary = running ? "running…" : toolSummary(m.name, m.result, m.status === "error")
-  const preview = expanded && !running ? toolPreview(m.name, m.args, m.result, m.status === "error") : []
+  const summary = running ? "running…" : toolSummary(m.name, m.result, isError)
+  const hasBody = !running && toolHasBody(m.name, m.result, isError)
+  const diff = expanded && hasBody ? toolDiff(m.name, m.args, isError) : null
+  const preview = expanded && hasBody && !diff ? toolPreview(m.name, m.args, m.result, isError, Math.max(20, cols - 10)) : []
   return (
-    <box flexDirection="column">
-      <text fg={color} onMouseDown={onToggle as any}>
+    <box flexDirection="column" style={{ marginTop: expanded && hasBody ? 1 : 0 }}>
+      <text fg={color} onMouseDown={(hasBody ? onToggle : undefined) as any}>
         {`    ${mark} `}
-        <span fg={focused ? "#ffd166" : "#cdd6f4"}>{label}</span>
+        <span fg="#cdd6f4">{label}</span>
         <span fg="#585b70">{`  ${summary}`}</span>
-        {!running ? <span fg="#585b70">{expanded ? "  ▾" : "  ▸"}</span> : <span> </span>}
+        {hasBody ? <span fg="#585b70">{expanded ? "  ▾" : "  ▸"}</span> : <span> </span>}
       </text>
-      {preview.map((p, i) => (
-        <text key={i} fg={p.tone === "add" ? "#a6e3a1" : p.tone === "del" ? "#f38ba8" : "#6c7086"}>
-          {`      ${p.tone === "add" ? "+" : p.tone === "del" ? "-" : "│"} ${oneLine(p.text, 100)}`}
-        </text>
-      ))}
+      {diff ? (
+        <box style={{ marginLeft: 6 }}>
+          <diff diff={diff.diff} view={cols > 120 ? "split" : "unified"} filetype={diff.filetype} showLineNumbers syntaxStyle={mdStyle} />
+        </box>
+      ) : (
+        preview.map((p, i) => (
+          <text key={i} fg={p.tone === "add" ? "#a6e3a1" : p.tone === "del" ? "#f38ba8" : "#6c7086"}>
+            {`      ${p.tone === "add" ? "+" : p.tone === "del" ? "-" : "│"} ${p.text}`}
+          </text>
+        ))
+      )}
     </box>
   )
 }
 
 function TurnView({
   t,
+  first,
   expanded,
   expTools,
-  focused,
+  cols,
   onToggleTurn,
   onToggleTool,
 }: {
   t: Turn
+  first: boolean
   expanded: boolean
   expTools: Set<string>
-  focused: Focusable | undefined
+  cols: number
   onToggleTurn: () => void
   onToggleTool: (id: string) => void
 }) {
-  const turnFocused = focused?.kind === "turn" && focused.idx === t.idx
   return (
-    <box flexDirection="column">
-      <text fg="#66aaff">{`› ${t.user}`}</text>
+    <box flexDirection="column" style={{ marginTop: first ? 0 : 1 }}>
+      <box border={["left"]} borderColor="#45475a" style={{ paddingLeft: 1 }}>
+        <text fg="#66aaff">{t.user}</text>
+      </box>
       {t.steps.length > 0 && (
         <box flexDirection="column">
-          <text fg={turnFocused ? "#ffd166" : "#7f849c"} onMouseDown={onToggleTurn as any}>
+          <text fg="#7f849c" onMouseDown={onToggleTurn as any}>
             {`  ${expanded ? "▾" : "▸"} ${t.steps.length} step${t.steps.length > 1 ? "s" : ""}`}
             {!expanded ? `   ${toolsUsed(t.steps)}` : ""}
           </text>
           {expanded &&
             t.steps.map((s, i) =>
               s.kind === "tool" ? (
-                <ToolView
-                  key={s.id}
-                  m={s}
-                  expanded={expTools.has(s.id)}
-                  focused={focused?.kind === "tool" && focused.id === s.id}
-                  onToggle={() => onToggleTool(s.id)}
-                />
+                <ToolView key={s.id} m={s} expanded={expTools.has(s.id)} cols={cols} onToggle={() => onToggleTool(s.id)} />
               ) : (
                 <text key={i} fg="#9399b2">{`    · ${oneLine(s.text)}`}</text>
               ),
@@ -123,9 +148,12 @@ function TurnView({
         </box>
       )}
       {t.final !== null ? (
-        <box flexDirection="row">
-          <text fg="#a6e3a1">{"⏺ "}</text>
-          <markdown content={t.final} syntaxStyle={mdStyle} />
+        <box flexDirection="column" style={{ marginTop: 1 }}>
+          <box flexDirection="row">
+            <text fg="#a6e3a1">{"⏺ "}</text>
+            <markdown content={t.final} syntaxStyle={mdStyle} />
+          </box>
+          {t.meta && <text fg="#585b70">{`  ${fmtMeta(t.meta)}`}</text>}
         </box>
       ) : (
         <Spinner />
@@ -160,31 +188,64 @@ function App() {
   const setApp = useAtomSet(appAtom)
   const newSession = useAtomSet(newSessionAtom)
   const [, send] = useAtom(sendAtom)
-  const [text, setText] = useState("")
-  const inputRef = useRef<any>(null)
+  const { width, height } = useTerminalDimensions()
+
+  const [text, setText] = useState("") // mirror of textarea content (for empty-detection)
+  const taRef = useRef<any>(null)
+  const scrollRef = useRef<any>(null)
 
   const [expTurns, setExpTurns] = useState<Set<number>>(new Set())
   const [expTools, setExpTools] = useState<Set<string>>(new Set())
-  const [focus, setFocus] = useState(0)
-  // reset collapse/focus when switching sessions
+  // prompt history cursor + the live draft stashed when we start recalling
+  const [histIdx, setHistIdx] = useState<number | null>(null)
+  const draftRef = useRef("")
+  // big-paste collapse: marker -> full text, expanded back at submit
+  const pastesRef = useRef<{ ph: string; text: string }[]>([])
+  // esc-to-interrupt arming + transient header note (copied / interrupt hint)
+  const [armed, setArmed] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+  const focusedRef = useRef(true)
+
   useEffect(() => {
     setExpTurns(new Set())
     setExpTools(new Set())
-    setFocus(0)
+    setHistIdx(null)
   }, [state.activeId])
+
+  // focus-gated attention: bell on turn finishing while the terminal is blurred
+  useFocus(() => void (focusedRef.current = true))
+  useBlur(() => void (focusedRef.current = false))
+  const prevBusy = useRef(busy)
+  useEffect(() => {
+    if (prevBusy.current && !busy && !focusedRef.current) {
+      try {
+        process.stdout.write("\x07")
+      } catch {
+        /* ignore */
+      }
+    }
+    prevBusy.current = busy
+  }, [busy])
+
+  // copy selected transcript text to clipboard (OSC52 + pbcopy), transient note
+  useSelectionHandler((sel: any) => {
+    try {
+      const t = sel?.getSelectedText?.() ?? ""
+      if (copyToClipboard(t)) flash("copied")
+    } catch {
+      /* ignore */
+    }
+  })
+
+  const flash = (msg: string) => {
+    setNote(msg)
+    setTimeout(() => setNote((n) => (n === msg ? null : n)), 2000)
+  }
 
   const active = state.sessions.find((s) => s.id === state.activeId) ?? null
   const inChat = state.view === "chat" && active !== null
   const turns = active ? toTurns(active.messages) : []
   const isExpanded = (t: Turn) => expTurns.has(t.idx) || t.final === null // in-progress auto-expands
-
-  const focusables: Focusable[] = []
-  for (const t of turns) {
-    if (t.steps.length > 0) focusables.push({ kind: "turn", idx: t.idx })
-    if (isExpanded(t)) for (const s of t.steps) if (s.kind === "tool") focusables.push({ kind: "tool", id: s.id })
-  }
-  const focusIdx = Math.min(focus, Math.max(0, focusables.length - 1))
-  const focused = focusables[focusIdx]
 
   const toggleTurn = (idx: number) =>
     setExpTurns((s) => {
@@ -199,6 +260,82 @@ function App() {
       return n
     })
 
+  const setInput = (v: string) => {
+    taRef.current?.setText(v)
+    setText(v)
+  }
+
+  const submit = () => {
+    let v = taRef.current?.plainText ?? text
+    for (const p of pastesRef.current) v = v.split(p.ph).join(p.text)
+    pastesRef.current = []
+    const t = v.trim()
+    setInput("")
+    setHistIdx(null)
+    draftRef.current = ""
+    if (t.length === 0) return
+    history.push(t)
+    send(t)
+  }
+
+  const onPaste = (event: any) => {
+    try {
+      const raw = decodePasteBytes(event.bytes).replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+      const big = raw.length > 150 || raw.split("\n").length >= 3
+      if (!big) return // let the textarea insert it normally
+      event.preventDefault?.()
+      const ph = `[Pasted ${raw.split("\n").length} lines]`
+      pastesRef.current.push({ ph, text: raw })
+      taRef.current?.insertText?.(ph)
+      setText(taRef.current?.plainText ?? ph)
+      flash("paste collapsed")
+    } catch {
+      /* fall back to default paste */
+    }
+  }
+
+  // ↑/↓ prompt history, only when the input is empty or we're mid-recall.
+  const histActive = () => histIdx !== null || text.trim() === ""
+  const recall = (dir: -1 | 1) => {
+    const items = history.all()
+    if (items.length === 0) return
+    if (dir === -1) {
+      if (histIdx === null) {
+        draftRef.current = text
+        const i = items.length - 1
+        setHistIdx(i)
+        setInput(items[i]!)
+      } else if (histIdx > 0) {
+        const i = histIdx - 1
+        setHistIdx(i)
+        setInput(items[i]!)
+      }
+    } else {
+      if (histIdx === null) return
+      if (histIdx >= items.length - 1) {
+        setHistIdx(null)
+        setInput(draftRef.current)
+      } else {
+        const i = histIdx + 1
+        setHistIdx(i)
+        setInput(items[i]!)
+      }
+    }
+  }
+
+  const scrollPage = (dir: -1 | 1 | "top" | "bottom") => {
+    const sb = scrollRef.current
+    if (!sb) return
+    const page = Math.max(1, (height || 24) - 6)
+    try {
+      if (dir === "top") sb.scrollTop = 0
+      else if (dir === "bottom") sb.scrollTop = sb.scrollHeight
+      else sb.scrollTop = Math.max(0, sb.scrollTop + dir * page)
+    } catch {
+      /* ignore */
+    }
+  }
+
   const onListKey = (k: any) => {
     if (k.name === "q" || k.name === "escape") return process.exit(0)
     if (k.name === "n") return void newSession()
@@ -210,17 +347,31 @@ function App() {
       if (target) setApp((s) => ({ ...s, view: "chat", activeId: target.id }))
     }
   }
+
   const onChatKey = (k: any) => {
-    const typing = text.length > 0
-    if (k.name === "escape" || (!typing && k.name === "left")) {
-      setText("")
+    if (k.name === "escape") {
+      if (busy) {
+        if (armed && state.activeId) {
+          abortTurn(state.activeId)
+          setArmed(false)
+        } else {
+          setArmed(true)
+          setTimeout(() => setArmed(false), 5000)
+        }
+        return
+      }
+      setInput("")
       return setApp((s) => ({ ...s, view: "list" }))
     }
-    if (typing) return // input handles typing + submit
-    if (k.name === "up") return setFocus((f) => Math.max(0, f - 1))
-    if (k.name === "down") return setFocus((f) => Math.min(focusables.length - 1, f + 1))
-    if (k.name === "return" && focused) (focused.kind === "turn" ? toggleTurn(focused.idx) : toggleTool(focused.id))
+    if (k.name === "pageup") return scrollPage(-1)
+    if (k.name === "pagedown") return scrollPage(1)
+    if (k.name === "home" && text.trim() === "") return scrollPage("top")
+    if (k.name === "end" && text.trim() === "") return scrollPage("bottom")
+    if (k.name === "up" && histActive()) return recall(-1)
+    if (k.name === "down" && histActive()) return recall(1)
+    // everything else (typing, cursor moves, submit) is handled by the textarea
   }
+
   useKeyboard((k) => {
     if (k.ctrl && k.name === "c") return process.exit(0)
     return state.view === "list" ? onListKey(k) : onChatKey(k)
@@ -234,46 +385,44 @@ function App() {
     )
   }
 
+  const hint = note
+    ? note
+    : busy
+      ? armed
+        ? "esc again to interrupt"
+        : "working… · esc to interrupt"
+      : `${active.title} · ↑↓ history · PgUp/PgDn scroll · click to expand · esc back${projectDoc ? ` · ${projectDoc}` : ""}`
+
   return (
     <box flexDirection="column" style={{ height: "100%" }}>
-      <text fg="#888888" style={{ paddingLeft: 1, paddingTop: 1 }}>
-        {`${active.title} · ↑↓ focus · enter/click toggle · ← back${projectDoc ? ` · ${projectDoc} loaded` : ""}`}
+      <text fg={armed ? "#f38ba8" : note ? "#a6e3a1" : "#888888"} style={{ paddingLeft: 1, paddingTop: 1 }}>
+        {hint}
       </text>
-      <scrollbox style={{ flexGrow: 1, paddingLeft: 1, paddingRight: 1 }} stickyScroll stickyStart="bottom" scrollY>
-        {turns.map((t) => (
+      <scrollbox ref={scrollRef} style={{ flexGrow: 1, paddingLeft: 1, paddingRight: 1 }} stickyScroll stickyStart="bottom" scrollY>
+        {turns.map((t, i) => (
           <TurnView
             key={t.idx}
             t={t}
+            first={i === 0}
             expanded={isExpanded(t)}
             expTools={expTools}
-            focused={focused}
-            onToggleTurn={() => {
-              setFocus(focusables.findIndex((f) => f.kind === "turn" && f.idx === t.idx))
-              toggleTurn(t.idx)
-            }}
-            onToggleTool={(id) => {
-              setFocus(focusables.findIndex((f) => f.kind === "tool" && f.id === id))
-              toggleTool(id)
-            }}
+            cols={width || 80}
+            onToggleTurn={() => toggleTurn(t.idx)}
+            onToggleTool={(id) => toggleTool(id)}
           />
         ))}
       </scrollbox>
       <box style={{ paddingLeft: 1, paddingRight: 1, paddingBottom: 1 }}>
-        <input
-          ref={inputRef}
-          value={text}
-          onInput={setText}
-          onSubmit={
-            ((v: string) => {
-              send(v)
-              setText("")
-              // ponytail: opentui treats `value` as initial-only -> imperative reset.
-              // Ceiling: bypasses React state for clear. Upgrade: opentui controlled value.
-              if (inputRef.current) inputRef.current.value = ""
-            }) as any
-          }
+        <textarea
+          ref={taRef}
+          minHeight={1}
+          maxHeight={8}
+          keyBindings={inputKeys}
+          onContentChange={() => setText(taRef.current?.plainText ?? "")}
+          onSubmit={submit as any}
+          onPaste={onPaste as any}
           focused
-          placeholder="message kimi (← back when empty)"
+          placeholder="message kimi (shift+enter newline · esc back when empty)"
         />
       </box>
     </box>

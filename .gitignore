@@ -3,3 +3,5 @@ node_modules/
 *.log
 .motel-data/
 artifacts
+
+.ax2_history.jsonl
