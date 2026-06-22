@@ -35,10 +35,13 @@ const oneLine = (s: string, n = 90) => {
   return t.length > n ? `${t.slice(0, n)}…` : t
 }
 
+// COST-METER token formatter: "318k tok" / "742 tok" (shared by turn meta + orch tree).
+const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k tok` : `${n} tok`)
+
 // Per-turn provenance only (model lives in the status line, not repeated here).
 const fmtMeta = (m: TurnMeta): string => {
   const parts: string[] = [`${(m.ms / 1000).toFixed(1)}s`]
-  if (typeof m.tokens === "number") parts.push(m.tokens >= 1000 ? `${(m.tokens / 1000).toFixed(1)}k tok` : `${m.tokens} tok`)
+  if (typeof m.tokens === "number") parts.push(fmtTokens(m.tokens))
   if (m.finishReason && m.finishReason !== "stop") parts.push(m.finishReason)
   if (m.budget) parts.push("budget")
   return parts.join(" · ")
@@ -232,6 +235,14 @@ function TurnView({
 const nodeGlyph = (s: OrchNode["status"]) => (s === "running" ? "◌" : s === "error" ? "✗" : "✓")
 const nodeColor = (s: OrchNode["status"]) => (s === "error" ? "#f38ba8" : s === "done" ? "#a6e3a1" : "#7f849c")
 
+// COST-METER per-node token badge — its own component so the guard/format logic lives
+// outside NodeView (keeps NodeView under the cyclomatic budget). Renders nothing for an
+// unsettled / untracked node.
+function NodeTokens({ tokens, hot }: { tokens: number | undefined; hot: boolean }) {
+  if (typeof tokens !== "number" || tokens <= 0) return null
+  return <span fg={hot ? "#7f849c" : "#585b70"}>{`  ${fmtTokens(tokens)}`}</span>
+}
+
 function NodeView({
   id,
   nodes,
@@ -268,6 +279,7 @@ function NodeView({
         <span fg={hot ? "#ffffff" : color}>{`${nodeGlyph(n.status)} `}</span>
         <span fg={hot ? "#ffffff" : "#cdd6f4"}>{n.label}</span>
         {summary ? <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${oneLine(summary)}`}</span> : null}
+        <NodeTokens tokens={n.tokens} hot={hot} />
         {hasKids ? <span fg={hot ? "#cdd6f4" : "#585b70"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
       </text>
       {expanded && hasKids && (
@@ -627,7 +639,13 @@ function App() {
         ))}
         {orch && orch.roots.length > 0 && (
           <box flexDirection="column" style={{ marginTop: 1, paddingLeft: 1 }}>
-            <text fg="#585b70">orchestration</text>
+            <text fg="#585b70">
+              orchestration
+              {/* COST-METER footer: live run total over every node's tokens. */}
+              {orch.totalTokens > 0 ? (
+                <span fg="#6c7086">{`  ·  ${orch.roots.length} ${orch.roots.length === 1 ? "tree" : "trees"} · ${fmtTokens(orch.totalTokens)}`}</span>
+              ) : null}
+            </text>
             <box flexDirection="column" style={{ paddingLeft: INDENT }}>
               {orch.roots.map((rid) => (
                 <NodeView

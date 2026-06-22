@@ -6,7 +6,7 @@ export type Activity =
   | { readonly kind: "text"; readonly text: string } // agent narration for a step
   | { readonly kind: "tool"; readonly id: string; readonly name: string; readonly args: string } // call, in-flight
   | { readonly kind: "result"; readonly id: string; readonly result: string; readonly isError: boolean } // updates the call in place
-  | { readonly kind: "node"; readonly nodeId: string; readonly event: string; readonly parentId?: string | undefined; readonly detail?: string | undefined } // orchestration node lifecycle (orch.emit)
+  | { readonly kind: "node"; readonly nodeId: string; readonly event: string; readonly parentId?: string | undefined; readonly detail?: string | undefined; readonly tokens?: number | undefined } // orchestration node lifecycle (orch.emit) — `tokens` is the cost-meter per-node usage on a done event
 
 // ponytail: single global sink — assumes one in-flight turn (the UI gates this).
 // Ceiling: concurrent turns would interleave events. Upgrade: Effect PubSub/Queue scoped per turn.

@@ -91,6 +91,24 @@ export const readUsageOf = (gen: unknown): BudgetUsage | undefined => {
   return (last as { tokens?: BudgetUsage })?.tokens ?? (last as BudgetUsage | undefined)
 }
 
+// COST-METER: ask the AI service to estimate USD cost for a token total, when ax exposes
+// it. getEstimatedCost(modelUsage) (AxAIService, node_modules/@ax-llm/ax/index.d.ts:1352)
+// returns a per-1K-token estimate from the provider's model-info table; CF-Kimi has no
+// price entry, so this is 0 there — we return undefined for 0/NaN so the UI shows nothing
+// rather than "$0.00". `tokens` is the run total (the Budget's spent()); we synthesize a
+// minimal AxModelUsage (only `tokens.totalTokens` is read by the estimator). Real ax type,
+// no `any`: the estimator tolerates a partial usage with just the totals.
+export const estimatedCostOf = (tokens: number): number | undefined => {
+  if (!Number.isFinite(tokens) || tokens <= 0) return undefined
+  try {
+    const usage = { ai: "openai", model: MODEL, tokens: { promptTokens: 0, completionTokens: tokens, totalTokens: tokens } }
+    const cost = llm.getEstimatedCost(usage)
+    return Number.isFinite(cost) && cost > 0 ? cost : undefined
+  } catch {
+    return undefined
+  }
+}
+
 // Tool-call iteration ceiling + per-orchestration token ceiling, so every
 // orchestration driver builds LeafOpts/Budget with the same limits as turn().
 export const limits = { maxSteps: MAX_STEPS, tokenBudget: TOKEN_BUDGET } as const

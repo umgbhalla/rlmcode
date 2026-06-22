@@ -39,8 +39,13 @@ export type OrchNode = {
   readonly phase: string
   readonly status: "running" | "done" | "error"
   readonly result?: string | undefined
+  // COST-METER: this node's OWN token usage (from its done NodeEvent). undefined until
+  // the node settles (or if it ran without budget/usage tracking).
+  readonly tokens?: number | undefined
 }
-export type OrchTree = { readonly nodes: Readonly<Record<string, OrchNode>>; readonly roots: readonly string[] }
+// COST-METER: `totalTokens` is the live RUN TOTAL — the sum of every node's `tokens` as
+// done events land. Rendered in the tree footer; never decreases (recompute from nodes).
+export type OrchTree = { readonly nodes: Readonly<Record<string, OrchNode>>; readonly roots: readonly string[]; readonly totalTokens: number }
 export type SessionView = { readonly id: string; readonly title: string; readonly messages: readonly Msg[]; readonly orch?: OrchTree }
 type View = "list" | "chat"
 export type AppState = {
@@ -123,24 +128,32 @@ const installSink = (
               phase: a.detail ?? "",
               status: prev?.status ?? "running",
               ...(prev?.result !== undefined ? { result: prev.result } : {}),
+              ...(prev?.tokens !== undefined ? { tokens: prev.tokens } : {}),
             }
             const isRoot = parentId === undefined
             return {
               nodes: { ...t.nodes, [a.nodeId]: node },
               roots: isRoot && !t.roots.includes(a.nodeId) ? [...t.roots, a.nodeId] : t.roots,
+              totalTokens: t.totalTokens,
             }
           }
           // delta/done/error update an existing node in place; ignore unknown ids.
           if (prev === undefined) return t
           const parentPatch = parentId !== undefined ? { parentId } : {}
           const resultPatch = a.detail !== undefined ? { result: a.detail } : {}
+          // COST-METER: a done event carries this node's per-node tokens — fold it onto the
+          // node, then recompute the run total as the sum of every node's tokens (idempotent:
+          // a re-emitted done overwrites the same node's tokens, never double-counts).
+          const tokensPatch = a.event === "done" && a.tokens !== undefined ? { tokens: a.tokens } : {}
           const next: OrchNode =
             a.event === "done"
-              ? { ...prev, ...parentPatch, status: "done", ...resultPatch }
+              ? { ...prev, ...parentPatch, status: "done", ...resultPatch, ...tokensPatch }
               : a.event === "error"
                 ? { ...prev, ...parentPatch, status: "error", ...resultPatch }
                 : { ...prev, ...parentPatch } // delta: streaming chunk, no status change (tree shows phase only)
-          return { ...t, nodes: { ...t.nodes, [a.nodeId]: next } }
+          const nodes = { ...t.nodes, [a.nodeId]: next }
+          const totalTokens = Object.values(nodes).reduce((sum, n) => sum + (n.tokens ?? 0), 0)
+          return { ...t, nodes, totalTokens }
         })
         break
     }
@@ -168,7 +181,7 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
       const cur = get(appAtom)
       get.set(appAtom, {
         ...cur,
-        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, orch: fn(x.orch ?? { nodes: {}, roots: [] }) } : x)),
+        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, orch: fn(x.orch ?? { nodes: {}, roots: [], totalTokens: 0 }) } : x)),
       })
     }
 
@@ -235,7 +248,7 @@ export const orchestrateAtom = appRuntime.fn((message: string, get) =>
       const cur = get(appAtom)
       get.set(appAtom, {
         ...cur,
-        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, orch: fn(x.orch ?? { nodes: {}, roots: [] }) } : x)),
+        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, orch: fn(x.orch ?? { nodes: {}, roots: [], totalTokens: 0 }) } : x)),
       })
     }
 
@@ -297,7 +310,7 @@ export const runScriptAtom = appRuntime.fn((payload: string, get) =>
       const cur = get(appAtom)
       get.set(appAtom, {
         ...cur,
-        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, orch: fn(x.orch ?? { nodes: {}, roots: [] }) } : x)),
+        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, orch: fn(x.orch ?? { nodes: {}, roots: [], totalTokens: 0 }) } : x)),
       })
     }
 

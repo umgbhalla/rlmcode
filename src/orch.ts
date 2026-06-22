@@ -46,7 +46,10 @@ export type LeafOpts = {
 export type NodeEvent =
   | { readonly type: "start"; readonly nodeId: string; readonly parentId?: string | undefined; readonly phase: string }
   | { readonly type: "delta"; readonly nodeId: string; readonly chunk: string }
-  | { readonly type: "done"; readonly nodeId: string; readonly result: unknown }
+  // COST-METER: `tokens` is this node's OWN token usage (the leaf forward's totalTokens,
+  // derived by tokensOf() from the usage triple). Optional — a node that didn't charge a
+  // budget (no usageOf) omits it. atoms folds it into the OrchTree per-node + run total.
+  | { readonly type: "done"; readonly nodeId: string; readonly result: unknown; readonly tokens?: number | undefined }
   | { readonly type: "error"; readonly nodeId: string; readonly cause: unknown }
 
 export type EmitOpts = { readonly spanId?: string }
@@ -91,7 +94,9 @@ export class BudgetExhaustedError extends Error {
 }
 
 // Derive a token count from a usage triple: prefer totalTokens, else sum the parts.
-const tokensOf = (u: BudgetUsage | undefined): number =>
+// Exported for the COST-METER: recipes pass a node's usage through this to stamp the
+// per-node token count on its done event, and the headless test drives fake usage here.
+export const tokensOf = (u: BudgetUsage | undefined): number =>
   u === undefined ? 0 : typeof u.totalTokens === "number" ? u.totalTokens : (u.promptTokens ?? 0) + (u.completionTokens ?? 0)
 
 // 1. node — the ONLY thing that calls ax. Curried so opts bind once, then (ai,input)
@@ -147,7 +152,7 @@ export const emit = (event: NodeEvent, _opts?: EmitOpts): Effect.Effect<void> =>
       event.type === "delta"
         ? { kind: "node", nodeId: event.nodeId, event: "delta", parentId: undefined, detail: event.chunk }
         : event.type === "done"
-          ? { kind: "node", nodeId: event.nodeId, event: "done", parentId: undefined, detail: clip(event.result) }
+          ? { kind: "node", nodeId: event.nodeId, event: "done", parentId: undefined, detail: clip(event.result), tokens: event.tokens }
           : event.type === "error"
             ? { kind: "node", nodeId: event.nodeId, event: "error", parentId: undefined, detail: clip(event.cause) }
             : { kind: "node", nodeId: event.nodeId, event: "start", parentId: event.parentId, detail: event.phase }
@@ -161,7 +166,7 @@ export const emit = (event: NodeEvent, _opts?: EmitOpts): Effect.Effect<void> =>
         "orch.node.id": event.nodeId,
         ...(event.type === "start" ? { "orch.node.parent_id": event.parentId ?? "", "orch.node.phase": event.phase } : {}),
         ...(event.type === "delta" ? { "orch.node.chunk": event.chunk } : {}),
-        ...(event.type === "done" ? { "orch.node.result": clip(event.result) } : {}),
+        ...(event.type === "done" ? { "orch.node.result": clip(event.result), ...(event.tokens !== undefined ? { "orch.node.tokens": event.tokens } : {}) } : {}),
         ...(event.type === "error" ? { "orch.node.cause": clip(event.cause) } : {}),
       })
     }

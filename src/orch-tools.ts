@@ -34,7 +34,7 @@
 // Effect boundary is needed here; we read the ambient tracer/context synchronously.
 import { ax, AxMemory, type AxAIService, type AxFunction, type AxGen } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { BASE_PROMPT, limits, llm, onEvent, readUsageOf } from "./runtime.ts"
+import { BASE_PROMPT, estimatedCostOf, limits, llm, onEvent, readUsageOf } from "./runtime.ts"
 import { adversarialVerify, finalizeOnMaxSteps, judge, loopUntilDry, MAX_CONCURRENCY, parallelLimit, runNode } from "./orch-recipes.ts"
 import { allocate, type Budget, BudgetExhaustedError, type LeafOpts } from "./orch.ts"
 import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
@@ -77,6 +77,17 @@ const STRATEGIES = ["parallel", "judge", "verify", "best_of_n", "plan"] as const
 type Strategy = (typeof STRATEGIES)[number]
 
 const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
+
+// COST-METER: a compact usage footer the orchestrate tool appends to its returned reply —
+// "… · 4 branches · 318k tok" (+ " · ~$0.0123" when ax has a price for the model). `tokens`
+// is the sub-run's TOTAL spend (budget.spent()); branches is the surviving branch count.
+const fmtTok = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k tok` : `${n} tok`)
+const costMeterSummary = (branches: number, tokens: number): string => {
+  const parts = [`${branches} ${branches === 1 ? "branch" : "branches"}`, fmtTok(tokens)]
+  const cost = estimatedCostOf(tokens)
+  if (cost !== undefined) parts.push(`~$${cost.toFixed(4)}`)
+  return parts.join(" · ")
+}
 
 // Pull a usable abortSignal out of extra, or fall back to a never-aborted one so a
 // missing signal never crashes the handler.
@@ -392,7 +403,10 @@ const orchestrateTool: AxFunction = {
       const out = await otelContext.with(otelContext.active(), () =>
         runOrchestration({ ai, strategy, task: overall, subtasks, branches, optsFor, budget, rootId }),
       )
-      return clip(out.reply)
+      // COST-METER: append a usage footer (… · N branches · Xk tok [· ~$cost]) so the
+      // model — and whoever reads the tool result — sees what the fan-out actually cost.
+      const spent = await budget.spent()
+      return clip(`${out.reply}\n\n· ${costMeterSummary(out.branches, spent)}`)
     } catch (e) {
       // BUDGET ceiling (guard 2): the soft budget is ADVISORY (never throws — a completed
       // node is always returned, see runOrchestration/runNode). So this only fires for a

@@ -7,7 +7,7 @@
 // core `node` prim) bracketed by its start→done|error lifecycle events. leaf/agent/
 // worker/task/job/unit/runner are forbidden as names for the unit.
 import type { AxAIService, AxGen, AxGenIn, AxGenOut, AxStepHooks } from "@ax-llm/ax"
-import { type Budget, type BudgetUsage, node, type LeafOpts, type NodeEvent, pipeline } from "./orch.ts"
+import { type Budget, type BudgetUsage, node, type LeafOpts, type NodeEvent, pipeline, tokensOf } from "./orch.ts"
 import { resilientNode } from "./orch-resilience.ts"
 // Re-export the resilience surface so callers/tests keep a single recipe import site.
 export { LEAF_TIMEOUT_MS, NodeTimeoutError, resilientNode, withRetry, withTimeout } from "./orch-resilience.ts"
@@ -185,11 +185,15 @@ export const runNode = async <I extends AxGenIn, O extends AxGenOut>(
     // never throws for the soft line, so the node result below is ALWAYS returned. When
     // spend crosses the soft ceiling we emit a delta nudge (visible in the tree/span) but
     // do NOT discard the node — a runaway is bounded by the hard ceiling + maxSteps.
+    // COST-METER: read this node's usage ONCE — charge the (advisory) budget AND stamp the
+    // per-node token count on the done event so the OrchTree can show it + sum a run total.
+    let nodeTokens: number | undefined
+    if (usageOf !== undefined) nodeTokens = tokensOf(usageOf(gen))
     if (budget !== undefined) {
       budget.charge(usageOf?.(gen))
       if (budget.overSoft()) onEvent({ type: "delta", nodeId, chunk: "⚠ over soft token budget (advisory — continuing)" })
     }
-    onEvent({ type: "done", nodeId, result })
+    onEvent({ type: "done", nodeId, result, tokens: nodeTokens })
     return result
   } catch (cause) {
     onEvent({ type: "error", nodeId, cause })
@@ -374,11 +378,14 @@ export const structuredPipeline = async (
     onEvent({ type: "start", nodeId, parentId: rootId, phase })
     try {
       const out = await node(gen, opts)(ai, prev as AxGenIn)
+      // COST-METER: stamp this stage's per-node tokens on its done event (same as runNode).
+      let stageTokens: number | undefined
+      if (usageOf !== undefined) stageTokens = tokensOf(usageOf(gen))
       if (budget !== undefined) {
         budget.charge(usageOf?.(gen))
         if (budget.overSoft()) onEvent({ type: "delta", nodeId, chunk: "⚠ over soft token budget (advisory — continuing)" })
       }
-      onEvent({ type: "done", nodeId, result: out })
+      onEvent({ type: "done", nodeId, result: out, tokens: stageTokens })
       return out
     } catch (cause) {
       onEvent({ type: "error", nodeId, cause })
