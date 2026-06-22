@@ -5,3 +5,6 @@ node_modules/
 artifacts
 
 .ax2_history.jsonl
+
+# background-agent git worktrees (transient)
+.claude/worktrees/
