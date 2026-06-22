@@ -103,7 +103,7 @@ const boundary = (sessionId: string, signal: AbortSignal, rootId: string) => {
 // prompt. A leaf is one level deep: it canNOT orchestrate (BASE_TOOLS only, structural).
 const LEAF_TOOL_SCOPE = [
   "Your tools: glob (find files by pattern), grep (search file contents), read_file (read a known path),",
-  "write_file / edit_file (modify files), bash (run real commands).",
+  "write_file / edit_file (modify files), bash (run real commands), web_fetch (fetch a URL).",
   "Prefer glob/grep to LOCATE before reading; read_file before you edit_file; run real bash commands to VERIFY.",
   "You are a single-level sub-agent: do the task end-to-end yourself — you canNOT orchestrate or spawn more sub-agents.",
 ].join(" ")
