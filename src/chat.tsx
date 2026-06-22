@@ -166,8 +166,15 @@ function ToolView({ m, expanded, focused, cols, frame, onToggle }: { m: ToolMsg;
   const open = expanded && hasBody
   const diff = open ? toolDiff(m.name, m.args, isError) : null
   const preview = open && !diff ? toolPreview(m.name, m.args, m.result, isError, Math.max(20, cols - 10)) : []
+  // ERROR CARD (P1): a failed tool gets a RED left-border card (not a dim one-liner) so a
+  // failure is unmissable in scrollback. Healthy tools render flush as before.
   return (
-    <box flexDirection="column" style={{ marginTop: open ? 1 : 0 }}>
+    <box
+      flexDirection="column"
+      border={isError ? ["left"] : undefined}
+      borderColor={isError ? "#f38ba8" : undefined}
+      style={{ marginTop: open ? 1 : 0, ...(isError ? { paddingLeft: 1 } : {}) }}
+    >
       <ToolHeader m={m} expanded={expanded} hasBody={hasBody} focused={focused} frame={frame} onToggle={onToggle} />
       {diff ? (
         <box style={{ paddingLeft: INDENT, paddingTop: 1 }}>
