@@ -5,9 +5,9 @@
 // attributes on our span. Metrics + correlated logs come along automatically.
 import { ax, type AxAIService, type AxFunction, type AxGen, type AxLoggerFunction, AxMemory } from "@ax-llm/ax"
 import { existsSync, readFileSync } from "node:fs"
-import { liveLogger } from "./activity.ts"
+import { emitActivity, liveLogger } from "./activity.ts"
 import { allocate, BudgetExhaustedError, type BudgetUsage } from "./orch.ts"
-import { finalizeOnMaxSteps, runNode } from "./orch-recipes.ts"
+import { finalizeOnMaxSteps } from "./orch-recipes.ts"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import * as Cause from "effect/Cause"
@@ -319,40 +319,28 @@ export const createAgent = (config: AxAgentConfig) => {
       const runForward = (msg: string) =>
         Effect.tryPromise({
           try: () =>
-            otelContext.with(traceContext, () =>
-              // runNode() brackets the node in start→done|error node events; the opts
-              // bag is threaded through unchanged (behavior-identical to a bare node).
-              runNode(
-                {
-                  nodeId: `turn:${sessionId}`,
-                  gen: chat,
-                  opts: {
-                    mem,
-                    sessionId,
-                    tracer,
-                    traceContext,
-                    maxSteps,
-                    // STREAM: ax consumes the stream INTERNALLY (forward() still resolves with the
-                    // authoritative final result) and fires the per-chunk LOGGER, which the activity
-                    // bus turns into replyDelta/thinkingDelta → reply + reasoning render live.
-                    // sendAtom reconciles to the resolved res.reply at turn end, so a non-streaming
-                    // provider just shows the reply at the end.
-                    stream: true,
-                    abortSignal: aborter.signal,
-                    stepHooks,
-                    // PER-TURN finish-reason capture: skim choices[0].finish_reason off a
-                    // clone into turnCtx (no shared module latch). ax accepts a per-call
-                    // fetch (AxProgramForwardOptions extends AxAIServiceOptions.fetch?).
-                    fetch: makeCaptureFetch(turnCtx),
-                  },
-                  onEvent,
-                  budget,
-                  usageOf,
-                },
-                service,
-                { message: msg },
-              ),
-            ),
+            otelContext.with(traceContext, async () => {
+              // LIVE STREAM: drain ax's streamingForward generator. PROVEN (scripts probe): plain
+              // forward(stream:true) collapses to ONE ChatResponseStreamingDoneResult (a single
+              // dump, nothing live) — only streamingForward yields per-chunk deltas. ax emits the
+              // reasoning first (delta.thought) then the answer (delta.reply), both INCREMENTAL, so
+              // we append each to the activity bus → atoms grows the in-flight message → the dim-
+              // italic thinking + the reply render token-by-token. Tools still render via liveLogger
+              // (FunctionResults). stepHooks (graceful max-steps) + abortSignal ride the same opts.
+              const opts = { mem, sessionId, tracer, traceContext, maxSteps, stream: true, abortSignal: aborter.signal, stepHooks, fetch: makeCaptureFetch(turnCtx) }
+              let reply = ""
+              for await (const d of chat.streamingForward(service, { message: msg }, opts as Parameters<typeof chat.streamingForward>[2])) {
+                const delta = (d as { delta?: { reply?: string; thought?: string } }).delta ?? {}
+                if (delta.thought) emitActivity({ kind: "thinkingDelta", text: delta.thought })
+                if (delta.reply) {
+                  reply += delta.reply
+                  emitActivity({ kind: "replyDelta", text: delta.reply })
+                }
+              }
+              // ADVISORY budget charge (runNode used to do this; the streaming drain bypasses it).
+              budget.charge(usageOf(chat))
+              return { reply }
+            }),
           catch: (e) => new ChatError(e),
         })
 
@@ -493,7 +481,7 @@ export type AxAgentSDK = ReturnType<typeof createAgent>
 // imports nothing from this module, so the seam introduces no init cycle.
 export const defaultAgent: AxAgentSDK =
   process.env.AX2_MOCK === "1"
-    ? createAgent({ ai: makeMockAI(), model: MOCK_MODEL, tools: [...BASE_TOOLS, MOCK_ORCH_TOOL] })
+    ? createAgent({ ai: makeMockAI(process.env.AX2_MOCK_STREAM === "1"), model: MOCK_MODEL, tools: [...BASE_TOOLS, MOCK_ORCH_TOOL] })
     : createAgent({ ai: llm, model: MODEL })
 export const turn = defaultAgent.turn
 export const abortTurn = defaultAgent.abortTurn

@@ -166,7 +166,7 @@ const installSink = (
   const grow = (m: readonly Msg[], field: "reply" | "thinking", text: string): readonly Msg[] => {
     const last = m[m.length - 1]
     if (last?.kind === "agent" && last.streaming === true) {
-      const next: Msg = field === "reply" ? { ...last, text: last.text + text } : { ...last, thinking: text }
+      const next: Msg = field === "reply" ? { ...last, text: last.text + text } : { ...last, thinking: (last.thinking ?? "") + text }
       return [...m.slice(0, -1), next]
     }
     const fresh: Msg = field === "reply" ? { kind: "agent", text, streaming: true } : { kind: "agent", text: "", thinking: text, streaming: true }

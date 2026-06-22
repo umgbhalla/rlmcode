@@ -55,40 +55,22 @@ const argStr = (p: unknown) => (typeof p === "string" ? p : JSON.stringify(p ?? 
 const emitFromLog = (m: { name?: string; value?: unknown }, nodeId?: string) => {
   type Call = { id: string; function: { name: string; params?: string | object } }
   type StepResult = { content?: string; functionCalls?: ReadonlyArray<Call>; thought?: string }
-  // `streamReply` true only on the NON-streaming path (ChatResponseResults fires ONCE with the
-  // full content). On the streaming path the reply is built from per-chunk `delta` (below), so
-  // we must NOT also emit the full content (that would duplicate it).
-  const emitStep = (results: ReadonlyArray<StepResult>, streamReply: boolean) => {
+  // The streamed reply + reasoning come from turn()'s streamingForward DRAIN (agent.ts) — the
+  // ONLY live path (plain forward collapses to one done-result). Here we only surface step
+  // narration + tool calls; the logger's once-at-end results never feed the reply/thinking.
+  const emitStep = (results: ReadonlyArray<StepResult>) => {
     for (const r of results) {
       const calls = r.functionCalls ?? []
-      // MAIN turn only (nodeId undefined): reasoning_content → thinkingDelta (atoms REPLACES with
-      // the latest cumulative thought); the final step's full content → replyDelta (append once).
-      if (nodeId === undefined && r.thought && r.thought.trim()) emitActivity({ kind: "thinkingDelta", text: r.thought })
-      if (streamReply && nodeId === undefined && calls.length === 0 && r.content) emitActivity({ kind: "replyDelta", text: r.content })
-      // narration only for intermediate steps (steps that also call tools); the final
-      // step's text is the reply, reconciled once by the boundary (sendAtom / orch result).
       if (calls.length > 0 && r.content && r.content.trim()) emitActivity({ kind: "text", text: r.content.trim() })
       for (const fc of calls) emitActivity({ kind: "tool", id: fc.id, name: fc.function.name, args: argStr(fc.function.params), nodeId })
     }
   }
   switch (m.name) {
     case "ChatResponseResults":
-      emitStep(m.value as StepResult[], true)
+      emitStep(m.value as StepResult[])
       break
-    // LIVE (stream:true): ax fires THIS per chunk. value.delta is the INCREMENTAL reply piece
-    // (append); value.thought is the cumulative reasoning so far (replace). THIS is what makes
-    // the reply + thinking render token-by-token — the …DoneResult below only fires once at end.
-    case "ChatResponseStreamingResult": {
-      const v = m.value as StepResult & { delta?: string }
-      if (nodeId === undefined && v.thought && v.thought.trim()) emitActivity({ kind: "thinkingDelta", text: v.thought })
-      const piece = v.delta ?? v.content
-      if (nodeId === undefined && (v.functionCalls?.length ?? 0) === 0 && piece) emitActivity({ kind: "replyDelta", text: piece })
-      break
-    }
     case "ChatResponseStreamingDoneResult":
-      // Reply already streamed via the per-chunk deltas (and sendAtom reconciles to res.reply);
-      // only surface tools / a final thought here — do NOT re-emit the reply (streamReply:false).
-      emitStep([m.value as StepResult], false)
+      emitStep([m.value as StepResult])
       break
     case "FunctionResults":
       for (const fr of m.value as ReadonlyArray<{ functionId: string; result: unknown; isError?: boolean }>)
