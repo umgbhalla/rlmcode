@@ -16,7 +16,15 @@ import * as Metric from "effect/Metric"
 import type { AnySpan } from "effect/Tracer"
 import * as Telemetry from "effect/unstable/ai/Telemetry"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
-import { tools } from "./tools.ts"
+import { BASE_TOOLS } from "./tools.ts"
+// orch-tools.ts imports this module's runtime helpers (llm/onEvent/readUsageOf/limits),
+// so there is a static import cycle agent ⇄ orch-tools. It is SAFE because the cycle is
+// init-order-tolerant ONE way: orch-tools' top level reads NONE of agent's exports
+// (ORCH_TOOLS is built from pure prims; agent's values are touched only inside handlers
+// at call time), so when agent.ts loads first (the app entry: chat.tsx→atoms→agent),
+// ORCH_TOOLS is fully defined by the time the `chat` gen below references it. (Importing
+// orch-tools.ts as the standalone entry module would invert the order — not a real path.)
+import { ORCH_TOOLS } from "./orch-tools.ts"
 
 const MAX_STEPS = Number(process.env.AX2_MAX_STEPS ?? 50) // max tool-call iterations per turn
 // Hard per-turn TOKEN ceiling, enforced by orch's Budget (charged after each leaf
@@ -48,6 +56,9 @@ const BASE_PROMPT = [
   "Format replies in GitHub-flavored markdown (use `code`, lists, and ```fences``` where helpful).",
   // Orchestration: this agent can run deterministic multi-node flows, not just single replies.
   "Orchestration: beyond a single reply you can drive deterministic multi-node runs whose nodes render live in a tree.",
+  "SELF-orchestrate via tools: `orchestrate(task, strategy, branches)` fans out up to 4 sub-agents (each with the file tools) and",
+  "parallel/judge/verify/best_of_n-combines them — use it for a hard sub-problem where comparing several attempts beats one. `run_orch_script(name, message)`",
+  "loads + runs a saved `.ax/orch/<name>` script. Sub-agents canNOT themselves orchestrate (one level deep), so decompose at the top.",
   "User-invoked triggers: `^o` runs a built-in fan-out over the current input; `/run <name> [message]` loads + runs a saved script.",
   "To author a CUSTOM flow, write_file a script to `.ax/orch/<name>.ts` (trusted dir; paths escaping it are rejected) exporting",
   "`orchestrate(ctx, prims)`, then tell the user to `/run <name>`. prims = { leaf, parallel, pipeline, emit, allocate, gen } plus recipes",
@@ -75,7 +86,10 @@ const loadProjectDoc = (): string => {
 
 export const projectDocLoaded = (["AGENTS.md", "CLAUDE.md"] as const).find((f) => existsSync(f)) ?? null
 
-const chat = ax("message:string -> reply:string", { functions: tools })
+// The MAIN chat gen gets BASE_TOOLS + ORCH_TOOLS — it alone may self-orchestrate.
+// Every orchestration sub-run LEAF (orch-tools.ts) is built with BASE_TOOLS only, so a
+// leaf physically cannot re-orchestrate: the structural one-level recursion guard.
+const chat = ax("message:string -> reply:string", { functions: [...BASE_TOOLS, ...ORCH_TOOLS] })
 chat.setDescription(BASE_PROMPT + loadProjectDoc())
 
 // No-tools generator used to recover when the tool budget is exhausted: it

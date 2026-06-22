@@ -41,7 +41,11 @@ const buildRgArgs = ({ pattern, output_mode = "files_with_matches", glob, contex
   return args
 }
 
-export const tools: AxFunction[] = [
+// BASE_TOOLS = the file/shell/web tools. These are the ONLY tools an orchestration
+// LEAF may carry: the structural one-level recursion guard (orch-tools.ts) builds its
+// sub-run leaf gens with BASE_TOOLS, never BASE_TOOLS+ORCH_TOOLS, so a leaf physically
+// cannot re-orchestrate. The main chat gen (agent.ts) gets BASE_TOOLS + ORCH_TOOLS.
+export const BASE_TOOLS: AxFunction[] = [
   {
     name: "bash",
     description:

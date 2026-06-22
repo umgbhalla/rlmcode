@@ -22,7 +22,7 @@ import { context as otelContext, trace as otelTrace, type Context as OtelContext
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import * as Effect from "effect/Effect"
 import type { AnySpan } from "effect/Tracer"
-import { ax, AxMemory, type AxGen } from "@ax-llm/ax"
+import { ax, type AxAIService, AxMemory, type AxGen } from "@ax-llm/ax"
 import { limits, llm, MODEL, onEvent, readUsageOf } from "./agent.ts"
 import { adversarialVerify, agent, judge, loopUntilDry, type AgentNode, type EmitSink } from "./orch-recipes.ts"
 import {
@@ -72,7 +72,11 @@ export type OrchLoadCtx = {
   readonly sessionId: string
   readonly message: string
   readonly rootId: string
-  readonly ai: typeof llm
+  // AxAIService (not the concrete `typeof llm`): the run_orch_script tool threads the
+  // live service from the forward's `extra.ai`, which ax types as AxAIService. Recipes
+  // only need AxAIService; the user-triggered /run path still passes `llm` (an AxAI,
+  // assignable to AxAIService).
+  readonly ai: AxAIService
   readonly model: string
   readonly budget: Budget
   readonly onEvent: EmitSink
@@ -97,7 +101,9 @@ class OrchLoadError {
 
 // Resolve a script reference to an absolute path INSIDE the trusted root, or throw.
 // Accepts a bare name ("example", "example.ts") — never a path that escapes the root.
-const resolveScript = (scriptRef: string): string => {
+// Exported so the agent-callable run_orch_script tool (orch-tools.ts) reuses the SAME
+// path-escape guard as the user-triggered /run path — one trusted boundary, no fork.
+export const resolveScript = (scriptRef: string): string => {
   const ref = scriptRef.trim()
   if (ref.length === 0) throw new Error("empty script reference")
   if (ref.includes("/") || ref.includes("\\")) {
@@ -117,6 +123,50 @@ const resolveScript = (scriptRef: string): string => {
 const clip = (v: unknown, max = 256): string => {
   const s = typeof v === "string" ? v : (() => { try { return JSON.stringify(v) ?? String(v) } catch { return String(v) } })()
   return s.length > max ? `${s.slice(0, max)}…` : s
+}
+
+// The 9-prim toolkit handed to every loaded script (5 core + gen factory + 4 recipes).
+// Shared by the user-triggered /run path (loadAndRunOrch) and the agent-callable
+// run_orch_script tool (orch-tools.ts) so both inject the IDENTICAL ambient engine.
+export const orchPrims = (): OrchPrims => ({
+  leaf,
+  parallel,
+  pipeline,
+  emit,
+  allocate,
+  gen: (signature: string, description?: string): AxGen => {
+    const g = ax(signature)
+    if (description !== undefined) g.setDescription(description)
+    return g
+  },
+  agent,
+  judge,
+  loopUntilDry,
+  adversarialVerify,
+})
+
+// Promise-native trusted-script core: resolve INSIDE the trusted root (path-escape
+// rejected by resolveScript), dynamic-import the module, bracket the whole run as the
+// root node so it nests in the OrchTree even if the script forgets to emit, run
+// orchestrate(ctx, prims), and normalize the return. Shared by loadAndRunOrch's
+// Effect.fn boundary AND the run_orch_script tool — one loader, one trust boundary.
+export const runLoadedScript = async (scriptRef: string, ctx: OrchLoadCtx): Promise<OrchLoadResult> => {
+  const abs = resolveScript(scriptRef)
+  const mod = (await import(abs)) as OrchScriptModule
+  const fn = mod.orchestrate ?? mod.default
+  if (typeof fn !== "function") {
+    throw new Error(`script '${scriptRef}' must export an orchestrate(ctx, prims) function (or default)`)
+  }
+  ctx.onEvent({ type: "start", nodeId: ctx.rootId, phase: `script:${scriptRef}` })
+  try {
+    const raw = await fn(ctx, orchPrims())
+    const res = toResult(raw)
+    ctx.onEvent({ type: "done", nodeId: ctx.rootId, result: clip(res.reply) })
+    return res
+  } catch (cause) {
+    ctx.onEvent({ type: "error", nodeId: ctx.rootId, cause })
+    throw cause
+  }
 }
 
 // Normalize whatever the script returned into an OrchLoadResult for the transcript.
@@ -164,26 +214,6 @@ export const loadAndRunOrch = (parent: AnySpan, sessionId: string, scriptRef: st
       abortSignal: aborter.signal,
     })
 
-    // gen factory: wraps ax() + optional setDescription
-    const genFactory = (signature: string, description?: string): AxGen => {
-      const g = ax(signature)
-      if (description !== undefined) g.setDescription(description)
-      return g
-    }
-
-    const prims: OrchPrims = {
-      leaf,
-      parallel,
-      pipeline,
-      emit,
-      allocate,
-      gen: genFactory,
-      agent,
-      judge,
-      loopUntilDry,
-      adversarialVerify,
-    }
-
     const ctx: OrchLoadCtx = {
       sessionId,
       message,
@@ -201,27 +231,7 @@ export const loadAndRunOrch = (parent: AnySpan, sessionId: string, scriptRef: st
     )
 
     const out = yield* Effect.tryPromise({
-      try: () =>
-        otelContext.with(traceContext, async () => {
-          const abs = resolveScript(scriptRef)
-          const mod = (await import(abs)) as OrchScriptModule
-          const fn = mod.orchestrate ?? mod.default
-          if (typeof fn !== "function") {
-            throw new Error(`script '${scriptRef}' must export an orchestrate(ctx, prims) function (or default)`)
-          }
-          // Bracket the whole script run as the root node so it nests in the tree
-          // even if the script forgets to emit its own root.
-          onEvent({ type: "start", nodeId: rootId, phase: `script:${scriptRef}` })
-          try {
-            const raw = await fn(ctx, prims)
-            const res = toResult(raw)
-            onEvent({ type: "done", nodeId: rootId, result: clip(res.reply) })
-            return res
-          } catch (cause) {
-            onEvent({ type: "error", nodeId: rootId, cause })
-            throw cause
-          }
-        }),
+      try: () => otelContext.with(traceContext, () => runLoadedScript(scriptRef, ctx)),
       catch: (e) => new OrchLoadError(e),
     })
 
