@@ -11,7 +11,7 @@
     "check": "tsc --noEmit",
     "analyze": "bun scripts/design-check.ts",
     "debt": "bun scripts/ponytail-debt.ts",
-    "test": "bun scripts/design-check.test.ts && bun scripts/ponytail-debt.test.ts && bun scripts/orch-core.test.ts && bun scripts/orch.test.ts",
+    "test": "bun scripts/design-check.test.ts && bun scripts/ponytail-debt.test.ts && bun scripts/orch-core.test.ts && bun scripts/orch.test.ts && bun scripts/orch-journal.test.ts",
     "live": "AX2_LIVE=1 bun --env-file=.env scripts/orch-live.test.ts",
     "live:focus": "AX2_FOCUS_LIVE=1 bun scripts/focus-live.test.ts",
     "lint": "bun run check && bun run test && bun run analyze && bun run debt",

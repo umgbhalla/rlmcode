@@ -25,6 +25,7 @@ import type { AnySpan } from "effect/Tracer"
 import { ax, type AxAIService, AxMemory, type AxGen } from "@ax-llm/ax"
 import { limits, llm, MODEL, onEvent, readUsageOf } from "./runtime.ts"
 import { adversarialVerify, judge, loopUntilDry, runNode, structuredPipeline, untilGate, verifiedStep, verifyHarden, type AgentNode, type EmitSink, type PipelineStage } from "./orch-recipes.ts"
+import { journaledNode, type Journal, type JournaledNodeSpec, loadJournal, saveJournal } from "./orch-journal.ts"
 import {
   allocate,
   type Budget,
@@ -68,6 +69,11 @@ export type OrchPrims = {
   readonly untilGate: typeof untilGate
   readonly verifyHarden: typeof verifyHarden
   readonly verifiedStep: typeof verifiedStep
+  // resume-journal: opt-in crash/network-resilient node wrapper + its load/save helpers.
+  // OFF unless a script passes { enabled: true } + a Journal — normal nodes are unaffected.
+  readonly journaledNode: typeof journaledNode
+  readonly loadJournal: typeof loadJournal
+  readonly saveJournal: typeof saveJournal
 }
 
 // The run context handed to a loaded script's orchestrate(ctx, prims). Mirrors the
@@ -99,7 +105,7 @@ type OrchScriptFn = (ctx: OrchLoadCtx, prims: OrchPrims) => Promise<unknown> | u
 type OrchScriptModule = { orchestrate?: OrchScriptFn; default?: OrchScriptFn }
 
 // re-export the prim TYPES so a script can `import type` them for annotations.
-export type { AgentNode, Budget, BudgetExhaustedError, BudgetUsage, EmitOpts, EmitSink, LeafOpts, NodeEvent, PipelineStage }
+export type { AgentNode, Budget, BudgetExhaustedError, BudgetUsage, EmitOpts, EmitSink, Journal, JournaledNodeSpec, LeafOpts, NodeEvent, PipelineStage }
 
 class OrchLoadError {
   readonly _tag = "OrchLoadError"
@@ -154,6 +160,9 @@ export const orchPrims = (): OrchPrims => ({
   untilGate,
   verifyHarden,
   verifiedStep,
+  journaledNode,
+  loadJournal,
+  saveJournal,
 })
 
 // Promise-native trusted-script core: resolve INSIDE the trusted root (path-escape
