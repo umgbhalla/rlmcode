@@ -167,7 +167,7 @@ const liveLogger: AxLoggerFunction = (m) => {
 // fetch and skim choices[0].finish_reason off a clone (ax still consumes the
 // real body). Turns are serialized (busyAtom), so a module-level latch is safe;
 // turn() resets it before each forward and reads it after.
-let lastFinishReason: string | undefined
+const finishReasonState: { last: string | undefined } = { last: undefined }
 // Cast: Bun's `typeof fetch` carries a `.preconnect` member ax never calls.
 const captureFetch = (async (input: any, init: any): Promise<Response> => {
   const res = await fetch(input, init)
@@ -175,7 +175,7 @@ const captureFetch = (async (input: any, init: any): Promise<Response> => {
     if (res.ok) {
       const j: any = await res.clone().json()
       const fr = j?.choices?.[0]?.finish_reason
-      if (typeof fr === "string") lastFinishReason = fr
+      if (typeof fr === "string") finishReasonState.last = fr
     }
   } catch {
     /* non-JSON / streaming / error body — ignore, finish_reason just stays unset */
@@ -269,7 +269,7 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       const otelSpan = yield* OtelTracer.currentOtelSpan
       const traceContext = otelTrace.setSpan(otelContext.active(), otelSpan)
 
-      lastFinishReason = undefined // reset the captureFetch latch for this turn
+      finishReasonState.last = undefined // reset the captureFetch latch for this turn
       const aborter = new AbortController()
       turnAborters.set(sessionId, aborter)
       // One token budget for the whole turn (shared across the chat + answerGen
@@ -354,7 +354,7 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
         response: {
           model: MODEL,
           id: readResponseId(budgetExhausted ? answerGen : chat),
-          finishReasons: lastFinishReason ? [lastFinishReason] : undefined,
+          finishReasons: finishReasonState.last ? [finishReasonState.last] : undefined,
         },
       })
       const usage = budgetExhausted ? sumUsage(readUsage(chat), readUsage(answerGen)) : readUsage(chat)
@@ -384,7 +384,7 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       const result: TurnResult = {
         reply,
         tokens: usage?.totalTokens,
-        finishReason: lastFinishReason,
+        finishReason: finishReasonState.last,
         budget: budgetExhausted,
       }
       return result

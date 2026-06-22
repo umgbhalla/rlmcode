@@ -10,15 +10,15 @@ export type Activity =
 
 // ponytail: single global sink — assumes one in-flight turn (the UI gates this).
 // Ceiling: concurrent turns would interleave events. Upgrade: Effect PubSub/Queue scoped per turn.
-let sink: ((a: Activity) => void) | null = null
+const sinkState: { sink: ((a: Activity) => void) | null } = { sink: null }
 
 export const setActivitySink = (f: ((a: Activity) => void) | null) => {
-  sink = f
+  sinkState.sink = f
 }
 
 export const emitActivity = (a: Activity) => {
   try {
-    sink?.(a)
+    sinkState.sink?.(a)
   } catch {
     /* never let UI plumbing break the agent */
   }

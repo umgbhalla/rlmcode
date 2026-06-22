@@ -58,10 +58,10 @@ const metricReader = new PeriodicExportingMetricReader({
 // beforeExit only (fires on natural drain — `emit` finishing, TUI Esc-quit).
 // NOT SIGINT/SIGTERM: registering those would swallow Ctrl-C and leave the TUI
 // hung. Best-effort; motel is local so the flush usually lands before exit.
-let flushed = false
+const flushState = { flushed: false }
 process.once("beforeExit", () => {
-  if (flushed) return
-  flushed = true
+  if (flushState.flushed) return
+  flushState.flushed = true
   void metricReader.forceFlush().catch(() => {})
 })
 

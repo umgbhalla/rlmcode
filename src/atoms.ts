@@ -60,8 +60,8 @@ export const appAtom = Atom.make<AppState>({
 // True while a turn is in flight (drives the thinking spinner).
 export const busyAtom = Atom.make(false).pipe(Atom.keepAlive)
 
-let seq = 0
-const newId = () => `s${++seq}-${Date.now().toString(36)}`
+const idState = { seq: 0 }
+const newId = () => `s${++idState.seq}-${Date.now().toString(36)}`
 
 /** Create a session: AxMemory + long-lived chat.session root span, then open it. */
 export const newSessionAtom = appRuntime.fn((_: void, get) =>
