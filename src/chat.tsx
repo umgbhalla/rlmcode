@@ -46,6 +46,15 @@ const fmtMeta = (m: TurnMeta): string => {
 
 const INDENT = 2 // single source of truth for transcript nesting
 
+const IDLE_HINT = "↑↓ history · tab focus · enter expand · PgUp/PgDn scroll · ← / esc back"
+// Right-side status text + tone for the bottom bar (busy/armed/transient note/idle).
+const statusBar = (busy: boolean, armed: boolean, note: string | null): { right: string; tone: string } => {
+  if (armed) return { right: "esc again to interrupt", tone: "#f38ba8" }
+  if (busy) return { right: "working… · esc interrupt", tone: "#ffd166" }
+  if (note) return { right: note, tone: "#a6e3a1" }
+  return { right: IDLE_HINT, tone: "#585b70" }
+}
+
 function toTurns(messages: readonly Msg[]): Turn[] {
   const turns: Turn[] = []
   for (const m of messages) {
@@ -69,14 +78,22 @@ function toTurns(messages: readonly Msg[]): Turn[] {
 const toolsUsed = (steps: Msg[]) =>
   [...new Set(steps.filter((s): s is ToolMsg => s.kind === "tool").map((s) => toolLabel(s.name, s.args).split("(")[0]!))].join(", ")
 
-function Spinner() {
-  const [i, setI] = useState(0)
+const SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+// Animated working state for the input placeholder. Ticks only while busy; the
+// frame + elapsed seconds read as a little idle→working→done state machine right
+// on the prompt's left edge (no transcript dangle).
+function useWorking(busy: boolean): { frame: string; elapsed: number } {
+  const [tick, setTick] = useState(0)
+  const startRef = useRef(0)
   useEffect(() => {
-    const t = setInterval(() => setI((x) => x + 1), 80)
+    if (!busy) return
+    startRef.current = Date.now()
+    setTick(0)
+    const t = setInterval(() => setTick((x) => x + 1), 80)
     return () => clearInterval(t)
-  }, [])
-  const frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-  return <text fg="#ffd166">{`${frames[i % frames.length]} thinking…`}</text>
+  }, [busy])
+  return { frame: SPIN_FRAMES[tick % SPIN_FRAMES.length]!, elapsed: busy ? Math.floor((Date.now() - startRef.current) / 1000) : 0 }
 }
 
 const statusColor = (status: ToolMsg["status"]) =>
@@ -240,6 +257,7 @@ function App() {
   const [text, setText] = useState("") // mirror of textarea content (for empty-detection)
   const taRef = useRef<any>(null)
   const scrollRef = useRef<any>(null)
+  const work = useWorking(busy) // animated placeholder state (frame + elapsed)
 
   const [expTurns, setExpTurns] = useState<Set<number>>(new Set())
   const [expTools, setExpTools] = useState<Set<string>>(new Set())
@@ -412,38 +430,29 @@ function App() {
     }
   }
 
+  const goToList = () => {
+    setInput("")
+    setApp((s) => ({ ...s, view: "list" }))
+  }
+  // Esc: when busy, first press arms, second interrupts; when idle, back to list.
+  const handleEscape = () => {
+    if (!busy) return goToList()
+    if (armed && state.activeId) return void (abortTurn(state.activeId), setArmed(false))
+    setArmed(true)
+    setTimeout(() => setArmed(false), 5000)
+  }
+
   const onChatKey = (k: any) => {
-    if (k.name === "escape") {
-      if (busy) {
-        if (armed && state.activeId) {
-          abortTurn(state.activeId)
-          setArmed(false)
-        } else {
-          setArmed(true)
-          setTimeout(() => setArmed(false), 5000)
-        }
-        return
-      }
-      setInput("")
-      return setApp((s) => ({ ...s, view: "list" }))
-    }
-    // ← on an empty input goes back to the session list (textarea cursor-left is
-    // a no-op when empty, so this doesn't fight editing).
-    if (k.name === "left" && text.trim() === "" && !busy) {
-      setInput("")
-      return setApp((s) => ({ ...s, view: "list" }))
-    }
-    if (k.name === "tab") {
-      if (focusables.length) setFocus((f) => f + (k.shift ? -1 : 1))
-      return
-    }
-    // Enter on an empty input toggles the focused row (the textarea's own
-    // onSubmit no-ops on empty), so keyboard expand works without a mouse.
-    if (k.name === "return" && text.trim() === "" && focusedKey) return toggleFocused()
+    const empty = text.trim() === ""
+    if (k.name === "escape") return handleEscape()
+    if (k.name === "left" && empty && !busy) return goToList()
+    if (k.name === "tab") return void (focusables.length && setFocus((f) => f + (k.shift ? -1 : 1)))
+    // Enter on empty toggles the focused row (textarea onSubmit no-ops on empty).
+    if (k.name === "return" && empty && focusedKey) return toggleFocused()
     if (k.name === "pageup") return scrollPage(-1)
     if (k.name === "pagedown") return scrollPage(1)
-    if (k.name === "home" && text.trim() === "") return scrollPage("top")
-    if (k.name === "end" && text.trim() === "") return scrollPage("bottom")
+    if (k.name === "home" && empty) return scrollPage("top")
+    if (k.name === "end" && empty) return scrollPage("bottom")
     if (k.name === "up" && histActive()) return recall(-1)
     if (k.name === "down" && histActive()) return recall(1)
     // everything else (typing, cursor moves, submit) is handled by the textarea
@@ -465,12 +474,7 @@ function App() {
   // ONE status line at the bottom: left = context (model · session), right =
   // live state or key hints. No top bar, no scattered metadata.
   const statusLeft = `kimi · ${active.title}${projectDoc ? ` · ${projectDoc}` : ""}`
-  const statusRight = busy
-    ? armed
-      ? "esc again to interrupt"
-      : "working… · esc interrupt"
-    : (note ?? "↑↓ history · tab focus · enter expand · PgUp/PgDn scroll · ← / esc back")
-  const statusTone = armed ? "#f38ba8" : busy ? "#ffd166" : note ? "#a6e3a1" : "#585b70"
+  const status = statusBar(busy, armed, note)
 
   return (
     <box flexDirection="column" style={{ height: "100%" }}>
@@ -495,11 +499,6 @@ function App() {
           />
         ))}
       </scrollbox>
-      {busy && (
-        <box style={{ paddingLeft: 2, paddingTop: 1 }}>
-          <Spinner />
-        </box>
-      )}
       <box style={{ paddingLeft: 1, paddingRight: 1, paddingTop: 1, width: "100%" }}>
         <box
           border={["left"]}
@@ -518,14 +517,14 @@ function App() {
             focused
             cursorColor="#66aaff"
             focusedTextColor="#cdd6f4"
-            placeholder="message kimi"
-            placeholderColor="#585b70"
+            placeholder={busy ? `${work.frame} thinking… ${work.elapsed}s · esc to interrupt` : "message kimi"}
+            placeholderColor={busy ? "#ffd166" : "#585b70"}
           />
         </box>
       </box>
       <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1, paddingBottom: 1 }}>
         <text fg="#585b70">{statusLeft}</text>
-        <text fg={statusTone}>{statusRight}</text>
+        <text fg={status.tone}>{status.right}</text>
       </box>
     </box>
   )
