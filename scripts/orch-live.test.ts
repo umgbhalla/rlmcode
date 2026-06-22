@@ -15,6 +15,7 @@
 // --env-file=.env so CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID load).
 import { ai, type AxAIService, type AxFunction } from "@ax-llm/ax"
 import { ORCH_TOOLS } from "../src/orch-tools.ts"
+import { RLM_TOOLS, runRlm } from "../src/rlm-tool.ts"
 import { MODEL } from "../src/runtime.ts"
 
 // Build the CF-Kimi AxAIService EXACTLY like src/runtime.ts's `llm` (openai-shaped
@@ -74,6 +75,18 @@ export const runDecomposeLive = async (
   )
   return String(out ?? "")
 }
+
+// (C) RLM: drive the REAL run_rlm path over a long context with a buried fact. Builds
+// the @ax-llm/ax single-level RLM (distiller→executor→responder over runtime-held
+// context) EXACTLY like the standalone smoke and asserts the ANSWER contains the fact.
+// Returns the answer + the callback count (actorTurnCallback/onContextEvent firings) so
+// the smoke can prove the bridge wired — runRlm is the same fn the run_rlm tool calls.
+export const runRlmLive = async (
+  context: string,
+  query: string,
+  liveAi: AxAIService = buildLiveAi(),
+): Promise<{ answer: string; evidence: string[]; turns: number; callbacks: number }> =>
+  runRlm(context, query, liveAi, `live-rlm:${Date.now()}`, new AbortController().signal)
 
 // A non-empty REAL reply = a string with actual content that is NOT one of the
 // handler's failure/partial sentinels (orch-tools.ts: "orchestration failed: …",
@@ -183,6 +196,61 @@ await (async () => {
     expectedHits >= 2,
     `at least 2/3 subtasks produced their specific correct answer (etartsehcro / 6 / SUBTASK), got ${expectedHits}: ${JSON.stringify(decomposeReply.slice(0, 400))}`,
   )
+
+  // (C) RLM gate: a LONG context with a buried fact (like the proven /tmp smoke). The
+  // context is 60 numbered sections; ONE section hides a magic token the model could
+  // only know by mining the runtime-held blob (it is NOT in the query). The RLM must
+  // load it into the code runtime, find it, and ANSWER with the fact. We also assert the
+  // actor/context callbacks FIRED (the bridge that renders the RLM nested in the tree).
+  assert(RLM_TOOLS.some((t) => t.name === "run_rlm"), "run_rlm tool is registered in RLM_TOOLS")
+
+  // The buried fact is a BENIGN identifier (a mascot codename), not a credential —
+  // asking for a "secret access code" tripped the model's safety refusal and it would
+  // not return it even though it had found it. A harmless fact proves the SAME thing
+  // (the RLM mined the runtime-held blob) without fighting the guardrail.
+  const MAGIC = "ZEPHYR-7731"
+  const sections = Array.from({ length: 60 }, (_, i) => {
+    const n = i + 1
+    if (n === 38) {
+      return `Section ${n}: Team trivia. The official codename for our internal load-test mascot is ${MAGIC}. The team picked it at the 2021 offsite and it has appeared on every dashboard since.`
+    }
+    return `Section ${n}: This section discusses ${
+      ["caching strategy", "retry backoff", "schema migrations", "feature flags", "observability", "rate limiting"][i % 6]
+    } in moderate detail, with several paragraphs of routine guidance that does not contain any unusual codenames or identifiers worth remembering.`
+  })
+  const longContext = sections.join("\n\n")
+  const rlmQuery =
+    "Search ALL sections of the context for the official codename of the internal load-test mascot (scan every section, it is mentioned exactly once). Reply with the exact codename string."
+
+  // RLM exploration is non-deterministic: the executor writes its OWN search JS, and a
+  // single run's strategy can miss the one buried section (a real property of the model,
+  // not a wiring bug — the callbacks fire every run). Retry a few times and pass on the
+  // FIRST run that recovers the fact, so the gate proves "the RLM CAN find it" without
+  // depending on a single sampling. callbacks>0 is asserted on every attempt regardless.
+  let rlmOut = await runRlmLive(longContext, rlmQuery)
+  for (let attempt = 1; attempt < 3 && !`${rlmOut.answer}\n${rlmOut.evidence.join("\n")}`.includes(MAGIC); attempt++) {
+    console.log(`RLM did not surface the fact on attempt ${attempt} (turns=${rlmOut.turns} callbacks=${rlmOut.callbacks}) — retrying…`)
+    rlmOut = await runRlmLive(longContext, rlmQuery)
+  }
+
+  console.log("─".repeat(60))
+  console.log("LIVE RLM ANSWER (buried-fact retrieval):")
+  console.log(rlmOut.answer)
+  console.log("RLM evidence:", JSON.stringify(rlmOut.evidence))
+  console.log(`RLM turns=${rlmOut.turns} callbacks=${rlmOut.callbacks}`)
+  console.log("─".repeat(60))
+
+  assert(isRealReply(rlmOut.answer), `RLM answer is a real non-empty string, got: ${JSON.stringify(rlmOut.answer.slice(0, 200))}`)
+  // The buried fact must appear in the ANSWER (or its evidence) — proof the RLM mined
+  // the runtime-held context, not the prompt (the code was NEVER in the query).
+  const haystack = `${rlmOut.answer}\n${rlmOut.evidence.join("\n")}`
+  assert(
+    haystack.includes(MAGIC),
+    `RLM answer contains the buried fact ${MAGIC}, got: ${JSON.stringify(haystack.slice(0, 300))}`,
+  )
+  // The callback bridge must have fired (actorTurnCallback + onContextEvent) — this is
+  // what renders the RLM's distiller/executor/responder loop nested under the turn span.
+  assert(rlmOut.callbacks > 0, `RLM callbacks fired (actorTurnCallback/onContextEvent), got ${rlmOut.callbacks}`)
 })()
 
 if (failed > 0) {

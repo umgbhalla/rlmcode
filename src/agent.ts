@@ -19,6 +19,7 @@ import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 import { BASE_PROMPT, limits, llm, MODEL, onEvent } from "./runtime.ts"
 import { ORCH_TOOLS } from "./orch-tools.ts"
+import { RLM_TOOLS } from "./rlm-tool.ts"
 
 const MAX_STEPS = limits.maxSteps // max tool-call iterations per turn
 // Hard per-turn TOKEN ceiling, enforced by orch's Budget (charged after each leaf
@@ -60,6 +61,11 @@ const ORCH_OVERLAY = [
   "NO runtime imports — gen() is an ambient prim factory that builds leaves inline: gen(signature, description?) returns an AxGen for leaf().",
   "Compose ONLY through prims, so the engine core stays the 5 primitives. RULE: never share a mutating memory across concurrent branches — call",
   "`ctx.optsFor()` for a fresh forked memory per parallel leaf. See `.ax/orch/example.ts` for the canonical pattern.",
+  // RLM: the right tool for a BIG context blob that won't fit the prompt window.
+  "Explore a LARGE context blob with `run_rlm(context, query)`: a Recursive Language Model loads the blob into a code runtime (NOT the prompt) and a",
+  "sub-LM writes JavaScript (slice/regex/sub-queries) to mine it, returning an answer + evidence. PREFER run_rlm over orchestrate when the context is",
+  "too big to fit the window and you need to FIND or SUMMARISE something buried inside (a long file, a pasted log, a whole concatenated module). The",
+  "RLM is single-level too: it cannot orchestrate or call file tools.",
 ].join(" ")
 
 // Like Claude Code loading CLAUDE.md: if launched in a repo with project
@@ -83,7 +89,7 @@ export const projectDocLoaded = (["AGENTS.md", "CLAUDE.md"] as const).find((f) =
 // The MAIN chat gen gets BASE_TOOLS + ORCH_TOOLS — it alone may self-orchestrate.
 // Every orchestration sub-run LEAF (orch-tools.ts) is built with BASE_TOOLS only, so a
 // leaf physically cannot re-orchestrate: the structural one-level recursion guard.
-const chat = ax("message:string -> reply:string", { functions: [...BASE_TOOLS, ...ORCH_TOOLS] })
+const chat = ax("message:string -> reply:string", { functions: [...BASE_TOOLS, ...ORCH_TOOLS, ...RLM_TOOLS] })
 chat.setDescription(`${BASE_PROMPT} ${ORCH_OVERLAY}${loadProjectDoc()}`)
 
 // No-tools generator used to recover when the tool budget is exhausted: it
