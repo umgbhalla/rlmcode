@@ -190,7 +190,7 @@ function TurnView({
           )}
         </box>
       )}
-      {t.final !== null ? (
+      {t.final !== null && (
         <box flexDirection="column" style={{ marginTop: 1 }}>
           <box flexDirection="row" style={{ width: "100%" }}>
             <text fg="#a6e3a1">{"⏺ "}</text>
@@ -204,8 +204,6 @@ function TurnView({
             </box>
           )}
         </box>
-      ) : (
-        <Spinner />
       )}
     </box>
   )
@@ -429,6 +427,12 @@ function App() {
       setInput("")
       return setApp((s) => ({ ...s, view: "list" }))
     }
+    // ← on an empty input goes back to the session list (textarea cursor-left is
+    // a no-op when empty, so this doesn't fight editing).
+    if (k.name === "left" && text.trim() === "" && !busy) {
+      setInput("")
+      return setApp((s) => ({ ...s, view: "list" }))
+    }
     if (k.name === "tab") {
       if (focusables.length) setFocus((f) => f + (k.shift ? -1 : 1))
       return
@@ -465,7 +469,7 @@ function App() {
     ? armed
       ? "esc again to interrupt"
       : "working… · esc interrupt"
-    : (note ?? "↑↓ history · PgUp/PgDn scroll · click expand · esc back")
+    : (note ?? "↑↓ history · tab focus · enter expand · PgUp/PgDn scroll · ← / esc back")
   const statusTone = armed ? "#f38ba8" : busy ? "#ffd166" : note ? "#a6e3a1" : "#585b70"
 
   return (
@@ -491,10 +495,15 @@ function App() {
           />
         ))}
       </scrollbox>
+      {busy && (
+        <box style={{ paddingLeft: 2, paddingTop: 1 }}>
+          <Spinner />
+        </box>
+      )}
       <box style={{ paddingLeft: 1, paddingRight: 1, paddingTop: 1, width: "100%" }}>
         <box
           border={["left"]}
-          borderColor={busy ? "#45475a" : "#66aaff"}
+          borderColor={busy ? "#ffd166" : "#66aaff"}
           style={{ paddingLeft: 1, flexShrink: 0, width: "100%" }}
         >
           <textarea
