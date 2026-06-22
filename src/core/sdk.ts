@@ -38,11 +38,10 @@ export interface AgentOptions {
   readonly tools?: "default" | "base" | readonly AxFunction[]
   readonly systemPromptAppend?: string
   readonly loadProjectDoc?: boolean
-  // DEFAULT 'off' — the SDK is meant to need ZERO OTel wiring from the consumer.
-  // ponytail: 'off' vs 'app' both currently run on the app TracingLive runtime (coreRuntime, which
-  // best-effort exports to a local motel and no-ops when absent). Upgrade: install a genuine no-op
-  // OTel layer for 'off' so an embedded consumer emits no spans at all (Seal phase).
-  readonly telemetry?: "off" | "app"
+  // Telemetry is ALWAYS ON: the engine runs on the shared coreRuntime (TracingLive), which
+  // best-effort exports OTel spans/logs/metrics to the local motel and silently no-ops when
+  // motel is absent — so an embedded consumer needs ZERO OTel wiring and pays nothing when no
+  // collector listens. There is no opt-out knob by design (one runtime, one trace tree).
   // ponytail: onLog accepted on the surface but not yet fed — the engine logs via Effect.log to
   // OTel today. Upgrade: a per-turn log tap that maps Effect log records to LogLine (Seal phase).
   readonly onLog?: (line: LogLine) => void

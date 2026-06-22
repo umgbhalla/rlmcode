@@ -1,9 +1,9 @@
-// RLM NODE — a node KIND of the rlm_workflow engine. `runRlm` is the context-mining
-// node: a REAL single-level @ax-llm/ax RLM (the distiller → executor → responder loop
-// over runtime-held context), bridged into ax2's live node-event tree so it renders
-// NESTED under the chat.turn span. It is NOT a standalone tool: the rlm_workflow tool
-// (rlm-workflow.ts) invokes it via strategy 'rlm' — one node-kind among the fan-out
-// strategies, on the SAME event bus / budget / trace.
+// RLM NODE — a node-kind callable via the rlm() prim in workflow({script}). `runRlm` is
+// the context-mining node: a REAL single-level @ax-llm/ax RLM (the distiller → executor →
+// responder loop over runtime-held context), bridged into ax2's live node-event tree as one
+// prim among agent/parallel/pipeline/judge, so it renders NESTED under the chat.turn span.
+// It is NOT a standalone tool and NOT invoked via a fixed strategy-menu: the workflow-prims.ts
+// rlm() binding invokes it directly, on the SAME event bus / budget / trace.
 //
 // WHY RLM (vs the fan-out strategies): a fan-out leaf pulls the whole context into the
 // LLM prompt. An RLM instead loads the context into the code runtime (AxJSRuntime) and
@@ -11,8 +11,10 @@
 // file, a pasted log, a whole module concatenated) never blows the prompt window. This
 // is the right tool for "find X buried somewhere in this big blob".
 //
-// THE SAFETY MODEL (mirrors rlm-workflow.ts):
-//   1. ONE LEVEL: this tool lives on the MAIN chat gen only (agent.ts RLM_WORKFLOW_TOOLS). The
+// THE SAFETY MODEL:
+//   1. ONE LEVEL: this prim is invoked directly within workflow({script}) via rlm(context, query) —
+//      a prim binding, not an AxFunction on the chat gen. The agent()/rlm() prim nodes carry only
+//      BASE_TOOLS (file/shell), so a node cannot re-orchestrate. The
 //      RLM's own executor runs JS in the AxJSRuntime sandbox (TIMING permission only —
 //      no network/fs/process); it has NO ax2 file/shell tools and cannot re-orchestrate.
 //   2. BUDGET ceiling (ADVISORY/soft): the RLM runs under its OWN allocate(SOFT, HARD);
@@ -23,7 +25,7 @@
 //   4. abortSignal: extra.abortSignal threads into forward() so a cancelled turn
 //      cancels the RLM run.
 //
-// CONTEXT/TRACE: like rlm-workflow.ts, the handler runs Promise-native INSIDE forward(),
+// CONTEXT/TRACE: like the other workflow prims, the rlm() handler runs Promise-native INSIDE forward(),
 // which turn() runs inside otelContext.with(traceContext). So onEvent()'s active-span
 // read resolves to the live chat.turn span and the RLM's start/delta/done events nest
 // in the SAME OrchTree. The actorTurnCallback / onContextEvent callbacks are bridged
