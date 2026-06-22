@@ -25,7 +25,11 @@ export type Finding = { tag: "broken" | "delete" | "native" | "cycle" | "shrink"
 // sdk.ts = the public SDK re-export seam (the external entrypoint, consumed by
 // examples/sdk-usage.ts, outside the src/-only scan) — a root so its public-API
 // re-exports aren't flagged dead.
-const ENTRY = new Set(["src/chat.tsx", "src/orch.ts", "src/orch-recipes.ts", "src/sdk.ts"])
+// src/mock.ts + src/mock-ai.ts = the NARROW test-only mock seam (the deterministic AI +
+// canned node feed). Consumed by scripts/tui/*.test.ts and the agent.ts AX2_MOCK runtime
+// swap — the tests OUTSIDE the src/-only scan — so they're roots, like sdk.ts, lest their
+// seam surface (MOCK_NODES / makeMockAI / MOCK_FIXTURE) be pruned to its in-src callers.
+const ENTRY = new Set(["src/chat.tsx", "src/orch.ts", "src/orch-recipes.ts", "src/sdk.ts", "src/mock.ts", "src/mock-ai.ts"])
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
 const NEST_BUDGET = 5 // block nesting depth per function
 const PARAM_BUDGET = 6 // parameters per function

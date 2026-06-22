@@ -19,6 +19,7 @@ import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { BASE_PROMPT, limits, llm, MODEL, onEvent, rateLimiter } from "./runtime.ts"
+import { makeMockAI, MOCK_MODEL } from "./mock-ai.ts"
 import { RLM_WORKFLOW_TOOLS } from "./rlm-workflow.ts"
 
 // Step/token ceilings default to today's app values (limits, from runtime.ts): maxSteps is
@@ -484,6 +485,14 @@ export type AxAgentSDK = ReturnType<typeof createAgent>
 // The DEFAULT app agent — constructed ONCE over the CF-Kimi `llm` (runtime.ts) at the
 // app's default model. This is the single construction site every importer pulls from;
 // re-exporting turn/abortTurn keeps atoms.ts / chat.tsx byte-identical.
-export const defaultAgent: AxAgentSDK = createAgent({ ai: llm, model: MODEL })
+//
+// NARROW TEST-ONLY SEAM (off in prod): AX2_MOCK=1 swaps the CF service for the canned mock
+// AI (mock-ai.ts — zero network), so a headless harness drives the REAL turn loop with no
+// Cloudflare env. The flag is read ONCE here; unset ⇒ the unchanged CF path. mock-ai.ts
+// imports nothing from this module, so the seam introduces no init cycle.
+export const defaultAgent: AxAgentSDK =
+  process.env.AX2_MOCK === "1"
+    ? createAgent({ ai: makeMockAI(), model: MOCK_MODEL })
+    : createAgent({ ai: llm, model: MODEL })
 export const turn = defaultAgent.turn
 export const abortTurn = defaultAgent.abortTurn
