@@ -32,6 +32,22 @@ assert(r.loc === 1, `expected 1 code line, got ${r.loc}`)
 const e = harvest("e.ts", "")
 assert(e.markers.length === 0 && e.noTrigger === 0, "empty file should yield no markers")
 
+// block comment marker (the old line-regex missed these) with Upgrade: inside.
+const block = harvest("b.ts", "const a = 1\n/* ponytail: sync write.\n   Upgrade: queue. */")
+assert(block.markers.length === 1, `block marker not harvested: ${block.markers.length}`)
+assert(block.noTrigger === 0, "block marker Upgrade: not detected")
+
+// orphan: a marker whose comment guards no code (attaches to the program root)
+// — the shortcut it described was deleted, the note rotted. Has Upgrade:, so the
+// only thing wrong is the orphaning.
+const orph = harvest("o.ts", "// ponytail: dangling note. Upgrade: remove me.")
+assert(orph.orphan === 1, `expected 1 orphan, got ${orph.orphan}`)
+assert(orph.markers.some((m) => m.includes("[orphan]")), "orphan marker not tagged")
+
+// a marker sitting on real code is NOT an orphan.
+const live = harvest("l.ts", "// ponytail: shortcut. Upgrade: later.\nexport const x = 1")
+assert(live.orphan === 0, `live marker wrongly flagged orphan: ${live.orphan}`)
+
 if (failed > 0) {
   console.error(`ponytail-debt.test: ${failed} failure(s).`)
   process.exit(1)

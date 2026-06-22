@@ -1,18 +1,21 @@
 #!/usr/bin/env bun
 // Real semantic design analysis on yuku-analyzer (not comment-grep). One
 // cross-file pass over src/, reporting design smells that tsc doesn't:
-//   delete: dead export / unused import / unused dependency
-//   native: a dependency that duplicates a platform/runtime native
-//   cycle:  import cycle between modules
-//   shrink: cyclomatic complexity / nesting depth over budget
-//   yagni:  too many parameters
+//   broken:  unresolvable / ambiguous import or re-export (link diagnostic)
+//   delete:  dead export / unused import / unused dependency
+//   native:  a dependency that duplicates a platform/runtime native
+//   cycle:   import cycle between modules
+//   shrink:  cyclomatic complexity / nesting depth over budget
+//   yagni:   too many parameters
+//   mutate:  exported mutable binding reassigned / local written but never read
+//   capture: closure writes a shared module-level binding
 //
 // Core logic is exported (buildAnalyzer/analyze/unusedDeps) so scripts/
 // design-check.test.ts can assert it on fixtures — ponytail: non-trivial
 // logic leaves a runnable check.
 import { Analyzer, SymbolFlags } from "yuku-analyzer"
 
-export type Finding = { tag: "delete" | "native" | "cycle" | "shrink" | "yagni"; msg: string }
+export type Finding = { tag: "broken" | "delete" | "native" | "cycle" | "shrink" | "yagni" | "mutate" | "capture"; msg: string }
 
 // Reachability roots: their exports are public API / entrypoints, not dead.
 // chat.tsx = app entry; orch.ts = orchestration-core library surface; orch-recipes.ts
@@ -134,6 +137,41 @@ export const analyze = (a: Analyzer): Finding[] => {
       leave: () => depth--,
     }
     m.walk(visitors as any)
+
+    // write-flow smells (Reference.isWrite — tsc can't see these). A binding
+    // written but never read is a dead write; an exported `let`/`var` that is
+    // reassigned is shared mutable module state.
+    for (const s of m.symbols) {
+      if (s.has(SymbolFlags.Import) || s.has(SymbolFlags.Function) || s.has(SymbolFlags.Class)) continue
+      let reads = 0
+      let writes = 0
+      for (const r of s.references) r.isWrite ? writes++ : reads++
+      const line = s.declarations[0] ? lineOf(m, s.declarations[0]) : 0
+      const mutableExport = s.has(SymbolFlags.Exported) && s.has(SymbolFlags.BlockScopedVariable) && !s.has(SymbolFlags.Const)
+      if (mutableExport && writes >= 1)
+        out.push({ tag: "mutate", msg: `${m.path}:${line} "${s.name}": exported mutable binding is reassigned. Export a const, or a getter — importers can't see the mutation.` })
+      // dead write: only local (non-exported) variables — an exported binding may be read in another module.
+      else if (!s.has(SymbolFlags.Exported) && s.has(SymbolFlags.Variable) && writes > 0 && reads === 0)
+        out.push({ tag: "mutate", msg: `${m.path}:${line} "${s.name}": written but never read. Dead write — drop the assignment.` })
+    }
+
+    // closures that WRITE a shared module-level binding (capturesOf + isWritten).
+    // Hidden coupling tsc is blind to: two call sites mutate the same outer state.
+    for (const fn of m.findAll(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"])) {
+      for (const cap of m.capturesOf(fn)) {
+        if (!cap.isWritten) continue
+        const k = cap.symbol.scope.kind
+        if (k !== "module" && k !== "global") continue
+        out.push({ tag: "capture", msg: `${m.path}:${lineOf(m, fn)}: closure writes shared module binding "${cap.symbol.name}". Hidden coupling — thread the state through args/return instead.` })
+      }
+    }
+  }
+
+  // broken links: unresolvable / ambiguous imports & re-exports the linker found.
+  // tsc reports these too, but surfacing them here keeps the one gate authoritative.
+  for (const d of a.diagnostics) {
+    if (d.severity !== "error" && d.severity !== "warning") continue
+    out.push({ tag: "broken", msg: `${d.module}: ${d.message}` })
   }
 
   // circular dependencies (DFS over the resolved import graph).
@@ -164,7 +202,10 @@ export const analyze = (a: Analyzer): Finding[] => {
   }
   for (const node of edges.keys()) if (!seen.has(node)) dfs(node)
 
-  return out
+  // nested closures make capturesOf report the same shared-write from several
+  // enclosing functions; dedup on the exact message.
+  const uniq = new Set<string>()
+  return out.filter((f) => !uniq.has(f.msg) && uniq.add(f.msg))
 }
 
 // Dependencies that are real but never statically imported (loaded by a peer /
@@ -203,7 +244,7 @@ if (import.meta.main) {
     console.log("design-check: lean. ✓")
     process.exit(0)
   }
-  const order = { delete: 0, native: 1, cycle: 2, shrink: 3, yagni: 4 }
+  const order = { broken: 0, delete: 1, native: 2, cycle: 3, shrink: 4, yagni: 5, mutate: 6, capture: 7 }
   const blocking = out.filter(blocks)
   for (const f of out.sort((x, y) => order[x.tag] - order[y.tag])) {
     const tag = stage && !blocks(f) ? `${f.tag}*` : f.tag // * = other file, not blocking this commit

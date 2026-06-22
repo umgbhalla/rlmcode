@@ -40,6 +40,39 @@ assert(
   "cycle not flagged",
 )
 
+// mutate: local written but never read (dead write) — tsc-invisible.
+assert(
+  has(an([{ path: "src/x.ts", source: "export function f() { let n = 1; n = 2; return 0 }" }]), "mutate", "never read"),
+  "dead write not flagged",
+)
+
+// mutate: exported mutable binding reassigned.
+assert(
+  has(an([{ path: "src/x.ts", source: "export let counter = 0\nexport function bump() { counter++ }" }]), "mutate", "exported mutable"),
+  "mutable export not flagged",
+)
+
+// capture: closure writes a shared module-level binding.
+assert(
+  has(an([{ path: "src/x.ts", source: "let total = 0\nexport function add(n: number) { total += n }" }]), "capture", "shared module binding"),
+  "mutable capture not flagged",
+)
+
+// broken: ambiguous re-export (same name via two `export *`) is a link error.
+assert(
+  has(
+    an([
+      { path: "src/a.ts", source: 'export * from "./b.ts"\nexport * from "./c.ts"' },
+      { path: "src/b.ts", source: "export const dup = 1" },
+      { path: "src/c.ts", source: "export const dup = 2" },
+      { path: "src/d.ts", source: 'import { dup } from "./a.ts"\nexport const use = dup' },
+    ]),
+    "broken",
+    "",
+  ),
+  "ambiguous re-export not surfaced",
+)
+
 // unused dependency (+ used dep not false-flagged, + allow-list honored)
 const u = unusedDeps(new Set(["effect"]), ["effect", "leftover-pkg", "@otel/peer"], new Set(["@otel/peer"]))
 assert(u.some((x) => x.msg.includes("leftover-pkg")), "unused dep not flagged")
