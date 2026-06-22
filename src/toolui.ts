@@ -76,9 +76,34 @@ const headLines = (s: string, n: number, cols = 200): PreviewLine[] => {
   return out
 }
 
-// A synthesized unified diff for edits/writes, fed to opentui's native <diff>.
-// Crude (no LCS — full old block removed, full new block added) but renders as a
-// real line-numbered diff. Returns null for tools that aren't a file mutation.
+// LCS line diff: the longest common subsequence of the two line arrays is the unchanged
+// CONTEXT; everything else is a real -/+ line, IN ORDER. Replaces the old "remove the whole
+// old block, add the whole new block" dump (which made a 1-line tweak look like a full
+// rewrite). O(m·k) DP — bounded by the caller's line cap. Returns unified-diff body lines
+// (" ctx" / "-del" / "+add"). Exported for a headless self-check (scripts/toolui-diff.test).
+export const lcsDiffLines = (o: readonly string[], n: readonly string[]): string[] => {
+  const m = o.length
+  const k = n.length
+  // dp[i][j] = LCS length of o[i:] and n[j:]; walked forward to reconstruct in order.
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(k + 1).fill(0))
+  for (let i = m - 1; i >= 0; i--)
+    for (let j = k - 1; j >= 0; j--) dp[i]![j] = o[i] === n[j] ? dp[i + 1]![j + 1]! + 1 : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!)
+  const out: string[] = []
+  let i = 0
+  let j = 0
+  while (i < m && j < k) {
+    if (o[i] === n[j]) (out.push(` ${o[i]}`), i++, j++)
+    else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) (out.push(`-${o[i]}`), i++)
+    else (out.push(`+${n[j]}`), j++)
+  }
+  while (i < m) out.push(`-${o[i++]}`)
+  while (j < k) out.push(`+${n[j++]}`)
+  return out
+}
+
+// A synthesized unified diff for edits/writes, fed to opentui's native <diff>. Uses a real
+// LCS line diff so an edit shows only what changed (context + the -/+ lines). Returns null
+// for tools that aren't a file mutation.
 export const toolDiff = (
   name: string,
   args: string,
@@ -90,11 +115,9 @@ export const toolDiff = (
     const path = field(args, "path")
     const o = field(args, "old_string").split("\n")
     const n = field(args, "new_string").split("\n")
-    if (o.length + n.length > 120) return null // too big — fall back to text preview
-    const diff =
-      `--- a/${path}\n+++ b/${path}\n@@ -1,${o.length} +1,${n.length} @@\n` +
-      [...o.map((l) => `-${l}`), ...n.map((l) => `+${l}`)].join("\n") +
-      "\n"
+    if (o.length + n.length > 600) return null // too big — fall back to text preview (LCS is O(m·k))
+    const body = lcsDiffLines(o, n)
+    const diff = `--- a/${path}\n+++ b/${path}\n@@ -1,${o.length} +1,${n.length} @@\n${body.join("\n")}\n`
     return { diff, filetype: ext(path) }
   }
   if (name === "write_file") {
