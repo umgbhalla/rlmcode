@@ -166,15 +166,8 @@ function ToolView({ m, expanded, focused, cols, frame, onToggle }: { m: ToolMsg;
   const open = expanded && hasBody
   const diff = open ? toolDiff(m.name, m.args, isError) : null
   const preview = open && !diff ? toolPreview(m.name, m.args, m.result, isError, Math.max(20, cols - 10)) : []
-  // ERROR CARD (P1): a failed tool gets a RED left-border card (not a dim one-liner) so a
-  // failure is unmissable in scrollback. Healthy tools render flush as before.
-  return (
-    <box
-      flexDirection="column"
-      border={isError ? ["left"] : undefined}
-      borderColor={isError ? "#f38ba8" : undefined}
-      style={{ marginTop: open ? 1 : 0, ...(isError ? { paddingLeft: 1 } : {}) }}
-    >
+  const body = (
+    <>
       <ToolHeader m={m} expanded={expanded} hasBody={hasBody} focused={focused} frame={frame} onToggle={onToggle} />
       {diff ? (
         <box style={{ paddingLeft: INDENT, paddingTop: 1 }}>
@@ -187,6 +180,18 @@ function ToolView({ m, expanded, focused, cols, frame, onToggle }: { m: ToolMsg;
           ))}
         </box>
       )}
+    </>
+  )
+  // ERROR CARD (P1): a failed tool gets a RED left-border card (not a dim one-liner) so a
+  // failure is unmissable. Two concrete boxes — a conditional-undefined `border` prop trips
+  // exactOptionalPropertyTypes, and `as const` makes the array readonly (BorderSides[] is mutable).
+  return isError ? (
+    <box flexDirection="column" border={["left"]} borderColor="#f38ba8" style={{ marginTop: open ? 1 : 0, paddingLeft: 1 }}>
+      {body}
+    </box>
+  ) : (
+    <box flexDirection="column" style={{ marginTop: open ? 1 : 0 }}>
+      {body}
     </box>
   )
 }
