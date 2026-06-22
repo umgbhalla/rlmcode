@@ -85,6 +85,17 @@ const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.
 const SANDBOX_RULE =
   "The code runtime is a SANDBOXED ES-MODULE environment: NO require(), NO import, NO Node modules (no fs, path, process, child_process, http). NEVER call require or import — they are undefined and throw. The full source/document you must mine is ALREADY loaded into the runtime as a string input for this stage (the distiller reads the `context` variable; the executor reads `inputs.executorRequest` and `inputs.distilledContext` — follow the per-stage instructions below for the exact names; raw `context` is not in the executor scope). It is NOT missing — read the provided input string DIRECTLY and slice/regex it. NEVER scan `Object.keys(globalThis)` for it, and NEVER call askClarification or ask the user to provide the source — the source is already loaded; mine it. Use ONLY plain JavaScript (String/Array/Object methods, regex, JSON, Math, console.log) plus the injected primitives `llmQuery` (sub-LM over a narrowed slice) and `final` (to answer). Write ONE small observable step per turn — a single console.log to inspect, or final(...) to finish."
 
+// DISTILLER stage steer — the lossy step. The distiller decides what slice of the raw `context`
+// to forward to the executor as `distilledContext`. For a LOCATE/FIND/NAME query it must NOT
+// summarize the answer away: a single buried line (e.g. the one function that registers a route)
+// is the answer, so paraphrasing the blob can drop it. So instruct the distiller to RETRIEVE — grep
+// the raw `context` for terms from the query and forward the MATCHING LINES VERBATIM (with a little
+// surrounding text), never a lossy summary. This is the root-cause fix for the intermittent
+// "buried fact lost in distillation" failure. Prepended ahead of the shared SANDBOX_RULE.
+const DISTILLER_RULE =
+  "You are the DISTILLER: select evidence from the raw `context` for a downstream executor — do NOT answer. CRITICAL for locate/find/name/which questions: the answer is often ONE buried line, so do NOT paraphrase or summarize the context away. Instead RETRIEVE: derive search terms from the query (and obvious synonyms — e.g. for a '/auth route' question, search for 'auth', 'route', 'register', 'app.post', 'app.get'), `context.split('\\n').filter(l => /term/i.test(l))` to grep the raw context, and forward the MATCHING LINES VERBATIM (plus a few neighbors) as the distilled evidence. Preserve exact identifiers/code — never lose a candidate line to a summary. " +
+  SANDBOX_RULE
+
 // Build a REAL single-level RLM and forward it over { context, query }, bridging the
 // actor/context callbacks into the node-event tree. Returns the responder's answer +
 // evidence. rootId nests every RLM node under the live chat.turn span. Exported so the
@@ -145,7 +156,7 @@ export const runRlm = async (
     // "require is not defined" every actor turn and the run times out. Steer BOTH stages off
     // require AND off the askClarification/globalThis-scan dead-ends; variable NAMING is left to
     // ax's per-stage template (distiller: `context`; executor: inputs.executorRequest/distilledContext).
-    contextOptions: { description: SANDBOX_RULE },
+    contextOptions: { description: DISTILLER_RULE },
     executorOptions: { description: SANDBOX_RULE },
     // actorTurnCallback fires once per executor turn (1-based). Bridge each turn into a
     // start→done|error pair labelled by stage (distiller/executor) so the live tree

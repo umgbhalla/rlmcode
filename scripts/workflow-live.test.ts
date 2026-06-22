@@ -14,9 +14,9 @@
 // GATED behind AX2_LIVE=1 (costs nothing in normal lint). Run:
 //   AX2_LIVE=1 bun --env-file=.env scripts/workflow-live.test.ts   (or `bun run live:workflow`)
 import { ai, type AxAIService } from "@ax-llm/ax"
-import { type Activity, setActivitySink } from "../src/core/activity.ts"
+import type { Activity } from "../src/core/activity.ts"
 import { WORKFLOW_TOOLS } from "../src/core/workflow.ts"
-import { MODEL, rateLimiter } from "../src/core/runtime.ts"
+import { MODEL, rateLimiter, setTurnEmit } from "../src/core/runtime.ts"
 
 // Build the CF-Kimi AxAIService EXACTLY like src/runtime.ts's `llm` (openai-shaped Cloudflare
 // Workers AI endpoint). A standalone builder — NOT imported from orch-live.test.ts (that module
@@ -59,17 +59,22 @@ const runWorkflowLive = async (
   const tool = WORKFLOW_TOOLS.find((t) => t.name === "workflow")
   if (!tool?.func) throw new Error("workflow tool not found in WORKFLOW_TOOLS")
   const nodes: NodeRec[] = []
-  setActivitySink((a: Activity) => {
+  // Capture the workflow's node events via the PER-TURN emit sink: the handler recovers its sink
+  // with getTurnEmit(sessionId), so registering one under the SAME sessionId ("live-wf") receives
+  // every node Activity the script's nodes emit. (The module-global setActivitySink is gone — the
+  // restructure moved to a sessionId-keyed per-turn emit; this mirrors what turn() does in prod.)
+  const sessionId = "live-wf"
+  setTurnEmit(sessionId, (a: Activity) => {
     if (a.kind === "node") nodes.push({ nodeId: a.nodeId, event: a.event, parentId: a.parentId, detail: a.detail })
   })
   try {
     const out = await tool.func(
       { script },
-      { sessionId: "live-wf", ai: liveAi, abortSignal: new AbortController().signal },
+      { sessionId, ai: liveAi, abortSignal: new AbortController().signal },
     )
     return { reply: String(out ?? ""), nodes }
   } finally {
-    setActivitySink(null)
+    setTurnEmit(sessionId, () => {})
   }
 }
 
