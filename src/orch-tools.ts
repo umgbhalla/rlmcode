@@ -31,7 +31,6 @@ import { choiceFromArgs, type NodeModelChoice, nodeForwardOpts } from "./models.
 import { adversarialVerify, finalizeOnMaxSteps, judge, loopUntilDry, MAX_CONCURRENCY, parallelLimit, runNode } from "./orch-recipes.ts"
 import { allocate, type Budget, BudgetExhaustedError, type NodeOpts } from "./orch.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
-import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
 import { runPlanner } from "./orch-plan.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
@@ -429,71 +428,6 @@ const orchestrateTool: AxFunction = {
   },
 }
 
-// ── Tool 2: run_orch_script ────────────────────────────────────────────────────────
-const runOrchScriptTool: AxFunction = {
-  name: "run_orch_script",
-  description:
-    "Load and run a saved orchestration script from .ax/orch/<name>.ts (trusted dir; escaping paths rejected) against an optional message. WHEN TO USE: a reusable or SHAPED flow that `orchestrate`'s fixed strategies don't cover — a typed multi-step pipeline, a loop-until-dry, a gated adversarial verify. First write_file the script, then run it here by name. EXAMPLE — write .ax/orch/digest.ts then run_orch_script({ name: 'digest', message: '...' }): export const orchestrate = async (ctx, prims) => { const { message, rootId, ai, onEvent, optsFor, usageOf, budget } = ctx; const { gen, structuredPipeline } = prims; const extract = gen('message:string -> facts:json', 'Extract { topic, points } as JSON.'); const summarise = gen('facts:json -> summary:string', 'Summarise the facts in one paragraph.'); const out = await structuredPipeline([{ gen: extract, opts: optsFor(), nodeId: `${rootId}/extract`, budget, usageOf }, { gen: summarise, opts: optsFor(), nodeId: `${rootId}/summarise`, budget, usageOf }], ai, { message }, onEvent, rootId); return { reply: out.summary } }. PARAMS: name (bare script name under .ax/orch/, no directories); message (optional input passed to the script). The script needs NO runtime imports — it gets prims = { node, parallel, pipeline, emit, allocate (5 core), gen (factory), runNode, judge, loopUntilDry, adversarialVerify, structuredPipeline (5 basic recipes), untilGate, verifyHarden, verifiedStep (verified-step recipes: produce→cheap-gate→adversarial-harden, budget-bounded), journaledNode, loadJournal, saveJournal (opt-in crash-resume journal, OFF by default), resolveModel, MODELS (model-pool routing) } and ctx = { message, ai, budget, onEvent, optsFor(choice?), usageOf }. See .ax/orch/GUIDE.md for the full prims/recipes reference. The unit is a NODE: node(gen, opts) calls ax; runNode(spec, ai, input) runs ONE node bracketed by lifecycle events; gen(signature, description?) builds a typed node inline. RULE: call ctx.optsFor() for a FRESH forked memory per parallel node — never share a mutating memory across concurrent branches. structuredPipeline threads TYPED structured stage outputs (a gen typed 'text:string -> facts:json' feeds 'facts:json -> summary:string') stage→stage. See .ax/orch/GUIDE.md (and example.ts, structured-pipe.ts) for full examples.",
-  parameters: {
-    type: "object",
-    properties: {
-      name: { type: "string", description: "bare script name under .ax/orch/ (no directories)" },
-      message: { type: "string", description: "optional input message passed to the script" },
-    },
-    required: ["name"],
-  },
-  func: async (
-    args: { name: string; message?: string },
-    extra?: Readonly<{ sessionId?: string; ai?: AxAIService; abortSignal?: AbortSignal }>,
-  ) => {
-    const name = String(args?.name ?? "").trim()
-    if (name.length === 0) return "error: run_orch_script requires a script name"
-    const message = String(args?.message ?? "")
-    const ai = extra?.ai ?? llm
-    const sessionId = extra?.sessionId ?? "tool"
-    const signal = signalOf(extra)
-    const rootId = `orch-tool:${sessionId}:${name}:${Date.now()}`
-    const { optsFor, budget } = boundary(sessionId, signal, rootId)
-    const ctx: OrchLoadCtx = {
-      sessionId,
-      message,
-      rootId,
-      ai,
-      model: "",
-      budget,
-      onEvent,
-      optsFor,
-      usageOf: readUsageOf,
-    }
-    try {
-      // resolveScript inside runLoadedScript rejects any path that escapes .ax/orch/ —
-      // the trusted-dir guard is reused, not reimplemented. (ponytail below.)
-      const out = await otelContext.with(otelContext.active(), () => runLoadedScript(name, ctx))
-      return clip(out.reply)
-    } catch (e) {
-      // ADVISORY budget: only a HARD-ceiling runaway (or freeze) throws — a completed node
-      // is always returned. So this is the runaway backstop, not a per-node guillotine.
-      if (e instanceof BudgetExhaustedError) {
-        return `partial: the script hit its HARD runaway token ceiling (${e.spent}/${e.total}) and was stopped. ${e.reason}.`
-      }
-      return `script failed: ${String((e as { message?: string })?.message ?? e).slice(0, 500)}`
-    }
-  },
-}
-
-// The two agent-callable orchestration tools. Added to the MAIN chat gen ONLY
-// (agent.ts) — never to a sub-run node gen (which carries BASE_TOOLS), so the structural
-// one-level recursion guard holds.
-//
-// ponytail: in-process trust. run_orch_script dynamic-import()s a .ax/orch/ module and
-// orchestrate spawns leaves that run the file/shell tools — all with the host process's
-// FULL authority (fs/net/process). The boundary today is structural (BASE_TOOLS-only
-// leaves can't re-orchestrate) + the trusted-dir path-escape guard (orch-load.resolveScript)
-// + the per-sub-run token Budget — NOT a real sandbox. Ceiling: an LLM-chosen task or an
-// LLM-authored .ax/orch/ script can do anything the agent process can. Upgrade: execute
-// untrusted orchestration JS in an isolate via AxJSRuntime — the @ax-llm/ax sandbox over a
-// Bun smol Worker (`new AxJSRuntime({ permissions: [], outputMode: "return",
-// blockDynamicImport: true, freezeIntrinsics: true })`, ctor at
-// node_modules/@ax-llm/ax/index.d.ts:10346; AxJSRuntimePermission enum at :10296) or the
-// axCreateJSRuntime() factory (:10489) — session.eval the script text instead of import().
-export const ORCH_TOOLS: AxFunction[] = [orchestrateTool, runOrchScriptTool]
+// The agent-callable orchestration tool — added to the MAIN chat gen ONLY (agent.ts),
+// never to a sub-run node gen (nodes carry BASE_TOOLS), so the one-level recursion guard holds.
+export const ORCH_TOOLS: AxFunction[] = [orchestrateTool]

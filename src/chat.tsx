@@ -12,7 +12,7 @@ import { createCliRenderer, decodePasteBytes, RenderableEvents, SyntaxStyle } fr
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { abortTurn, projectDocLoaded } from "./agent.ts"
-import { appAtom, busyAtom, deleteSessionAtom, type Msg, newSessionAtom, orchestrateAtom, type OrchNode, type OrchTree, runScriptAtom, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
+import { appAtom, busyAtom, deleteSessionAtom, type Msg, newSessionAtom, type OrchNode, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
@@ -49,7 +49,7 @@ const fmtMeta = (m: TurnMeta): string => {
 
 const INDENT = 2 // single source of truth for transcript nesting
 
-const IDLE_HINT = "↑↓ history · tab focus · enter expand · ^o orchestrate · /run <script> · PgUp/PgDn scroll · ← / esc back"
+const IDLE_HINT = "↑↓ history · tab focus · enter expand · PgUp/PgDn scroll · ← / esc back"
 // Right-side status text + tone for the bottom bar (busy/armed/transient note/idle).
 const statusBar = (busy: boolean, armed: boolean, note: string | null): { right: string; tone: string } => {
   if (armed) return { right: "esc again to interrupt", tone: "#f38ba8" }
@@ -404,8 +404,6 @@ function App() {
   const newSession = useAtomSet(newSessionAtom)
   const deleteSession = useAtomSet(deleteSessionAtom)
   const [, send] = useAtom(sendAtom)
-  const [, orchestrate] = useAtom(orchestrateAtom)
-  const [, runScript] = useAtom(runScriptAtom)
   const { width, height } = useTerminalDimensions()
 
   const [text, setText] = useState("") // mirror of textarea content (for empty-detection)
@@ -547,33 +545,7 @@ function App() {
     draftRef.current = ""
     if (t.length === 0) return
     history.push(t)
-    // /run <name> [message] — load+run a TRUSTED orchestration script from .ax/orch/
-    // through loadAndRunOrch (dyn-load), rendering its nodes in the same live tree as
-    // ^o. Distinct from ^o (which runs the fixed demo orchestration).
-    const runMatch = /^\/run\s+(.+)$/.exec(t)
-    if (runMatch) {
-      if (busy) return
-      return void runScript(runMatch[1]!)
-    }
     send(t)
-  }
-
-  // ctrl+o — dispatch the REAL multi-node orchestration (orch-run.orchestrate) for
-  // the current input instead of the normal single turn: a parallel() fan-out of
-  // candidate agents, then a judge + skeptic verify, all under the session's one
-  // trace, streaming NodeEvents into the live orchestration tree below the transcript.
-  const submitOrchestrate = () => {
-    if (busy) return
-    let v = taRef.current?.plainText ?? text
-    for (const p of pastesRef.current) v = v.split(p.ph).join(p.text)
-    pastesRef.current = []
-    const t = v.trim()
-    if (t.length === 0) return
-    setInput("")
-    setHistIdx(null)
-    draftRef.current = ""
-    history.push(t)
-    orchestrate(t)
   }
 
   const onPaste = (event: any) => {
@@ -681,8 +653,6 @@ function App() {
 
   useKeyboard((k) => {
     if (k.ctrl && k.name === "c") return process.exit(0)
-    // ctrl+o (chat view): dispatch the demo orchestration for the current input.
-    if (k.ctrl && k.name === "o" && state.view === "chat") return submitOrchestrate()
     return state.view === "list" ? onListKey(k) : onChatKey(k)
   })
 

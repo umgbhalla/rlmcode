@@ -9,7 +9,7 @@
 // fold the UI uses (sum of every node's tokens) reproduces the per-node + total sums.
 import type { AxAIService, AxGen, AxGenIn, AxGenOut } from "@ax-llm/ax"
 import { AxMemory } from "@ax-llm/ax"
-import { runNode, structuredPipeline, type EmitSink } from "../src/orch-recipes.ts"
+import { runNode, type EmitSink } from "../src/orch-recipes.ts"
 import { allocate, type BudgetUsage, type NodeOpts, type NodeEvent, tokensOf } from "../src/orch.ts"
 
 let failed = 0
@@ -106,31 +106,6 @@ await (async () => {
     const tree = foldTree(events)
     assert(tree.totalTokens === expectedTotal, `OrchTree fold total === ${expectedTotal}, got ${tree.totalTokens}`)
     assert(tree.nodes["branch-0"]?.tokens === 318_000, "tree node-0 holds its own tokens")
-  }
-
-  // 3) structuredPipeline stamps per-stage tokens too (the threaded-output path).
-  {
-    const { events, sink } = recorder()
-    const budget = allocate(Number.POSITIVE_INFINITY)
-    const stageUsages = [1_000, 2_500]
-    await structuredPipeline(
-      stageUsages.map((u, i) => ({
-        gen: fakeGen({ out: `s${i}` }),
-        opts: optsFor(),
-        budget,
-        usageOf: () => ({ totalTokens: u }),
-      })),
-      fakeAi,
-      { text: "in" },
-      sink,
-      "pipe",
-    )
-    const stageDones = (events.filter((e) => e.type === "done") as Extract<NodeEvent, { type: "done" }>[]).filter((e) =>
-      e.nodeId.startsWith("pipe/stage-"),
-    )
-    assert(stageDones.length === 2, `two stage done events, got ${stageDones.length}`)
-    assert(stageDones.every((e, i) => e.tokens === stageUsages[i]), "each stage done carries its own tokens")
-    assert((await budget.spent()) === 3_500, `pipeline budget total === 3500, got ${await budget.spent()}`)
   }
 })()
 
