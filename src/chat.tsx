@@ -401,6 +401,19 @@ function App() {
   const childrenOf = useMemo(() => childrenIndex(orch), [orch])
   const isExpanded = (t: Turn) => expTurns.has(t.idx) || t.final === null // in-progress auto-expands
 
+  // Focus re-assertion: opentui focus is imperative and one-shot — the static
+  // `focused` prop on the textarea only fires focus() once (on mount), and any
+  // later click on a selectable=false row OR an orchestration re-render routes
+  // focus through focusRenderable(), which blur()s the textarea. Re-call focus()
+  // whenever the state that drives those re-renders changes; focus() early-returns
+  // if we still hold focus, so this is a cheap no-op in the common case. Keyed on
+  // busy (turn lifecycle), orch tree size (live fan-out rows mounting), the
+  // keyboard focus cursor + expansion sets (Tab/Enter row toggles), and view.
+  const orchNodeCount = orch ? Object.keys(orch.nodes).length : 0
+  useEffect(() => {
+    if (state.view === "chat") taRef.current?.focus?.()
+  }, [state.view, busy, orchNodeCount, focus, expTurns, expTools, expNodes])
+
   // Expandable rows in transcript order = Tab focus ring (turn-steps header, then
   // its tool rows when that turn is expanded). Enter toggles the focused one.
   const focusables: string[] = []
