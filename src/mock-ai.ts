@@ -34,6 +34,26 @@ const MOCK_ORCH_TOOL = {
   type: "function" as const,
   function: { name: "mock_orch", params: JSON.stringify({}) },
 }
+
+// GROUP variant: when the user message asks to explore, the mock scripts THREE CONSECUTIVE
+// explore tool calls (read_file → glob → grep) in ONE tool-loop step. ax executes all three,
+// appends their results to memory, then calls again → the final reply. These land as three
+// TURN STEPS (no nodeId → main transcript), so chat.tsx's groupSteps() collapses them into a
+// single "⊙ explored 3 (1 read · 1 glob · 1 grep)" row — the render path the per-node tool
+// test never hits (it routes tools UNDER a node, not into turn steps). Args are harmless real
+// ops over this repo (read AGENTS.md, glob the source tree, grep a literal): the unsandboxed
+// BASE_TOOLS succeed, so each step settles status:"ok" (NOT error) — exactly what grouping
+// requires (an errored explore tool is excluded from the group).
+const MOCK_GROUP_TOOLS = [
+  { id: "call_grp_read", type: "function" as const, function: { name: "read_file", params: JSON.stringify({ path: "AGENTS.md", limit: 1 }) } },
+  { id: "call_grp_glob", type: "function" as const, function: { name: "glob", params: JSON.stringify({ pattern: "src/*.ts" }) } },
+  { id: "call_grp_grep", type: "function" as const, function: { name: "grep", params: JSON.stringify({ pattern: "ponytail" }) } },
+]
+const wantsGroup = (req: Readonly<AxChatRequest<unknown>>): boolean => {
+  const users = req.chatPrompt.filter((m) => m.role === "user")
+  const last = users[users.length - 1]
+  return last !== undefined && typeof last.content === "string" && /explore/i.test(last.content)
+}
 // Route on the CURRENT turn's user message (the LAST user turn), not "any historical user
 // message" — a shared session memory retains prior turns, so matching any of them would make
 // every later turn orchestrate once one did. The last user message is this turn's request.
@@ -62,10 +82,13 @@ const hasCurrentTurnToolResult = (req: Readonly<AxChatRequest<unknown>>): boolea
 }
 const scriptedChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResponse> => {
   const hasToolResult = hasCurrentTurnToolResult(req)
-  const tool = wantsOrch(req) ? MOCK_ORCH_TOOL : MOCK_TOOL
+  // The explore turn fans out the read/glob/grep cluster (grouping path); the orchestrate
+  // turn calls mock_orch; everything else runs the single bash step. One call returns one
+  // step's functionCalls — the group variant returns all three at once.
+  const calls = wantsGroup(req) ? MOCK_GROUP_TOOLS : wantsOrch(req) ? [MOCK_ORCH_TOOL] : [MOCK_TOOL]
   const result = hasToolResult
     ? { index: 0, content: MOCK_REPLY, thought: MOCK_THOUGHT, finishReason: "stop" as const }
-    : { index: 0, content: "", thought: MOCK_THOUGHT, functionCalls: [tool], finishReason: "function_call" as const }
+    : { index: 0, content: "", thought: MOCK_THOUGHT, functionCalls: calls, finishReason: "function_call" as const }
   return Promise.resolve({
     remoteId: "mock-resp-1",
     results: [result],
@@ -105,7 +128,7 @@ const streamReply = (): ReadableStream<AxChatResponse> => {
 // streams; the tool-call step and orch turns stay plain (their reply is the orch tree, not
 // streamed prose). Returns a ReadableStream only where the live render is under test.
 const scriptedStreamChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResponse | ReadableStream<AxChatResponse>> =>
-  hasCurrentTurnToolResult(req) && !wantsOrch(req) ? Promise.resolve(streamReply()) : scriptedChat(req)
+  hasCurrentTurnToolResult(req) && !wantsOrch(req) && !wantsGroup(req) ? Promise.resolve(streamReply()) : scriptedChat(req)
 
 // The canned AI service — ax's real AxMockAIService with our scripted chat. `functions:
 // true` so ax permits the tool-call path. `streaming` toggles the live-delta variant (used
