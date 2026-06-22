@@ -16,9 +16,9 @@
 //       interleaved into one stream (concurrency-correct: per-node logger closures, no global).
 import type { AxAIService, AxGen, AxGenIn, AxGenOut, AxLoggerData } from "@ax-llm/ax"
 import { AxMemory } from "@ax-llm/ax"
-import { type Activity, setActivitySink } from "../src/activity.ts"
-import { runNode } from "../src/orch-recipes.ts"
-import type { NodeOpts } from "../src/orch.ts"
+import { type Activity, setActivitySink } from "../src/core/activity.ts"
+import { runNode } from "../src/core/orch-recipes.ts"
+import type { NodeOpts } from "../src/core/orch.ts"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {

@@ -15,9 +15,9 @@ import * as Resource from "@effect/opentelemetry/Resource"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Tracer from "effect/Tracer"
-import { setActivitySink } from "../src/activity.ts"
+import { setActivitySink } from "../src/core/activity.ts"
 // The ENTIRE surface a caller needs comes from sdk.ts — no reaching into internals.
-import { type AxAIService, AxMemory, createAgent } from "../src/sdk.ts"
+import { type AxAIService, AxMemory, createAgent } from "../src/core/sdk.ts"
 
 // ── plain ax2-style assertions ──────────────────────────────────────────────────
 let failed = 0

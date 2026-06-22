@@ -42,7 +42,7 @@ import { limits, onEvent } from "./runtime.ts"
 import { allocate } from "./orch.ts"
 import { withTimeout } from "./orch-recipes.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
-import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
+import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 
 // Per-RLM SOFT token ceiling (advisory nudge line). An RLM explores a big context across
 // many executor turns + sub-LM queries, so ~2M is a sane "this run is getting big" marker.

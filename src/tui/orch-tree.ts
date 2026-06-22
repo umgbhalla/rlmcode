@@ -8,8 +8,8 @@
 // (`tools`), the collapsed-only owned-tool COUNT label, the token badge, the status
 // glyph/color, and the ▾/▸ expander state. The owning chat.tsx renders the tools
 // under the node, indented by `bodyPrefix` so they hang inside the tree.
-import type { Msg, OrchNode, OrchTree } from "../atoms.ts"
-import { theme } from "../theme.ts"
+import type { Msg, OrchNode, OrchTree } from "./atoms.ts"
+import { theme } from "./theme.ts"
 
 type ToolMsg = Extract<Msg, { kind: "tool" }>
 

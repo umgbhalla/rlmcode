@@ -9,8 +9,8 @@
 // fold the UI uses (sum of every node's tokens) reproduces the per-node + total sums.
 import type { AxAIService, AxGen, AxGenIn, AxGenOut } from "@ax-llm/ax"
 import { AxMemory } from "@ax-llm/ax"
-import { runNode, type EmitSink } from "../src/orch-recipes.ts"
-import { allocate, type BudgetUsage, type NodeOpts, type NodeEvent, tokensOf } from "../src/orch.ts"
+import { runNode, type EmitSink } from "../src/core/orch-recipes.ts"
+import { allocate, type BudgetUsage, type NodeOpts, type NodeEvent, tokensOf } from "../src/core/orch.ts"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {

@@ -15,11 +15,11 @@ import { AxFunctionError, type AxAIService, type AxGen } from "@ax-llm/ax"
 // here and dynamic-import the recipes below — static imports would hoist above this.
 process.env.AX2_NODE_BACKOFF_MS = "2"
 process.env.AX2_NODE_RETRIES = "2"
-const { NodeTimeoutError, parallelLimit, resilientNode, runNode, withRetry, withTimeout } = await import("../src/orch-recipes.ts")
-type EmitSink = import("../src/orch-recipes.ts").EmitSink
-const { BudgetExhaustedError } = await import("../src/orch.ts")
-type NodeOpts = import("../src/orch.ts").NodeOpts
-type NodeEvent = import("../src/orch.ts").NodeEvent
+const { NodeTimeoutError, parallelLimit, resilientNode, runNode, withRetry, withTimeout } = await import("../src/core/orch-recipes.ts")
+type EmitSink = import("../src/core/orch-recipes.ts").EmitSink
+const { BudgetExhaustedError } = await import("../src/core/orch.ts")
+type NodeOpts = import("../src/core/orch.ts").NodeOpts
+type NodeEvent = import("../src/core/orch.ts").NodeEvent
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {

@@ -1,5 +1,5 @@
 import * as Registry from "effect/unstable/reactivity/AtomRegistry"
-import { appAtom, newSessionAtom, sendAtom } from "./src/atoms.ts"
+import { appAtom, newSessionAtom, sendAtom } from "./src/tui/atoms.ts"
 const reg = Registry.make()
 reg.mount(appAtom); reg.mount(newSessionAtom); reg.mount(sendAtom)
 reg.set(newSessionAtom, undefined)

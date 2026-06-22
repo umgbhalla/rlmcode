@@ -7,11 +7,11 @@
 // unicode frame. Plain asserts, no framework — ax2 fixture style (see orch-cost.test).
 import { ax } from "@ax-llm/ax"
 import { AxMemory } from "@ax-llm/ax"
-import { makeMockAI, MOCK_FIXTURE, MOCK_MODEL } from "../../src/mock-ai.ts"
-import { MOCK_NODES } from "../../src/mock.ts"
-import { BASE_TOOLS } from "../../src/tools.ts"
-import type { NodeEvent } from "../../src/orch.ts"
-import type { OrchNode, OrchTree } from "../../src/atoms.ts"
+import { makeMockAI, MOCK_FIXTURE, MOCK_MODEL } from "../../src/core/mock-ai.ts"
+import { MOCK_NODES } from "../../src/core/mock.ts"
+import { BASE_TOOLS } from "../../src/core/tools.ts"
+import type { NodeEvent } from "../../src/core/orch.ts"
+import type { OrchNode, OrchTree } from "../../src/tui/atoms.ts"
 import { flatten } from "../../src/tui/orch-tree.ts"
 
 let failed = 0

@@ -21,7 +21,7 @@ import { TerminalControl, type Session, type Key } from "../../vendor/terminal-c
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = join(HERE, "..", "..")
-const CHAT = join(REPO, "src", "chat.tsx")
+const CHAT = join(REPO, "src", "tui", "chat.tsx")
 
 // The cargo-installed termctrl binary (the native npm packages aren't vendored). Honor an
 // explicit override; otherwise the standard `cargo install` location.

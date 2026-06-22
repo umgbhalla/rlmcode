@@ -22,7 +22,7 @@ import { estimatedCostOf, llm, onEvent } from "./runtime.ts"
 import { choiceFromArgs } from "./models.ts"
 import { allocate, BudgetExhaustedError } from "./orch.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
-import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
+import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 import { buildWorkflowPrims, type WorkflowPrims } from "./workflow-prims.ts"
 
 // Per-workflow SOFT token ceiling (advisory nudge line) + HARD runaway backstop (the ONLY one

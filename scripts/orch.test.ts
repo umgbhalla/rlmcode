@@ -11,8 +11,8 @@
 // asserts every branch's memory holds only its own write (no cross-branch bleed).
 import type { AxAIService, AxGen } from "@ax-llm/ax"
 import { AxMemory } from "@ax-llm/ax"
-import { runNode, type EmitSink } from "../src/orch-recipes.ts"
-import { type NodeOpts, node, type NodeEvent, parallel, pipeline } from "../src/orch.ts"
+import { runNode, type EmitSink } from "../src/core/orch-recipes.ts"
+import { type NodeOpts, node, type NodeEvent, parallel, pipeline } from "../src/core/orch.ts"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {

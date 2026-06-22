@@ -23,7 +23,7 @@ import { finalizeOnMaxSteps, judge as judgeRecipe, parallelLimit, runNode } from
 import { pipeline as pipelineCore, type Budget, type NodeOpts } from "./orch.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { runRlm } from "./rlm-node.ts"
-import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
+import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 
 // In-flight concurrency for a parallel() barrier — at most this many nodes run simultaneously;

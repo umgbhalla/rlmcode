@@ -10,11 +10,11 @@ import { ai, AxMemory, type AxAIService } from "@ax-llm/ax"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Tracer from "effect/Tracer"
-import { setNodeSpanTracer } from "../src/orch-spans.ts"
-import { runRlm } from "../src/rlm-node.ts"
-import { turn } from "../src/agent.ts"
+import { setNodeSpanTracer } from "../src/core/orch-spans.ts"
+import { runRlm } from "../src/core/rlm-node.ts"
+import { turn } from "../src/core/agent.ts"
 import { TracingLive } from "../src/otel.ts"
-import { MODEL, rateLimiter } from "../src/runtime.ts"
+import { MODEL, rateLimiter } from "../src/core/runtime.ts"
 
 // Build the CF-Kimi service exactly like src/runtime.ts (standalone, not the app singleton).
 const buildLiveAi = (): AxAIService => {
@@ -62,7 +62,7 @@ await (async () => {
   })
   const hi = await Effect.runPromise(Effect.provide(hiProgram, Layer.merge(TracingLive, Layer.empty)))
   // SYSTEM_PROMPT_CHARS is the assembled system prompt size (BASE_PROMPT+RLM_WORKFLOW_OVERLAY+projectDoc).
-  const { SYSTEM_PROMPT_CHARS } = await import("../src/agent.ts")
+  const { SYSTEM_PROMPT_CHARS } = await import("../src/core/agent.ts")
   console.log("─".repeat(60))
   console.log("(1)(2)(3) TRIVIAL 'hi' TURN — attribution:")
   console.log(`  wall:            ${hi.wallMs}ms`)

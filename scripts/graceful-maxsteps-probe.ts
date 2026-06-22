@@ -9,8 +9,8 @@
 // Gated behind AX2_LIVE=1 (skips clean otherwise). Run:
 //   AX2_LIVE=1 AX2_MAX_STEPS=1 bun --env-file=.env scripts/graceful-maxsteps-probe.ts
 import { ai, type AxAIService, type AxFunction } from "@ax-llm/ax"
-import { RLM_WORKFLOW_TOOLS } from "../src/rlm-workflow.ts"
-import { MODEL, limits, rateLimiter } from "../src/runtime.ts"
+import { RLM_WORKFLOW_TOOLS } from "../src/core/rlm-workflow.ts"
+import { MODEL, limits, rateLimiter } from "../src/core/runtime.ts"
 
 if (process.env.AX2_LIVE !== "1") {
   console.log("graceful-maxsteps-probe: skipped: set AX2_LIVE=1")

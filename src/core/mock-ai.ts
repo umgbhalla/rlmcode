@@ -2,6 +2,7 @@
 // (mock.ts → agent.ts; agent.ts → mock-ai.ts for the AX2_MOCK seam; keeping the AI
 // builder here breaks that cycle). Zero network, zero Cloudflare.
 import { AxMockAIService, type AxChatRequest, type AxChatResponse } from "@ax-llm/ax"
+import { emitActivity } from "./activity.ts"
 
 // The model id the mock answers as — a fixed fake so meta/tracing read a stable value.
 export const MOCK_MODEL = "@mock/kimi"
@@ -54,6 +55,17 @@ const wantsGroup = (req: Readonly<AxChatRequest<unknown>>): boolean => {
   const last = users[users.length - 1]
   return last !== undefined && typeof last.content === "string" && /explore/i.test(last.content)
 }
+// AxMockAIService.chat() bypasses base.ts's response-logging, so unlike a real provider it
+// NEVER fires the ChatResponseResults logger event that the activity bus turns into tool-CALL
+// rows (kind:"tool"). The gen loop still logs FunctionResults (kind:"result"), but a result
+// with no prior call is dropped by atoms' in-place settle, so the mock's tool STEPS never
+// render. For the group variant we need the three explore steps to land as turn steps, so we
+// emit their tool-call activities ourselves — exactly what logResponse would have, onto the
+// same global sink the running turn's liveLogger is bound to. Scoped to the group path so the
+// existing single-bash/orch frame fixtures are byte-unchanged.
+const emitGroupCalls = (): void => {
+  for (const c of MOCK_GROUP_TOOLS) emitActivity({ kind: "tool", id: c.id, name: c.function.name, args: c.function.params })
+}
 // Route on the CURRENT turn's user message (the LAST user turn), not "any historical user
 // message" — a shared session memory retains prior turns, so matching any of them would make
 // every later turn orchestrate once one did. The last user message is this turn's request.
@@ -86,6 +98,9 @@ const scriptedChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResp
   // turn calls mock_orch; everything else runs the single bash step. One call returns one
   // step's functionCalls — the group variant returns all three at once.
   const calls = wantsGroup(req) ? MOCK_GROUP_TOOLS : wantsOrch(req) ? [MOCK_ORCH_TOOL] : [MOCK_TOOL]
+  // On the tool-call step of an explore turn, surface the cluster's calls to the activity bus
+  // (the mock service doesn't, see emitGroupCalls) so the three explore steps render + group.
+  if (!hasToolResult && wantsGroup(req)) emitGroupCalls()
   const result = hasToolResult
     ? { index: 0, content: MOCK_REPLY, thought: MOCK_THOUGHT, finishReason: "stop" as const }
     : { index: 0, content: "", thought: MOCK_THOUGHT, functionCalls: calls, finishReason: "function_call" as const }

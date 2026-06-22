@@ -7,8 +7,8 @@
 // asserts the NodeEvent stream and result shapes. This is the first exercise of the
 // orchestration engine off-LLM: it pins the verify-before-accept flow's contract.
 import type { AxAIService, AxGen } from "@ax-llm/ax"
-import { adversarialVerify, type EmitSink, MAX_CONCURRENCY, parallelLimit, runNode } from "../src/orch-recipes.ts"
-import { allocate, BudgetExhaustedError, type NodeOpts, type NodeEvent, parallel, pipeline } from "../src/orch.ts"
+import { adversarialVerify, type EmitSink, MAX_CONCURRENCY, parallelLimit, runNode } from "../src/core/orch-recipes.ts"
+import { allocate, BudgetExhaustedError, type NodeOpts, type NodeEvent, parallel, pipeline } from "../src/core/orch.ts"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {

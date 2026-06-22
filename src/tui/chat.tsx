@@ -11,13 +11,13 @@ import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/ato
 import { createCliRenderer, decodePasteBytes, RenderableEvents, SyntaxStyle, TextAttributes } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useRef, useState } from "react"
-import { abortTurn, projectDocLoaded } from "./agent.ts"
+import { abortTurn, projectDocLoaded } from "../core/agent.ts"
 import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { theme } from "./theme.ts"
-import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
-import { flatten, type Row as OrchRow } from "./tui/orch-tree.ts"
+import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "../core/toolui.ts"
+import { flatten, type Row as OrchRow } from "./orch-tree.ts"
 
 const projectDoc = projectDocLoaded
 const mdStyle = SyntaxStyle.create()

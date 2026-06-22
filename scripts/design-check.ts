@@ -29,7 +29,7 @@ export type Finding = { tag: "broken" | "delete" | "native" | "cycle" | "shrink"
 // canned node feed). Consumed by scripts/tui/*.test.ts and the agent.ts AX2_MOCK runtime
 // swap — the tests OUTSIDE the src/-only scan — so they're roots, like sdk.ts, lest their
 // seam surface (MOCK_NODES / makeMockAI / MOCK_FIXTURE) be pruned to its in-src callers.
-const ENTRY = new Set(["src/chat.tsx", "src/orch.ts", "src/orch-recipes.ts", "src/sdk.ts", "src/mock.ts", "src/mock-ai.ts"])
+const ENTRY = new Set(["src/tui/chat.tsx", "src/core/orch.ts", "src/core/orch-recipes.ts", "src/core/sdk.ts", "src/core/run.ts", "src/core/mock.ts", "src/core/mock-ai.ts"])
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
 const NEST_BUDGET = 8 // block nesting depth per function
 const PARAM_BUDGET = 6 // parameters per function
@@ -49,7 +49,7 @@ const isBarrel = (path: string, source: string): boolean =>
     !/^export\s+(const|function|async|class|enum|default)\b/m.test(source))
 
 // Existing oversized files grandfathered in. New files must stay under LINE_BUDGET.
-const OVERSIZED_ALLOWLIST = new Set(["src/chat.tsx", "build-viz.ts"])
+const OVERSIZED_ALLOWLIST = new Set(["src/tui/chat.tsx", "build-viz.ts"])
 
 // Dependencies that duplicate a Bun/modern-JS native. Curated (low false
 // positive) — flags the package, not "you wrote a manual loop".

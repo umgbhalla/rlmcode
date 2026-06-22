@@ -32,7 +32,7 @@ import { allocate, type Budget, BudgetExhaustedError, type NodeOpts } from "./or
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { runPlanner } from "./orch-plan.ts"
 import { runRlm } from "./rlm-node.ts"
-import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
+import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 
 // Per-self-orchestration SOFT token ceiling, SHARED across the sub-run's branches. This

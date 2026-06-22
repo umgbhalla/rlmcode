@@ -4,7 +4,7 @@
 // (fan-out + nested children + an error node + a COLLAPSED settled subtree) and asserts
 // the EXACT connector prefixes (├─ │ └─ blanks), render order, and the per-node payload
 // (glyph, tools ring, collapsed tool-count label, expansion) the renderer depends on.
-import type { Msg, OrchNode, OrchTree } from "../src/atoms.ts"
+import type { Msg, OrchNode, OrchTree } from "../src/tui/atoms.ts"
 import { flatten, type Row } from "../src/tui/orch-tree.ts"
 
 let failed = 0

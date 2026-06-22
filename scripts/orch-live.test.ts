@@ -14,10 +14,10 @@
 // Run: AX2_LIVE=1 bun scripts/orch-live.test.ts   (or `bun run live`, which passes
 // --env-file=.env so CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID load).
 import { AxAgentClarificationError, ai, type AxAIService, type AxFunction } from "@ax-llm/ax"
-import { type Activity, setActivitySink } from "../src/activity.ts"
-import { RLM_WORKFLOW_TOOLS } from "../src/rlm-workflow.ts"
-import { runRlm } from "../src/rlm-node.ts"
-import { limits, MODEL, rateLimiter } from "../src/runtime.ts"
+import { type Activity, setActivitySink } from "../src/core/activity.ts"
+import { RLM_WORKFLOW_TOOLS } from "../src/core/rlm-workflow.ts"
+import { runRlm } from "../src/core/rlm-node.ts"
+import { limits, MODEL, rateLimiter } from "../src/core/runtime.ts"
 
 // Build the CF-Kimi AxAIService EXACTLY like src/runtime.ts's `llm` (openai-shaped
 // Cloudflare Workers AI endpoint from .env). A standalone builder — not the shared
