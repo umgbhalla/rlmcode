@@ -291,35 +291,31 @@ export const createAgent = (config: AxAgentConfig) => {
         Effect.annotateLogs({ "session.id": sessionId, "message.chars": message.length }),
       )
 
-      // TIMING BREAKDOWN (telemetry leap 3) + PROMPT SIZE (leap 2): stamp the span with
-      // events that split the turn's wall-clock into assemble vs model vs parse. The system
-      // prompt is assembled at module load (SYSTEM_PROMPT_CHARS) and re-sent verbatim each
-      // turn, so 'prompt.assembled' carries the system+user char size; 'forward.sent'/
-      // 'forward.received' bracket the model fetch (stream:false ⇒ one round trip). Even
-      // though assemble is trivial here, separating it proves the time is in the MODEL, not
-      // our plumbing — the key signal for a slow "hi" being all reasoning.
+      // TIMING BREAKDOWN (telemetry leap 3) + PROMPT SIZE (leap 2): stamp the span with events
+      // that split the turn's wall-clock into assemble vs model vs parse. The system prompt is
+      // assembled at module load (SYSTEM_PROMPT_CHARS) and re-sent verbatim each turn, so
+      // 'prompt.assembled' carries the system+user char size; 'forward.sent'/'forward.received'
+      // bracket the model fetch. Separating assemble proves the time is in the MODEL, not our
+      // plumbing — the key signal for a slow "hi" being all reasoning.
       const promptChars = systemPromptChars + message.length
       yield* Effect.annotateCurrentSpan({ "chat.prompt.system_chars": systemPromptChars, "chat.prompt.total_chars": promptChars })
       // Timing events go on the RAW OTel span (otelSpan, already resolved above) — Effect v4
       // exposes no addEventToCurrentSpan, and the OTel span carries timestamps natively.
       otelSpan.addEvent("prompt.assembled", { "chat.prompt.system_chars": systemPromptChars, "chat.prompt.total_chars": promptChars })
 
-      // GRACEFUL MAX-STEPS (claude_code ceiling): instead of letting ax throw
-      // "max steps reached" and recovering with a SEPARATE no-tools gen (the old
-      // brittle string-match + answerGen path), we hook ax's own tool loop. On the
-      // LAST permitted step finalizeOnMaxSteps strips the tools, so ax is FORCED to
-      // emit a final TEXT reply IN-LOOP — no throw, no string-match. onTruncate flips
-      // the flag below so the turn is marked truncated-then-finalized (the session
-      // AxMemory persists, so a follow-up turn resumes from where this one stopped).
+      // GRACEFUL MAX-STEPS (claude_code ceiling): instead of letting ax throw "max steps reached"
+      // and recovering with a SEPARATE no-tools gen (the old brittle string-match + answerGen
+      // path), we hook ax's own tool loop. On the LAST permitted step finalizeOnMaxSteps strips
+      // the tools, so ax is FORCED to emit a final TEXT reply IN-LOOP — no throw, no string-match.
+      // onTruncate flips the flag below; the session AxMemory persists, so a follow-up turn
+      // resumes from where this one stopped.
       let budgetExhausted = false
       const stepHooks = finalizeOnMaxSteps(chatToolNames, onEvent, `turn:${sessionId}`, () => {
         budgetExhausted = true
       })
 
-      // Make chat.turn the ACTIVE OTel context during forward so ax's tracer
-      // (which reads context.active()) nests its gen_ai span under chat.turn.
-      // stream:false -> no token streaming; we render step-by-step.
-      // abortSignal -> ax cancels the in-flight forward when the UI interrupts.
+      // Make chat.turn the ACTIVE OTel context during forward so ax's tracer (which reads
+      // context.active()) nests its gen_ai span under chat.turn. abortSignal -> ax cancels in-flight.
       const runForward = (msg: string) =>
         Effect.tryPromise({
           try: () =>
@@ -336,11 +332,11 @@ export const createAgent = (config: AxAgentConfig) => {
                     tracer,
                     traceContext,
                     maxSteps,
-                    // STREAM: ax consumes the stream INTERNALLY (forward() still resolves with
-                    // the authoritative final result) and fires the per-chunk LOGGER, which the
-                    // activity bus turns into replyDelta/thinkingDelta → the reply + reasoning
-                    // render live. sendAtom reconciles to the resolved res.reply at turn end, so
-                    // a provider that doesn't truly stream just shows the reply at the end.
+                    // STREAM: ax consumes the stream INTERNALLY (forward() still resolves with the
+                    // authoritative final result) and fires the per-chunk LOGGER, which the activity
+                    // bus turns into replyDelta/thinkingDelta → reply + reasoning render live.
+                    // sendAtom reconciles to the resolved res.reply at turn end, so a non-streaming
+                    // provider just shows the reply at the end.
                     stream: true,
                     abortSignal: aborter.signal,
                     stepHooks,
@@ -360,10 +356,9 @@ export const createAgent = (config: AxAgentConfig) => {
           catch: (e) => new ChatError(e),
         })
 
-      // TIMING BREAKDOWN (telemetry 3): bracket the model fetch with span events. stream:false
-      // ⇒ one round trip, so 'forward.sent' → 'forward.received' IS the model wall-clock (where
-      // a slow thinking-model turn spends its time); 'parsed' marks ax's response parse done.
-      // These are emitted on the raw OTel span so motel's span view shows the split.
+      // TIMING BREAKDOWN (telemetry 3): bracket the model fetch with span events — 'forward.sent'
+      // → 'forward.received' IS the model wall-clock; 'parsed' marks ax's response parse done.
+      // Emitted on the raw OTel span so motel's span view shows the split.
       otelSpan.addEvent("forward.sent")
       const res = yield* runForward(message).pipe(
         (eff) => Effect.tap(eff, () => Effect.sync(() => otelSpan.addEvent("forward.received"))),

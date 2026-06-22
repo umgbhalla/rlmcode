@@ -36,7 +36,7 @@ const PARAM_BUDGET = 6 // parameters per function
 const LINE_BUDGET = 500 // source lines per file
 
 // Existing oversized files grandfathered in. New files must stay under LINE_BUDGET.
-const OVERSIZED_ALLOWLIST = new Set(["src/chat.tsx", "build-viz.ts", "src/agent.ts"])
+const OVERSIZED_ALLOWLIST = new Set(["src/chat.tsx", "build-viz.ts"])
 
 // Dependencies that duplicate a Bun/modern-JS native. Curated (low false
 // positive) — flags the package, not "you wrote a manual loop".
