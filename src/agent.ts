@@ -213,8 +213,10 @@ export const createAgent = (config: AxAgentConfig) => {
   const chat = ax("message:string -> reply:string", { functions: chatTools })
   const systemPrompt = buildSystemPrompt()
   // PROMPT SIZE (telemetry leap 2): this agent's actual assembled prompt char count, read by
-  // turn() below. The module-level SYSTEM_PROMPT_CHARS export tracks the DEFAULT agent.
-  const systemPromptChars = systemPrompt.length
+  // turn() below. The system prompt is tool-independent (BASE_PROMPT + RLM_WORKFLOW_OVERLAY +
+  // projectDoc), so it equals the module-level SYSTEM_PROMPT_CHARS export for every agent —
+  // reuse it (it's also the value the telemetry-live harness asserts against).
+  const systemPromptChars = SYSTEM_PROMPT_CHARS
   chat.setDescription(systemPrompt)
   // The registered tool names — handed to finalizeOnMaxSteps so the in-loop step hook strips
   // exactly these on the final permitted step (GRACEFUL max-steps ceiling).
