@@ -1,9 +1,11 @@
-// Agent-callable RLM tool — `run_rlm`. A REAL single-level @ax-llm/ax RLM (the
-// distiller → executor → responder loop over runtime-held context), wired the same
-// way the proven standalone smoke runs it, but bridged into ax2's live node-event
-// tree so a self-orchestrated RLM renders NESTED under the chat.turn span.
+// RLM NODE — a node KIND of the rlm_workflow engine. `runRlm` is the context-mining
+// node: a REAL single-level @ax-llm/ax RLM (the distiller → executor → responder loop
+// over runtime-held context), bridged into ax2's live node-event tree so it renders
+// NESTED under the chat.turn span. It is NOT a standalone tool: the rlm_workflow tool
+// (rlm-workflow.ts) invokes it via strategy 'rlm' — one node-kind among the fan-out
+// strategies, on the SAME event bus / budget / trace.
 //
-// WHY RLM (vs orchestrate's fan-out): a fan-out leaf pulls the whole context into the
+// WHY RLM (vs the fan-out strategies): a fan-out leaf pulls the whole context into the
 // LLM prompt. An RLM instead loads the context into the code runtime (AxJSRuntime) and
 // the executor writes JS (slice/grep/llmQuery) to mine it — so a HUGE context (a long
 // file, a pasted log, a whole module concatenated) never blows the prompt window. This
@@ -31,14 +33,13 @@ import {
   type AxAgentActorTurnCallbackArgs,
   type AxAgentContextEvent,
   type AxAIService,
-  type AxFunction,
   AxJSRuntime,
   AxJSRuntimePermission,
   AxMemory,
 } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { limits, llm, onEvent } from "./runtime.ts"
-import { allocate, BudgetExhaustedError } from "./orch.ts"
+import { limits, onEvent } from "./runtime.ts"
+import { allocate } from "./orch.ts"
 import { withTimeout } from "./orch-recipes.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
@@ -76,9 +77,6 @@ const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.
 // executorRequest/distilledContext, distiller sees the raw context global).
 const SANDBOX_RULE =
   "The code runtime is a SANDBOXED ES-MODULE environment: NO require(), NO import, NO Node modules (no fs, path, process, child_process, http). NEVER call require or import — they are undefined and throw. The data you need is ALREADY present as runtime variables — read it directly, never load it from disk. Use ONLY plain JavaScript (String/Array/Object methods, regex, JSON, Math, console.log) plus the injected primitives (llmQuery, final, askClarification). Write ONE small observable step per turn — a single console.log to inspect, or final(...) to finish."
-
-const signalOf = (extra: { abortSignal?: AbortSignal } | undefined): AbortSignal =>
-  extra?.abortSignal ?? new AbortController().signal
 
 // Build a REAL single-level RLM and forward it over { context, query }, bridging the
 // actor/context callbacks into the node-event tree. Returns the responder's answer +
@@ -207,49 +205,3 @@ export const runRlm = async (
   onEvent({ type: "done", nodeId: `${rootId}/responder`, result: clip(answer, 256) })
   return { answer, evidence, turns, callbacks }
 }
-
-// ── Tool: run_rlm ────────────────────────────────────────────────────────────────
-const runRlmTool: AxFunction = {
-  name: "run_rlm",
-  description:
-    "Mine a LARGE blob of context (a long file, a pasted log, a whole concatenated module) with a Recursive Language Model: the blob is loaded into a code runtime (NOT the prompt) and a sub-LM writes JavaScript (slice / regex / sub-queries / llmQuery) to explore it, then answers your query with evidence. WHEN TO USE: the context is too big to fit the prompt window and you need to FIND or SUMMARISE something buried inside it — prefer this over `orchestrate` (a fan-out node would pull the whole blob into its prompt; the RLM keeps it in the runtime). WHEN NOT: a small context that already fits — just read/reason over it directly. " +
-    "EXAMPLE: run_rlm({ context: <the entire 12k-line bundle.js>, query: 'which function registers the /auth route and what middleware does it apply?' }) — the actor greps/slices the blob in JS and returns the answer + the matching line ranges as evidence. " +
-    "PARAMS: context (the big text blob, kept out of the prompt, loaded into the code runtime); query (what to find or answer). Returns the answer plus supporting evidence. " +
-    "Single level: the RLM cannot itself orchestrate or call file tools, and its actor writes PURE sandboxed JS — NEVER require/import (the data is already a runtime variable). See .ax/orch/GUIDE.md for when to pick run_rlm vs orchestrate.",
-  parameters: {
-    type: "object",
-    properties: {
-      context: { type: "string", description: "the large text blob to explore (kept out of the prompt, loaded into the code runtime)" },
-      query: { type: "string", description: "what to find or answer about the context" },
-    },
-    required: ["context", "query"],
-  },
-  func: async (
-    args: { context: string; query: string },
-    extra?: Readonly<{ sessionId?: string; ai?: AxAIService; abortSignal?: AbortSignal }>,
-  ) => {
-    const context = String(args?.context ?? "")
-    const query = String(args?.query ?? "").trim()
-    if (context.length === 0) return "error: run_rlm requires a non-empty context"
-    if (query.length === 0) return "error: run_rlm requires a non-empty query"
-    const ai = extra?.ai ?? llm
-    const sessionId = extra?.sessionId ?? "tool"
-    const signal = signalOf(extra)
-    const rootId = `rlm-tool:${sessionId}:${Date.now()}`
-    onEvent({ type: "start", nodeId: rootId, phase: "run_rlm" })
-    try {
-      const out = await otelContext.with(otelContext.active(), () => runRlm(context, query, ai, rootId, signal))
-      onEvent({ type: "done", nodeId: rootId, result: { turns: out.turns, callbacks: out.callbacks } })
-      const evidence = out.evidence.length > 0 ? `\n\nEvidence:\n${out.evidence.map((e) => `- ${e}`).join("\n")}` : ""
-      return clip(`${out.answer}${evidence}`)
-    } catch (e) {
-      onEvent({ type: "error", nodeId: rootId, cause: e })
-      if (e instanceof BudgetExhaustedError) {
-        return `partial: the RLM hit its token budget (${e.spent}/${e.total}) and was stopped before finishing. ${e.reason}.`
-      }
-      return `rlm failed: ${String((e as { message?: string })?.message ?? e).slice(0, 500)}`
-    }
-  },
-}
-
-export const RLM_TOOLS: AxFunction[] = [runRlmTool]

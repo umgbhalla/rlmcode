@@ -26,6 +26,8 @@ export type Msg =
       readonly args: string
       readonly status: "running" | "ok" | "error"
       readonly result: string
+      // wall-clock ms when the call started; drives the per-tool "running 12s" elapsed.
+      readonly startedAt?: number
     }
 // A live orchestration node (orch.emit NodeEvents, projected from the activity bus).
 // status: running until a done/error event lands; result holds the done payload or
@@ -66,8 +68,12 @@ export const appAtom = Atom.make<AppState>({
   sessions: [],
 }).pipe(Atom.keepAlive)
 
-// True while a turn is in flight (drives the thinking spinner).
+// True while ANY turn is in flight (drives the composer spinner of the active session).
 export const busyAtom = Atom.make(false).pipe(Atom.keepAlive)
+
+// Which sessions have a turn in flight — the list view needs PER-session liveness, not
+// one global boolean (with 2+ sessions a single bool can't say WHICH is working).
+export const busySessionsAtom = Atom.make<ReadonlySet<string>>(new Set<string>()).pipe(Atom.keepAlive)
 
 const idState = { seq: 0 }
 const newId = () => `s${++idState.seq}-${Date.now().toString(36)}`
@@ -109,6 +115,7 @@ export const deleteSessionAtom = appRuntime.fn((id: string, get) =>
     const idx = s.sessions.findIndex((x) => x.id === id)
     if (idx === -1) return
     abortTurn(id) // stop a running turn so its fiber doesn't write to a dropped session
+    get.set(busySessionsAtom, ((bs) => (bs.delete(id), bs))(new Set(get(busySessionsAtom))))
     deleteSession(id) // LEAK FIX: release the AxMemory + span handle held in sessionsRT
     const sessions = s.sessions.filter((x) => x.id !== id)
     // If we closed the active/last session, fall back to the list; otherwise keep the
@@ -154,7 +161,7 @@ const installSink = (
         patch((m) => [...m, { kind: "agent", text: a.text }])
         break
       case "tool": {
-        const step: Msg = { kind: "tool", id: a.id, name: a.name, args: a.args, status: "running", result: "" }
+        const step: Msg = { kind: "tool", id: a.id, name: a.name, args: a.args, status: "running", result: "", startedAt: Date.now() }
         // PER-NODE TOOL ROUTING: a tagged tool (nodeId set) belongs to that orchestration NODE —
         // append it to the node's OWN tools list (NodeView renders it under the node). An untagged
         // tool is the MAIN turn's — append to the transcript (unchanged default).
@@ -248,6 +255,7 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
 
     patch((m) => [...m, { kind: "you", text }])
     get.set(busyAtom, true)
+    get.set(busySessionsAtom, new Set(get(busySessionsAtom)).add(id))
 
     // Step-by-step activity from ax's native logger: agent narration, tool
     // calls (in-flight), and results (which update the matching row in place).
@@ -269,6 +277,7 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
 
     setActivitySink(null)
     get.set(busyAtom, false)
+    get.set(busySessionsAtom, ((s) => (s.delete(id), s))(new Set(get(busySessionsAtom))))
     const meta: TurnMeta = {
       model: MODEL,
       ms: Date.now() - startedAt,

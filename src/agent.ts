@@ -20,7 +20,6 @@ import { BASE_TOOLS } from "./tools.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { BASE_PROMPT, limits, llm, MODEL, onEvent, rateLimiter } from "./runtime.ts"
 import { RLM_WORKFLOW_TOOLS } from "./rlm-workflow.ts"
-import { RLM_TOOLS } from "./rlm-tool.ts"
 
 const MAX_STEPS = limits.maxSteps // max tool-call iterations per turn — the HARD per-turn stop
 // Per-turn SOFT TOKEN ceiling (advisory), tracked by orch's Budget (charged after each
@@ -46,12 +45,12 @@ export { BASE_PROMPT }
 const RLM_WORKFLOW_OVERLAY = [
   // ── ORCHESTRATION GUIDANCE ────────────────────────────────────────────────────────
   // Beyond a single reply you can drive deterministic multi-node runs (nodes render live
-  // in a tree). Two tools: rlm_workflow (fan out sub-agents) and run_rlm (mine a big blob
-  // in a code runtime). The unit everywhere is a NODE.
+  // in a tree). ONE tool: rlm_workflow — fan out sub-agents, OR strategy 'rlm' to mine a
+  // big blob in a code runtime. The unit everywhere is a NODE.
   "## Orchestration",
-  "You can run deterministic multi-node flows, not just single replies. Tools: `rlm_workflow` (fan out sub-agents over distinct subtasks) and `run_rlm` (mine a huge blob in a code runtime). The unit is always a NODE.",
+  "You can run deterministic multi-node flows, not just single replies. ONE tool: `rlm_workflow` — fan out sub-agents over distinct subtasks, OR (strategy `rlm`) mine a huge blob in a code runtime. The unit is always a NODE.",
   // WHEN to orchestrate.
-  "WHEN to orchestrate: (1) the task SPLITS into independent parts that don't depend on each other's output — fan them out (`rlm_workflow` with distinct `subtasks`); (2) you want the BEST of N attempts or to VERIFY an answer — use strategy `judge`/`best_of_n` (best-of-N) or `verify` (skeptics vote); (3) a BIG blob (long file, pasted log, whole concatenated module) won't fit the window — use `run_rlm`.",
+  "WHEN to orchestrate: (1) the task SPLITS into independent parts that don't depend on each other's output — fan them out (`rlm_workflow` with distinct `subtasks`); (2) you want the BEST of N attempts or to VERIFY an answer — use strategy `judge`/`best_of_n` (best-of-N) or `verify` (skeptics vote); (3) a BIG blob (long file, pasted log, whole concatenated module) won't fit the window — use `rlm_workflow` with strategy `rlm` + the `context` arg.",
   // WHEN NOT.
   "WHEN NOT: a trivial or strictly sequential task — DO IT DIRECTLY with your own file/shell tools. Do NOT fan out a one-liner. Do NOT spin up a node to read one file or run one command. Sequential steps (read → edit → test) are ONE node's task (yours): orchestration is for INDEPENDENT work or N-way redundancy, never to wrap a single linear chore.",
   // The strategy menu — one line each.
@@ -82,7 +81,7 @@ export const projectDocLoaded = (["AGENTS.md", "CLAUDE.md"] as const).find((f) =
 // The MAIN chat gen gets BASE_TOOLS + RLM_WORKFLOW_TOOLS — it alone may self-orchestrate.
 // Every orchestration sub-run NODE (rlm-workflow.ts) is built with BASE_TOOLS only, so a
 // node physically cannot re-orchestrate: the structural one-level recursion guard.
-const CHAT_TOOLS = [...BASE_TOOLS, ...RLM_WORKFLOW_TOOLS, ...RLM_TOOLS]
+const CHAT_TOOLS = [...BASE_TOOLS, ...RLM_WORKFLOW_TOOLS]
 const chat = ax("message:string -> reply:string", { functions: CHAT_TOOLS })
 // PROMPT SIZE (telemetry leap 2): the assembled system prompt (BASE_PROMPT + RLM_WORKFLOW_OVERLAY +
 // projectDoc) is sent on EVERY turn. Record its char count so prompt bloat is visible on the

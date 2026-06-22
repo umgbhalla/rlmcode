@@ -31,6 +31,7 @@ import { adversarialVerify, finalizeOnMaxSteps, judge, loopUntilDry, MAX_CONCURR
 import { allocate, type Budget, BudgetExhaustedError, type NodeOpts } from "./orch.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { runPlanner } from "./orch-plan.ts"
+import { runRlm } from "./rlm-node.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 
@@ -69,7 +70,7 @@ const ORCH_CONCURRENCY = (() => {
   return Number.isFinite(v) ? Math.min(MAX_CONCURRENCY, Math.max(1, Math.floor(v))) : 8
 })()
 
-const STRATEGIES = ["parallel", "judge", "verify", "best_of_n", "plan"] as const
+const STRATEGIES = ["parallel", "judge", "verify", "best_of_n", "plan", "rlm"] as const
 type Strategy = (typeof STRATEGIES)[number]
 
 const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
@@ -351,11 +352,70 @@ const runRlmWorkflow = async ({
   }
 }
 
+// Normalize + validate the tool args into the resolved shape the fan-out needs.
+// Extracted out of func() so the tool body stays under the cyclomatic budget: the
+// ternary ladder (subtasks-vs-task branch count, strategy clamp, synthesized `overall`)
+// is the bulk of the branching and is pure, so it lives here.
+type NormalizedArgs = {
+  task: string
+  subtasks: string[]
+  strategy: Strategy
+  branches: number
+  overall: string
+}
+const normalizeArgs = (args: {
+  task: string
+  subtasks?: string[]
+  strategy?: string
+  branches?: number
+}): NormalizedArgs | string => {
+  const task = String(args?.task ?? "").trim()
+  // DISTINCT subtasks (division of labour) — the preferred path. Coerce to strings,
+  // drop blanks. A non-empty list overrides the `task`-only parallel-same fallback
+  // and DRIVES the branch count (clamped to MAX_BRANCHES); branch i works subtasks[i].
+  const subtasks = (Array.isArray(args?.subtasks) ? args!.subtasks : [])
+    .map((s) => String(s ?? "").trim())
+    .filter((s) => s.length > 0)
+    .slice(0, MAX_BRANCHES)
+  // A non-empty task OR at least one subtask is required.
+  if (task.length === 0 && subtasks.length === 0) return "error: rlm_workflow requires a non-empty task or subtasks"
+  const strategy: Strategy = STRATEGIES.includes(args?.strategy as Strategy) ? (args!.strategy as Strategy) : "parallel"
+  // BRANCH cap (guard 3): when subtasks are given, the list length wins (each branch
+  // its own subtask); otherwise clamp the model's `branches` request to 1..MAX_BRANCHES.
+  const branches =
+    subtasks.length > 0
+      ? subtasks.length
+      : Math.min(MAX_BRANCHES, Math.max(1, Math.floor(Number(args?.branches ?? 2)) || 2))
+  // The judge/verify message: the overall task, or — when only subtasks were given —
+  // a synthesized statement of the whole, so the judge/skeptics see the full intent.
+  const overall = task.length > 0 ? task : `Complete these subtasks: ${subtasks.map((s, i) => `(${i + 1}) ${s}`).join("; ")}`
+  return { task, subtasks, strategy, branches, overall }
+}
+
+// RLM NODE-KIND short-circuit: strategy 'rlm' mines a BIG `context` blob in a code
+// runtime (the blob is loaded into the AxJSRuntime, NEVER the prompt) instead of fanning
+// sub-agents — `overall` is the query. ONE self-contained RLM node on the same event
+// bus / trace as the fan-out strategies. Extracted so func() stays under budget.
+const runRlmBranch = async (context: string, overall: string, ai: AxAIService, rootId: string, signal: AbortSignal): Promise<string> => {
+  if (context.length === 0) return "error: rlm_workflow strategy 'rlm' requires a non-empty `context` (the big blob to mine; `task` is the query)"
+  onEvent({ type: "start", nodeId: rootId, phase: "rlm_workflow:rlm" })
+  try {
+    const out = await otelContext.with(otelContext.active(), () => runRlm(context, overall, ai, rootId, signal))
+    onEvent({ type: "done", nodeId: rootId, result: { turns: out.turns } })
+    const evidence = out.evidence.length > 0 ? `\n\nEvidence:\n${out.evidence.map((e) => `- ${e}`).join("\n")}` : ""
+    return clip(`${out.answer}${evidence}`)
+  } catch (e) {
+    onEvent({ type: "error", nodeId: rootId, cause: e })
+    if (e instanceof BudgetExhaustedError) return `partial: the RLM hit its HARD token ceiling (${e.spent}/${e.total}) and was stopped. ${e.reason}.`
+    return `rlm_workflow (rlm) failed: ${String((e as { message?: string })?.message ?? e).slice(0, 500)}`
+  }
+}
+
 // ── Tool 1: orchestrate ────────────────────────────────────────────────────────────
 const rlmWorkflowTool: AxFunction = {
   name: "rlm_workflow",
   description:
-    "Fan a task out across parallel sub-agent NODES (each carrying the file/shell tools) and combine the results. WHEN TO USE: the work splits into INDEPENDENT parts (division of labour), OR you want the best-of-N / a verified answer. WHEN NOT: a trivial or strictly sequential chore — do that directly yourself; do NOT fan out a one-liner. EXAMPLE (division of labour): rlm_workflow({ subtasks: ['audit src/auth for bugs', 'check the tests cover edge cases', 'review error handling'] }) — branch i works subtasks[i], real distinct work. EXAMPLE (best of N): rlm_workflow({ task: 'design a token-bucket rate limiter', strategy: 'judge', branches: 3 }). EXAMPLE (auto-decompose): rlm_workflow({ task: 'refactor the auth module', strategy: 'plan' }) — a PLANNER node splits the task into distinct subtasks itself, then fans out one node per subtask and returns the plan + each branch's output. PARAMS: task (the overall goal); subtasks (PREFERRED — a list of DISTINCT, independent pieces; branch i gets subtasks[i] and the list length drives the branch count); strategy (default 'parallel': 'parallel' fan out + return all, 'judge' fan out then one judge picks the best verbatim, 'verify' answer once then skeptics vote accept/reject, 'best_of_n' re-run the fan-out until the survivor count is stable then judge, 'plan' planner auto-decomposes then fans out); branches (1-100, default 2; ignored when subtasks is given); model ('kimi' default | 'glm') and effort ('low'..'max') route the sub-agents per node. RULE: give DISTINCT subtasks, NOT N copies — only omit subtasks (run `task` on every branch) when you genuinely want N redundant attempts (e.g. best_of_n). branches caps at 100 (~8 run at once; the rest queue). Sub-agents CANNOT themselves orchestrate (one level deep).",
+    "Fan a task out across parallel sub-agent NODES (each carrying the file/shell tools) and combine the results. WHEN TO USE: the work splits into INDEPENDENT parts (division of labour), OR you want the best-of-N / a verified answer. WHEN NOT: a trivial or strictly sequential chore — do that directly yourself; do NOT fan out a one-liner. EXAMPLE (division of labour): rlm_workflow({ subtasks: ['audit src/auth for bugs', 'check the tests cover edge cases', 'review error handling'] }) — branch i works subtasks[i], real distinct work. EXAMPLE (best of N): rlm_workflow({ task: 'design a token-bucket rate limiter', strategy: 'judge', branches: 3 }). EXAMPLE (auto-decompose): rlm_workflow({ task: 'refactor the auth module', strategy: 'plan' }) — a PLANNER node splits the task into distinct subtasks itself, then fans out one node per subtask and returns the plan + each branch's output. PARAMS: task (the overall goal); subtasks (PREFERRED — a list of DISTINCT, independent pieces; branch i gets subtasks[i] and the list length drives the branch count); strategy (default 'parallel': 'parallel' fan out + return all, 'judge' fan out then one judge picks the best verbatim, 'verify' answer once then skeptics vote accept/reject, 'best_of_n' re-run the fan-out until the survivor count is stable then judge, 'plan' planner auto-decomposes then fans out, 'rlm' does NOT fan out — it mines a BIG `context` blob in a code runtime kept OUT of the prompt with `task` as the query, for a huge file/log that won't fit the window); context (strategy 'rlm' ONLY: the big blob to mine); branches (1-100, default 2; ignored when subtasks is given); model ('kimi' default | 'glm') and effort ('low'..'max') route the sub-agents per node. EXAMPLE (mine a huge blob): rlm_workflow({ strategy: 'rlm', context: '<the entire 12k-line bundle.js>', task: 'which function registers the /auth route?' }). RULE: give DISTINCT subtasks, NOT N copies — only omit subtasks (run `task` on every branch) when you genuinely want N redundant attempts (e.g. best_of_n). branches caps at 100 (~8 run at once; the rest queue). Sub-agents CANNOT themselves orchestrate (one level deep).",
   parameters: {
     type: "object",
     properties: {
@@ -367,9 +427,10 @@ const rlmWorkflowTool: AxFunction = {
       },
       strategy: {
         type: "string",
-        enum: ["parallel", "judge", "verify", "best_of_n", "plan"],
-        description: "how to combine the sub-agents (default 'parallel'). 'plan' AUTO-decomposes `task` into subtasks via a planner node, then fans out one sub-agent per subtask.",
+        enum: ["parallel", "judge", "verify", "best_of_n", "plan", "rlm"],
+        description: "how to combine the sub-agents (default 'parallel'). 'plan' AUTO-decomposes `task` into subtasks via a planner node, then fans out one sub-agent per subtask. 'rlm' does NOT fan out — it mines a BIG `context` blob in a code runtime (kept OUT of the prompt) with `task` as the query.",
       },
+      context: { type: "string", description: "strategy 'rlm' ONLY: the LARGE text blob to mine (a long file, pasted log, whole concatenated module). It is loaded into a code runtime, NOT the prompt; the RLM actor writes JS to explore it and answers `task`." },
       branches: { type: "number", description: "number of parallel sub-agents (1-100, default 2; at most ~8 run at once, the rest queue); ignored when subtasks is given (the list length wins)" },
       model: { type: "string", description: "MULTI-MODEL: which model the sub-agents run on — 'kimi' (Kimi K2.7, the default) or 'glm' (GLM 5.2). Both are thinking models on the same endpoint. Omit to use the default (kimi)." },
       effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max"], description: "MULTI-MODEL: thinking level for the sub-agents (provider reasoning hint). Omit for the model default." },
@@ -377,33 +438,18 @@ const rlmWorkflowTool: AxFunction = {
     required: ["task"],
   },
   func: async (
-    args: { task: string; subtasks?: string[]; strategy?: string; branches?: number; model?: string; effort?: string },
+    args: { task: string; subtasks?: string[]; strategy?: string; branches?: number; model?: string; effort?: string; context?: string },
     extra?: Readonly<{ sessionId?: string; ai?: AxAIService; abortSignal?: AbortSignal }>,
   ) => {
-    const task = String(args?.task ?? "").trim()
-    // DISTINCT subtasks (division of labour) — the preferred path. Coerce to strings,
-    // drop blanks. A non-empty list overrides the `task`-only parallel-same fallback
-    // and DRIVES the branch count (clamped to MAX_BRANCHES); branch i works subtasks[i].
-    const subtasks = (Array.isArray(args?.subtasks) ? args!.subtasks : [])
-      .map((s) => String(s ?? "").trim())
-      .filter((s) => s.length > 0)
-      .slice(0, MAX_BRANCHES)
-    // A non-empty task OR at least one subtask is required.
-    if (task.length === 0 && subtasks.length === 0) return "error: orchestrate requires a non-empty task or subtasks"
-    const strategy: Strategy = STRATEGIES.includes(args?.strategy as Strategy) ? (args!.strategy as Strategy) : "parallel"
-    // BRANCH cap (guard 3): when subtasks are given, the list length wins (each branch
-    // its own subtask); otherwise clamp the model's `branches` request to 1..MAX_BRANCHES.
-    const branches =
-      subtasks.length > 0
-        ? subtasks.length
-        : Math.min(MAX_BRANCHES, Math.max(1, Math.floor(Number(args?.branches ?? 2)) || 2))
-    // The judge/verify message: the overall task, or — when only subtasks were given —
-    // a synthesized statement of the whole, so the judge/skeptics see the full intent.
-    const overall = task.length > 0 ? task : `Complete these subtasks: ${subtasks.map((s, i) => `(${i + 1}) ${s}`).join("; ")}`
+    const norm = normalizeArgs(args)
+    if (typeof norm === "string") return norm // validation error string
+    const { strategy, subtasks, branches, overall } = norm
     const ai = extra?.ai ?? llm
     const sessionId = extra?.sessionId ?? "tool"
     const signal = signalOf(extra)
     const rootId = `orch-tool:${sessionId}:${Date.now()}`
+    // strategy 'rlm' short-circuits before the fan-out boundary (mines a blob, no sub-agents).
+    if (strategy === "rlm") return runRlmBranch(String(args?.context ?? ""), overall, ai, rootId, signal)
     const { optsFor, budget } = boundary(sessionId, signal, rootId)
     const choice = choiceFromArgs({ model: args?.model, effort: args?.effort }) // MULTI-MODEL: no model/effort ⇒ default Kimi
     try {

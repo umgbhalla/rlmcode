@@ -12,7 +12,7 @@ import { createCliRenderer, decodePasteBytes, RenderableEvents, SyntaxStyle } fr
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { abortTurn, projectDocLoaded } from "./agent.ts"
-import { appAtom, busyAtom, deleteSessionAtom, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
+import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
@@ -39,24 +39,35 @@ const oneLine = (s: string, n = 90) => {
 // COST-METER token formatter: "318k tok" / "742 tok" (shared by turn meta + orch tree).
 const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k tok` : `${n} tok`)
 
+// Map a provider finishReason to something a human reads (raw "length" etc. is opaque).
+const fmtReason = (r: string): string => (r === "length" ? "truncated (max tokens)" : r)
+
 // Per-turn provenance only (model lives in the status line, not repeated here).
 const fmtMeta = (m: TurnMeta): string => {
   const parts: string[] = [`${(m.ms / 1000).toFixed(1)}s`]
   if (typeof m.tokens === "number") parts.push(fmtTokens(m.tokens))
-  if (m.finishReason && m.finishReason !== "stop") parts.push(m.finishReason)
-  if (m.budget) parts.push("budget")
+  if (m.finishReason && m.finishReason !== "stop") parts.push(fmtReason(m.finishReason))
+  if (m.budget) parts.push("stopped: step budget — answer may be incomplete")
   return parts.join(" · ")
 }
 
+// Whole-second elapsed since a wall-clock start (undefined start -> 0). Recomputed on
+// every render; the useWorking tick re-renders App ~12×/s while busy, so it advances.
+const elapsedSec = (startedAt: number | undefined): number =>
+  typeof startedAt === "number" ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0
+
 const INDENT = 2 // single source of truth for transcript nesting
 
-const IDLE_HINT = "↑↓ history · tab focus · enter expand · PgUp/PgDn scroll · ← / esc back"
-// Right-side status text + tone for the bottom bar (busy/armed/transient note/idle).
-const statusBar = (busy: boolean, armed: boolean, note: string | null): { right: string; tone: string } => {
+const IDLE_HINT = "↑↓ history · tab focus · enter expand · PgUp/PgDn/Home/End scroll · esc back"
+type Work = { frame: string; elapsed: number }
+// Right-side status text + tone for the bottom bar (busy/armed/transient note/idle). The
+// busy branch carries the LIVE spinner + elapsed so liveness survives even while typing a
+// follow-up (the composer placeholder is replaced by the draft the moment you type).
+const statusBar = (busy: boolean, armed: boolean, note: string | null, work: Work): { right: string; tone: string } => {
   if (armed) return { right: "esc again to interrupt", tone: "#f38ba8" }
-  if (busy) return { right: "working… · esc interrupt", tone: "#ffd166" }
-  if (note) return { right: note, tone: "#a6e3a1" }
-  return { right: IDLE_HINT, tone: "#585b70" }
+  if (note) return { right: note, tone: "#a6e3a1" } // transient (copied / paste collapsed) wins so it's never swallowed mid-turn
+  if (busy) return { right: `${work.frame} thinking… ${work.elapsed}s · esc interrupt`, tone: "#ffd166" }
+  return { right: IDLE_HINT, tone: "#7f849c" }
 }
 
 function toTurns(messages: readonly Msg[]): Turn[] {
@@ -105,13 +116,22 @@ const statusColor = (status: ToolMsg["status"]) =>
 const previewColor = (tone: PreviewLine["tone"]) => (tone === "add" ? "#a6e3a1" : tone === "del" ? "#f38ba8" : "#6c7086")
 const previewSign = (tone: PreviewLine["tone"]) => (tone === "add" ? "+" : tone === "del" ? "-" : "│")
 
-// Clickable header row: brightens on hover when the row has a drill-down body.
-function ToolHeader({ m, expanded, hasBody, focused, onToggle }: { m: ToolMsg; expanded: boolean; hasBody: boolean; focused: boolean; onToggle: () => void }) {
+// Keyboard-focus gutter: a leading "❯ " ONLY when this row is the Tab-ring focus (never
+// on mere hover), so keyboard focus is visually distinct from a mouse-over. Two cells
+// wide so focused/unfocused rows stay column-aligned.
+const FocusGutter = ({ focused }: { focused: boolean }) =>
+  focused ? <span fg="#f9e2af">{"❯ "}</span> : <span fg="#585b70">{"  "}</span>
+
+// Clickable header row: brightens on hover when the row has a drill-down body. A running
+// tool shows the live spinner frame + elapsed seconds (a 60s bash is no longer byte-
+// identical at second 1 and 59).
+function ToolHeader({ m, expanded, hasBody, focused, frame, onToggle }: { m: ToolMsg; expanded: boolean; hasBody: boolean; focused: boolean; frame: string; onToggle: () => void }) {
   const [hover, setHover] = useState(false)
   const running = m.status === "running"
   const color = statusColor(m.status)
-  const mark = running ? "◌" : m.status === "error" ? "✗" : toolIcon(m.name)
-  const summary = running ? "running…" : toolSummary(m.name, m.result, m.status === "error")
+  const mark = running ? frame : m.status === "error" ? "✗" : toolIcon(m.name)
+  const el = running ? elapsedSec(m.startedAt) : 0
+  const summary = running ? (el > 0 ? `running ${el}s` : "running…") : toolSummary(m.name, m.result, m.status === "error")
   const hot = hasBody && (hover || focused) // hover OR keyboard-focused -> brighten
   return (
     <text
@@ -121,15 +141,16 @@ function ToolHeader({ m, expanded, hasBody, focused, onToggle }: { m: ToolMsg; e
       onMouseOver={(hasBody ? (() => setHover(true)) : undefined) as any}
       onMouseOut={(() => setHover(false)) as any}
     >
+      <FocusGutter focused={focused} />
       <span fg={hot ? "#ffffff" : color}>{`${mark} `}</span>
       <span fg={hot ? "#ffffff" : "#cdd6f4"}>{toolLabel(m.name, m.args)}</span>
       <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${summary}`}</span>
-      {hasBody ? <span fg={hot ? "#cdd6f4" : "#585b70"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
+      {hasBody ? <span fg={hot ? "#cdd6f4" : "#7f849c"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
     </text>
   )
 }
 
-function ToolView({ m, expanded, focused, cols, onToggle }: { m: ToolMsg; expanded: boolean; focused: boolean; cols: number; onToggle: () => void }) {
+function ToolView({ m, expanded, focused, cols, frame, onToggle }: { m: ToolMsg; expanded: boolean; focused: boolean; cols: number; frame: string; onToggle: () => void }) {
   const isError = m.status === "error"
   const hasBody = m.status !== "running" && toolHasBody(m.name, m.result, isError)
   const open = expanded && hasBody
@@ -137,7 +158,7 @@ function ToolView({ m, expanded, focused, cols, onToggle }: { m: ToolMsg; expand
   const preview = open && !diff ? toolPreview(m.name, m.args, m.result, isError, Math.max(20, cols - 10)) : []
   return (
     <box flexDirection="column" style={{ marginTop: open ? 1 : 0 }}>
-      <ToolHeader m={m} expanded={expanded} hasBody={hasBody} focused={focused} onToggle={onToggle} />
+      <ToolHeader m={m} expanded={expanded} hasBody={hasBody} focused={focused} frame={frame} onToggle={onToggle} />
       {diff ? (
         <box style={{ paddingLeft: INDENT, paddingTop: 1 }}>
           <diff diff={diff.diff} view={cols > 120 ? "split" : "unified"} filetype={diff.filetype} showLineNumbers syntaxStyle={mdStyle} />
@@ -160,6 +181,7 @@ function TurnView({
   expTools,
   focusedKey,
   cols,
+  frame,
   onToggleTurn,
   onToggleTool,
 }: {
@@ -169,11 +191,15 @@ function TurnView({
   expTools: Set<string>
   focusedKey: string | undefined
   cols: number
+  frame: string
   onToggleTurn: () => void
   onToggleTool: (id: string) => void
 }) {
   const [hoverSteps, setHoverSteps] = useState(false)
   const stepsFocused = focusedKey === `turn:${t.idx}`
+  // An interrupted / errored turn surfaces as a "⚠ …" reply (atoms.ts catchCause). Carry
+  // the tool-row red convention up to the final reply so failure isn't painted success-green.
+  const failed = t.final !== null && t.final.startsWith("⚠")
   return (
     <box flexDirection="column" style={{ marginTop: first ? 0 : 1 }}>
       <box border={["left"]} borderColor="#45475a" style={{ paddingLeft: 1, width: "100%" }}>
@@ -188,6 +214,7 @@ function TurnView({
             onMouseOver={(() => setHoverSteps(true)) as any}
             onMouseOut={(() => setHoverSteps(false)) as any}
           >
+            <FocusGutter focused={stepsFocused} />
             {`${expanded ? "▾" : "▸"} ${t.steps.length} step${t.steps.length > 1 ? "s" : ""}`}
             {!expanded ? `   ${toolsUsed(t.steps)}` : ""}
           </text>
@@ -201,6 +228,7 @@ function TurnView({
                     expanded={expTools.has(s.id)}
                     focused={focusedKey === `tool:${s.id}`}
                     cols={cols}
+                    frame={frame}
                     onToggle={() => onToggleTool(s.id)}
                   />
                 ) : (
@@ -214,14 +242,14 @@ function TurnView({
       {t.final !== null && (
         <box flexDirection="column" style={{ marginTop: 1 }}>
           <box flexDirection="row" style={{ width: "100%" }}>
-            <text fg="#a6e3a1">{"⏺ "}</text>
+            <text fg={failed ? "#f38ba8" : "#a6e3a1"}>{"⏺ "}</text>
             <box style={{ flexGrow: 1, flexShrink: 1 }}>
-              <markdown content={t.final} syntaxStyle={mdStyle} />
+              {failed ? <text fg="#f38ba8">{t.final}</text> : <markdown content={t.final} syntaxStyle={mdStyle} />}
             </box>
           </box>
           {t.meta && (
             <box style={{ paddingLeft: INDENT }}>
-              <text fg="#585b70">{fmtMeta(t.meta)}</text>
+              <text fg={t.meta.budget ? "#ffd166" : "#7f849c"}>{fmtMeta(t.meta)}</text>
             </box>
           )}
         </box>
@@ -252,19 +280,23 @@ type NodeRowProps = {
   onToggleTool: (id: string) => void
   focusedKey: string | undefined
   cols: number
+  frame: string
 }
 
 // One flattened node header line: connector prefix + glyph + label + summary + token
 // badge + collapsed-only tool-count + ▾/▸. The prefix (├─/└─/│/blanks) renders in a
 // muted guide color so the tree structure reads at a glance. Clickable/hoverable when
 // the node has detail (owns tools or has children) — toggles its collapse state.
-function NodeHeader({ row, hot, setHover, onToggle }: {
+function NodeHeader({ row, hot, focused, frame, setHover, onToggle }: {
   row: OrchRow
   hot: boolean
+  focused: boolean
+  frame: string
   setHover: (v: boolean) => void
   onToggle: () => void
 }) {
   const { prefix, color, glyph, label, summary, tokens, toolsLabel, hasDetail, expanded } = row
+  const mark = glyph === "◌" ? frame : glyph // running nodes animate (was a motionless ◌)
   return (
     <text
       fg={color}
@@ -273,14 +305,15 @@ function NodeHeader({ row, hot, setHover, onToggle }: {
       onMouseOver={(hasDetail ? (() => setHover(true)) : undefined) as any}
       onMouseOut={(() => setHover(false)) as any}
     >
-      {prefix ? <span fg={hot ? "#6c7086" : "#45475a"}>{prefix}</span> : null}
-      <span fg={hot ? "#ffffff" : color}>{`${glyph} `}</span>
+      <FocusGutter focused={focused} />
+      {prefix ? <span fg={hot ? "#7f849c" : "#6c7086"}>{prefix}</span> : null}
+      <span fg={hot ? "#ffffff" : color}>{`${mark} `}</span>
       <span fg={hot ? "#ffffff" : "#cdd6f4"}>{label}</span>
-      {summary ? <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${oneLine(summary)}`}</span> : null}
+      {summary ? <span fg={hot ? "#9399b2" : "#7f849c"}>{`  ${oneLine(summary)}`}</span> : null}
       <NodeTokens tokens={tokens} hot={hot} />
       {/* collapsed-only: show the owned-tool count so a node's work is visible without expanding */}
-      {!expanded && toolsLabel ? <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${toolsLabel}`}</span> : null}
-      {hasDetail ? <span fg={hot ? "#cdd6f4" : "#585b70"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
+      {!expanded && toolsLabel ? <span fg={hot ? "#9399b2" : "#7f849c"}>{`  ${toolsLabel}`}</span> : null}
+      {hasDetail ? <span fg={hot ? "#cdd6f4" : "#7f849c"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
     </text>
   )
 }
@@ -293,17 +326,18 @@ function NodeRow(p: NodeRowProps) {
   const [hover, setHover] = useState(false)
   const { row } = p
   const hot = row.hasDetail && hover
+  const focused = p.focusedKey === `node:${row.id}`
   return (
     <box flexDirection="column">
-      <NodeHeader row={row} hot={hot} setHover={setHover} onToggle={() => p.onToggle(row.id)} />
+      <NodeHeader row={row} hot={hot} focused={focused} frame={p.frame} setHover={setHover} onToggle={() => p.onToggle(row.id)} />
       {row.expanded && row.tools.length > 0 && (
         <box flexDirection="column">
           {row.tools.map((m) => (
             <box key={m.id} flexDirection="row">
-              {/* align owned tools under their node: the node's body stem + one connector cell */}
-              <text fg="#45475a" selectable={false}>{`${row.bodyPrefix}   `}</text>
+              {/* align owned tools under their node: the 2-cell focus gutter + body stem + connector */}
+              <text fg="#6c7086" selectable={false}>{`  ${row.bodyPrefix}   `}</text>
               <box style={{ flexGrow: 1, flexShrink: 1 }}>
-                <ToolView m={m} expanded={p.expTools.has(m.id)} focused={p.focusedKey === `tool:${m.id}`} cols={p.cols} onToggle={() => p.onToggleTool(m.id)} />
+                <ToolView m={m} expanded={p.expTools.has(m.id)} focused={p.focusedKey === `tool:${m.id}`} cols={p.cols} frame={p.frame} onToggle={() => p.onToggleTool(m.id)} />
               </box>
             </box>
           ))}
@@ -313,34 +347,44 @@ function NodeRow(p: NodeRowProps) {
   )
 }
 
-function List({ sessions, cursor }: { sessions: readonly SessionView[]; cursor: number }) {
+function List({ sessions, cursor, busySessions, frame, armedDelete }: { sessions: readonly SessionView[]; cursor: number; busySessions: ReadonlySet<string>; frame: string; armedDelete: string | null }) {
   return (
     <box flexDirection="column" padding={1}>
-      <text fg="#888888">SESSIONS · n new · ↑↓ move · enter open · d close · q quit</text>
+      <text fg="#7f849c">SESSIONS · n new · ↑↓ move · enter open · d close · q quit</text>
       {sessions.length === 0 ? (
-        <text fg="#666666">no sessions. press n to start.</text>
+        <text fg="#7f849c">no sessions. press n to start.</text>
       ) : (
-        sessions.map((s, i) => (
-          <text key={s.id} fg={i === cursor ? "#ffd166" : "#cccccc"}>
-            {i === cursor ? "▸ " : "  "}
-            {s.title}
-            {"  "}
-            <span fg="#666666">{`${s.messages.length} msg`}</span>
-          </text>
-        ))
+        sessions.map((s, i) => {
+          const working = busySessions.has(s.id)
+          const arming = armedDelete === s.id
+          return (
+            <text key={s.id} fg={i === cursor ? "#ffd166" : "#cdd6f4"}>
+              {i === cursor ? "▸ " : "  "}
+              {/* per-session liveness: a live spinner if this session has a turn in flight */}
+              <span fg={working ? "#ffd166" : "#585b70"}>{working ? `${frame} ` : "  "}</span>
+              {s.title}
+              {"  "}
+              <span fg="#7f849c">{`${s.messages.length} msg`}</span>
+              {arming ? <span fg="#f38ba8">{"  press d again to close"}</span> : null}
+            </text>
+          )
+        })
       )}
     </box>
   )
 }
 
-// PER-NODE TOOL ROUTING: the orchestration tool rows that join the Tab focus ring,
-// derived from the SAME flattened rows the tree renders (render order = focus order).
-// Each EXPANDED node's owned tools expose a `tool:<id>` key (same key as transcript
-// tools), so toggleFocused drives them unchanged. Collapsed nodes are absent from
-// `rows` (flatten omits their subtree) so their tools don't join the ring — correct.
-const orchToolFocusables = (rows: readonly OrchRow[]): string[] => {
+// Orchestration rows that join the Tab focus ring, in render order. A collapsible node
+// (hasDetail) exposes a `node:<id>` key so it can be collapsed/expanded from the keyboard
+// (previously mouse-only); each EXPANDED node's owned tools then expose a `tool:<id>` key
+// (same key as transcript tools), so toggleFocused drives them unchanged. Collapsed nodes
+// are absent from `rows` (flatten omits their subtree) so their tools stay out of the ring.
+const orchFocusables = (rows: readonly OrchRow[]): string[] => {
   const out: string[] = []
-  for (const r of rows) if (r.expanded) for (const m of r.tools) out.push(`tool:${m.id}`)
+  for (const r of rows) {
+    if (r.hasDetail) out.push(`node:${r.id}`)
+    if (r.expanded) for (const m of r.tools) out.push(`tool:${m.id}`)
+  }
   return out
 }
 
@@ -371,6 +415,7 @@ const useNodeExpansion = (resetKey: unknown) => {
 function App() {
   const state = useAtomValue(appAtom)
   const busy = useAtomValue(busyAtom)
+  const busySessions = useAtomValue(busySessionsAtom)
   const setApp = useAtomSet(appAtom)
   const newSession = useAtomSet(newSessionAtom)
   const deleteSession = useAtomSet(deleteSessionAtom)
@@ -394,6 +439,8 @@ function App() {
   // esc-to-interrupt arming + transient header note (copied / interrupt hint)
   const [armed, setArmed] = useState(false)
   const [note, setNote] = useState<string | null>(null)
+  // list-view `d` arm-then-confirm: holds the session id awaiting a second `d` to close.
+  const [armedDelete, setArmedDelete] = useState<string | null>(null)
   const focusedRef = useRef(true)
 
   useEffect(() => {
@@ -479,14 +526,15 @@ function App() {
     if (t.steps.length > 0) focusables.push(`turn:${t.idx}`)
     if (isExpanded(t)) for (const s of t.steps) if (s.kind === "tool") focusables.push(`tool:${s.id}`)
   }
-  // PER-NODE TOOL ROUTING: orchestration node tool rows join the Tab ring too (derived from
-  // the same flattened rows). Same `tool:<id>` key as transcript tools, so toggleFocused drives them.
-  focusables.push(...orchToolFocusables(orchRows))
+  // Orchestration node + tool rows join the Tab ring too (derived from the same flattened
+  // rows). `node:<id>` collapses a node; `tool:<id>` (same key as transcript tools) drives a tool.
+  focusables.push(...orchFocusables(orchRows))
   const focusedKey = focusables.length ? focusables[((focus % focusables.length) + focusables.length) % focusables.length] : undefined
   const toggleFocused = () => {
     if (!focusedKey) return
     const [kind, val] = [focusedKey.slice(0, focusedKey.indexOf(":")), focusedKey.slice(focusedKey.indexOf(":") + 1)]
     if (kind === "turn") toggleTurn(Number(val))
+    else if (kind === "node") toggleNode(val)
     else toggleTool(val)
   }
 
@@ -581,14 +629,18 @@ function App() {
   const onListKey = (k: any) => {
     if (k.name === "q" || k.name === "escape") return process.exit(0)
     if (k.name === "n") return void newSession()
-    // d — close the highlighted session: aborts its turn + frees its sessionsRT entry.
+    // d — close the highlighted session (aborts its turn + frees its sessionsRT entry).
+    // Arm-then-confirm: a first `d` arms the highlighted row, a second `d` on the SAME
+    // row closes it. Destructive + adjacent to nav keys, so it can't fire on one keypress.
     if (k.name === "d") {
       const target = state.sessions[state.cursor]
-      return void (target && deleteSession(target.id))
+      if (!target) return
+      if (armedDelete === target.id) return void (deleteSession(target.id), setArmedDelete(null))
+      return setArmedDelete(target.id)
     }
-    if (k.name === "up" || k.name === "k") return setApp((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) }))
+    if (k.name === "up" || k.name === "k") return (setArmedDelete(null), setApp((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) })))
     if (k.name === "down" || k.name === "j")
-      return setApp((s) => ({ ...s, cursor: Math.min(s.sessions.length - 1, s.cursor + 1) }))
+      return (setArmedDelete(null), setApp((s) => ({ ...s, cursor: Math.min(s.sessions.length - 1, s.cursor + 1) })))
     if (k.name === "return") {
       const target = state.sessions[state.cursor]
       if (target) setApp((s) => ({ ...s, view: "chat", activeId: target.id }))
@@ -631,7 +683,7 @@ function App() {
   if (!inChat) {
     return (
       <box flexDirection="column" style={{ height: "100%" }}>
-        <List sessions={state.sessions} cursor={state.cursor} />
+        <List sessions={state.sessions} cursor={state.cursor} busySessions={busySessions} frame={work.frame} armedDelete={armedDelete} />
       </box>
     )
   }
@@ -639,7 +691,7 @@ function App() {
   // ONE status line at the bottom: left = context (model · session), right =
   // live state or key hints. No top bar, no scattered metadata.
   const statusLeft = `kimi · ${active.title}${projectDoc ? ` · ${projectDoc}` : ""}`
-  const status = statusBar(busy, armed, note)
+  const status = statusBar(busy, armed, note, work)
 
   return (
     <box flexDirection="column" style={{ height: "100%" }}>
@@ -659,13 +711,14 @@ function App() {
             expTools={expTools}
             focusedKey={focusedKey}
             cols={width || 80}
+            frame={work.frame}
             onToggleTurn={() => toggleTurn(t.idx)}
             onToggleTool={(id) => toggleTool(id)}
           />
         ))}
         {orch && orch.roots.length > 0 && (
           <box flexDirection="column" style={{ marginTop: 1, paddingLeft: 1 }}>
-            <text fg="#585b70">orchestration</text>
+            <text fg="#7f849c">orchestration</text>
             {/* VELOCITY UNICODE TREE: one flat <text> per flattened Row, connectors
                 precomputed by flatten() — no nested padding boxes. */}
             <box flexDirection="column" style={{ paddingLeft: INDENT }}>
@@ -678,6 +731,7 @@ function App() {
                   onToggleTool={toggleTool}
                   focusedKey={focusedKey}
                   cols={width || 80}
+                  frame={work.frame}
                 />
               ))}
               {/* Σ footer: live run total — tokens · nodes · errors (COST-METER total preserved). */}
@@ -689,7 +743,7 @@ function App() {
       <box style={{ paddingLeft: 1, paddingRight: 1, paddingTop: 1, width: "100%" }}>
         <box
           border={["left"]}
-          borderColor={busy ? "#ffd166" : "#66aaff"}
+          borderColor={armed ? "#f38ba8" : busy ? "#ffd166" : "#66aaff"}
           style={{ paddingLeft: 1, flexShrink: 0, width: "100%" }}
         >
           <textarea
@@ -704,13 +758,13 @@ function App() {
             focused
             cursorColor="#66aaff"
             focusedTextColor="#cdd6f4"
-            placeholder={busy ? `${work.frame} thinking… ${work.elapsed}s · esc to interrupt` : "message kimi"}
-            placeholderColor={busy ? "#ffd166" : "#585b70"}
+            placeholder={armed ? "⚠ esc again to interrupt" : busy ? `${work.frame} thinking… ${work.elapsed}s · esc to interrupt` : "message kimi"}
+            placeholderColor={armed ? "#f38ba8" : busy ? "#ffd166" : "#7f849c"}
           />
         </box>
       </box>
       <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1, paddingBottom: 1 }}>
-        <text fg="#585b70">{statusLeft}</text>
+        <text fg="#7f849c">{statusLeft}</text>
         <text fg={status.tone}>{status.right}</text>
       </box>
     </box>

@@ -35,7 +35,31 @@ export type Row = {
 
 const glyphOf = (s: OrchNode["status"]) => (s === "running" ? "◌" : s === "error" ? "✗" : "✓")
 const colorOf = (s: OrchNode["status"]) => (s === "error" ? "#f38ba8" : s === "done" ? "#a6e3a1" : "#7f849c")
-const summaryOf = (n: OrchNode): string => (n.status === "running" ? n.phase || "running…" : (n.result ?? n.phase))
+
+// A node's settled payload is often a serialized object ({"thought":"…","reply":"…"})
+// that, dumped raw into the summary cell, leaks `{"` braces and JSON noise into the
+// widest row on screen. Pull the human field out — JSON.parse when whole, else a regex
+// for the common keys (results are clipped upstream, so the JSON is frequently truncated
+// mid-string and won't parse). Falls back to the raw string when it's plainly not JSON.
+const humanText = (s: string): string => {
+  const t = s.trim()
+  if (!t.startsWith("{") && !t.startsWith("[")) return s
+  try {
+    const o = JSON.parse(t)
+    return String(o?.thought ?? o?.reply ?? o?.result ?? o?.summary ?? s)
+  } catch {
+    const m = t.match(/"(?:thought|reply|result|summary)"\s*:\s*"((?:[^"\\]|\\.)*)/)
+    return m ? m[1]!.replace(/\\"/g, '"').replace(/\\n/g, " ") : s
+  }
+}
+
+// summary cell: while running, the phase IF it's meaningful (not the placeholder echo of
+// the node's own label/id — which rendered the infamous "node node"); else "running…".
+// Settled nodes show their payload with the JSON envelope stripped.
+const summaryOf = (n: OrchNode): string => {
+  if (n.status === "running") return n.phase && n.phase !== n.label && n.phase !== n.id ? n.phase : "running…"
+  return humanText(n.result ?? n.phase ?? "")
+}
 
 // Collapsed-only per-node meta: owned-tool count (this node OWNS its tools).
 const toolsLabelOf = (n: OrchNode): string => {
