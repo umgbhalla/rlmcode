@@ -29,7 +29,7 @@ const inputKeys = [
 ] as any
 
 type ToolMsg = Extract<Msg, { kind: "tool" }>
-type Turn = { idx: number; user: string; steps: Msg[]; final: string | null; meta?: TurnMeta | undefined }
+type Turn = { idx: number; user: string; steps: Msg[]; final: string | null; meta?: TurnMeta | undefined; thinking?: string | undefined; streaming?: boolean }
 
 const oneLine = (s: string, n = 90) => {
   const t = s.replace(/\s+/g, " ").trim()
@@ -83,9 +83,15 @@ function toTurns(messages: readonly Msg[]): Turn[] {
       // turn end) is promoted out of the step stream. Streaming narration chunks are also
       // kind:"agent" but carry NO meta — promoting the last of those mid-turn made the green
       // "final" slot flicker and the rows reorder on every chunk. They stay as ordered steps.
-      if (s.kind === "agent" && s.meta) {
+      // Promote the settled reply (carries meta) OR the in-flight STREAMING reply. The streaming
+      // reply is ONE message that grows in place (atoms grow()), so promoting it is stable — no
+      // per-chunk reorder flicker (the old hazard was many separate narration msgs). Carry its
+      // thinking + streaming flag up so the render shows the collapsible thinking + live cursor.
+      if (s.kind === "agent" && (s.meta || s.streaming === true)) {
         t.final = s.text
         t.meta = s.meta
+        t.streaming = s.streaming === true && s.meta === undefined
+        t.thinking = s.thinking
         t.steps = [...t.steps.slice(0, i), ...t.steps.slice(i + 1)]
         break
       }
@@ -243,19 +249,48 @@ function TurnView({
           )}
         </box>
       )}
-      {t.final !== null && (
-        <box flexDirection="column" style={{ marginTop: 1 }}>
-          <box flexDirection="row" style={{ width: "100%" }}>
-            <text fg={failed ? "#f38ba8" : "#a6e3a1"}>{"⏺ "}</text>
-            <box style={{ flexGrow: 1, flexShrink: 1 }}>
-              {failed ? <text fg="#f38ba8">{t.final}</text> : <markdown content={t.final} syntaxStyle={mdStyle} />}
-            </box>
-          </box>
-          {t.meta && (
-            <box style={{ paddingLeft: INDENT }}>
-              <text fg={t.meta.budget ? "#ffd166" : "#7f849c"}>{fmtMeta(t.meta)}</text>
-            </box>
-          )}
+      <ThinkingView t={t} />
+      <ReplyView t={t} failed={failed} />
+    </box>
+  )
+}
+
+// THINKING (streaming): live block while reasoning, auto-FOLDS to a one-line summary the
+// instant the reply starts (chosen UX). Own component so its branch lives outside TurnView's
+// cyclomatic budget. Renders nothing when no reasoning streamed.
+function ThinkingView({ t }: { t: Turn }) {
+  if (t.thinking === undefined || t.thinking.length === 0) return null
+  const live = (t.streaming ?? false) && (t.final === null || t.final === "")
+  return (
+    <box flexDirection="column" style={{ marginTop: 1, paddingLeft: INDENT }}>
+      {live ? (
+        <>
+          <text fg="#6c7086">{"▽ thinking…"}</text>
+          <text fg="#585b70">{oneLine(t.thinking, 200)}</text>
+        </>
+      ) : (
+        <text fg="#6c7086">{`▸ 💡 thought${t.meta ? ` · ${(t.meta.ms / 1000).toFixed(1)}s` : ""}`}</text>
+      )}
+    </box>
+  )
+}
+
+// REPLY: skip the ⏺ row while only thinking has streamed (no reply yet). While streaming,
+// render plain text + █ cursor (markdown mid-stream is janky); markdown once settled. Own
+// component to keep its branches out of TurnView's cyclomatic budget.
+function ReplyView({ t, failed }: { t: Turn; failed: boolean }) {
+  if (t.final === null || (t.final === "" && (t.streaming ?? false))) return null
+  return (
+    <box flexDirection="column" style={{ marginTop: 1 }}>
+      <box flexDirection="row" style={{ width: "100%" }}>
+        <text fg={failed ? "#f38ba8" : "#a6e3a1"}>{"⏺ "}</text>
+        <box style={{ flexGrow: 1, flexShrink: 1 }}>
+          {failed ? <text fg="#f38ba8">{t.final}</text> : t.streaming ? <text fg="#cdd6f4">{`${t.final}█`}</text> : <markdown content={t.final} syntaxStyle={mdStyle} />}
+        </box>
+      </box>
+      {t.meta && (
+        <box style={{ paddingLeft: INDENT }}>
+          <text fg={t.meta.budget ? "#ffd166" : "#7f849c"}>{fmtMeta(t.meta)}</text>
         </box>
       )}
     </box>

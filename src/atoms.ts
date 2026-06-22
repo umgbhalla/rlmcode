@@ -158,7 +158,7 @@ const patchNodeTools = (
 const installSink = (
   patch: (fn: (m: readonly Msg[]) => readonly Msg[]) => void,
   orchPatch: (fn: (t: OrchTree) => OrchTree) => void,
-) =>
+) => {
   // STREAMING: grow the in-flight streaming agent message in place (append to its reply text
   // or its thinking), or start one if the trailing message isn't a live stream. Thinking
   // arrives first (model reasons, then answers), so the first thinkingDelta mints the message
@@ -249,6 +249,7 @@ const installSink = (
         break
     }
   })
+}
 
 /** Send a message in the active session: append user -> traced turn -> append reply. */
 export const sendAtom = appRuntime.fn((message: string, get) =>
