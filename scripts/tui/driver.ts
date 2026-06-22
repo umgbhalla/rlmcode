@@ -40,6 +40,12 @@ export type Driver = {
   click(x: number, y: number): Promise<void>
   /** Poll the frame until `predicate(frame)` holds (frame-stable wait, no fixed sleeps). */
   waitFor(predicate: (frame: string) => boolean, opts?: { timeoutMs?: number; label?: string }): Promise<string>
+  /**
+   * SPEC alias of `waitFor` with the (predicate, deadlineMs) positional signature — a
+   * frame-stable wait that resolves the first captured frame for which `predicate` holds
+   * (NOT setTimeout-then-assert). `deadlineMs` is the max wall-clock to wait before throwing.
+   */
+  waitForFrame(predicate: (frame: string) => boolean, deadlineMs?: number): Promise<string>
   /** Tear the session + driver down. */
   stop(): Promise<void>
 }
@@ -105,6 +111,7 @@ export const launchDriver = async (opts: LaunchDriverOptions = {}): Promise<Driv
       await session.keyboard.write(sgr(x, y, false))
     },
     waitFor,
+    waitForFrame: (predicate, deadlineMs) => waitFor(predicate, { timeoutMs: deadlineMs, label: "frame" }),
     stop: async () => {
       await session.stop().catch(() => {})
       await tc.close().catch(() => {})
