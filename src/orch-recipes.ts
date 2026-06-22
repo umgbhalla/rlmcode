@@ -85,7 +85,7 @@ const withNodeLogger = (opts: NodeOpts, nodeId: string): NodeOpts =>
 // follow-up turn resumes; we emit a small marker (delta) so the UI knows the turn was
 // TRUNCATED-then-finalized, not finished.
 //
-// `toolNames` are the gen's registered function names (BASE_TOOLS [+ ORCH_TOOLS + RLM_TOOLS] for
+// `toolNames` are the gen's registered function names (BASE_TOOLS [+ RLM_WORKFLOW_TOOLS + RLM_TOOLS] for
 // the main turn; BASE_TOOLS for a node). onEvent + nodeId let the marker render on the live node.
 // Real ax types end-to-end (AxStepHooks / AxStepContext.removeFunctions) — no `any`.
 //

@@ -9,7 +9,7 @@
 // Gated behind AX2_LIVE=1 (skips clean otherwise). Run:
 //   AX2_LIVE=1 AX2_MAX_STEPS=1 bun --env-file=.env scripts/graceful-maxsteps-probe.ts
 import { ai, type AxAIService, type AxFunction } from "@ax-llm/ax"
-import { ORCH_TOOLS } from "../src/orch-tools.ts"
+import { RLM_WORKFLOW_TOOLS } from "../src/rlm-workflow.ts"
 import { MODEL, limits, rateLimiter } from "../src/runtime.ts"
 
 if (process.env.AX2_LIVE !== "1") {
@@ -31,7 +31,7 @@ const buildLiveAi = (): AxAIService => {
   return svc
 }
 
-const orchestrate = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
+const orchestrate = RLM_WORKFLOW_TOOLS.find((t: AxFunction) => t.name === "rlm_workflow")
 if (!orchestrate?.func) throw new Error("orchestrate tool not found")
 
 console.log(`graceful-maxsteps-probe: live CF-Kimi (model ${MODEL}), AX2_MAX_STEPS=${limits.maxSteps}`)

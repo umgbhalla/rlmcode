@@ -9,8 +9,8 @@
 // file, a pasted log, a whole module concatenated) never blows the prompt window. This
 // is the right tool for "find X buried somewhere in this big blob".
 //
-// THE SAFETY MODEL (mirrors orch-tools.ts):
-//   1. ONE LEVEL: this tool lives on the MAIN chat gen only (agent.ts ORCH_TOOLS). The
+// THE SAFETY MODEL (mirrors rlm-workflow.ts):
+//   1. ONE LEVEL: this tool lives on the MAIN chat gen only (agent.ts RLM_WORKFLOW_TOOLS). The
 //      RLM's own executor runs JS in the AxJSRuntime sandbox (TIMING permission only —
 //      no network/fs/process); it has NO ax2 file/shell tools and cannot re-orchestrate.
 //   2. BUDGET ceiling (ADVISORY/soft): the RLM runs under its OWN allocate(SOFT, HARD);
@@ -21,7 +21,7 @@
 //   4. abortSignal: extra.abortSignal threads into forward() so a cancelled turn
 //      cancels the RLM run.
 //
-// CONTEXT/TRACE: like orch-tools.ts, the handler runs Promise-native INSIDE forward(),
+// CONTEXT/TRACE: like rlm-workflow.ts, the handler runs Promise-native INSIDE forward(),
 // which turn() runs inside otelContext.with(traceContext). So onEvent()'s active-span
 // read resolves to the live chat.turn span and the RLM's start/delta/done events nest
 // in the SAME OrchTree. The actorTurnCallback / onContextEvent callbacks are bridged

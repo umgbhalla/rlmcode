@@ -15,7 +15,7 @@
 // --env-file=.env so CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID load).
 import { AxAgentClarificationError, ai, type AxAIService, type AxFunction } from "@ax-llm/ax"
 import { type Activity, setActivitySink } from "../src/activity.ts"
-import { ORCH_TOOLS } from "../src/orch-tools.ts"
+import { RLM_WORKFLOW_TOOLS } from "../src/rlm-workflow.ts"
 import { RLM_TOOLS, runRlm } from "../src/rlm-tool.ts"
 import { limits, MODEL, rateLimiter } from "../src/runtime.ts"
 
@@ -43,7 +43,7 @@ export const buildLiveAi = (): AxAIService => {
   return svc
 }
 
-// Drive the REAL orchestrate tool (ORCH_TOOLS[0]) — the same AxFunction the model
+// Drive the REAL orchestrate tool (RLM_WORKFLOW_TOOLS[0]) — the same AxFunction the model
 // calls mid-turn — over a concrete task. This exercises the WHOLE live path:
 // boundary() → forked-memory workers (BASE_TOOLS leaves) → strategy combine
 // (parallel/judge/verify/best_of_n) → budget charging. Returns the tool's string
@@ -54,9 +54,9 @@ export const runOrchestrateLive = async (
   branches = 2,
   liveAi: AxAIService = buildLiveAi(),
 ): Promise<string> => {
-  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
-  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
-  const out = await orchestrateTool.func(
+  const rlmWorkflowTool = RLM_WORKFLOW_TOOLS.find((t: AxFunction) => t.name === "rlm_workflow")
+  if (!rlmWorkflowTool?.func) throw new Error("orchestrate tool not found in RLM_WORKFLOW_TOOLS")
+  const out = await rlmWorkflowTool.func(
     { task, strategy, branches },
     { sessionId: "live-smoke", ai: liveAi, abortSignal: new AbortController().signal },
   )
@@ -73,8 +73,8 @@ export const runRoutingLive = async (
   subtasks: string[],
   liveAi: AxAIService = buildLiveAi(),
 ): Promise<{ transcript: CapturedTool[]; nodeTools: Record<string, CapturedTool[]>; reply: string }> => {
-  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
-  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
+  const rlmWorkflowTool = RLM_WORKFLOW_TOOLS.find((t: AxFunction) => t.name === "rlm_workflow")
+  if (!rlmWorkflowTool?.func) throw new Error("orchestrate tool not found in RLM_WORKFLOW_TOOLS")
   const transcript: CapturedTool[] = []
   const nodeTools: Record<string, CapturedTool[]> = {}
   // The SAME tool/result routing the atoms reducer applies (installSink is module-private).
@@ -90,7 +90,7 @@ export const runRoutingLive = async (
   }
   setActivitySink(sink)
   try {
-    const out = await orchestrateTool.func(
+    const out = await rlmWorkflowTool.func(
       { task: "Work the listed subtasks; each sub-agent handles exactly one.", subtasks, strategy: "parallel" },
       { sessionId: "live-routing", ai: liveAi, abortSignal: new AbortController().signal },
     )
@@ -111,9 +111,9 @@ export const runRoutedLive = async (
   effort: "low" | "medium" | "high" | "xhigh" | "max" | undefined,
   liveAi: AxAIService = buildLiveAi(),
 ): Promise<string> => {
-  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
-  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
-  const out = await orchestrateTool.func(
+  const rlmWorkflowTool = RLM_WORKFLOW_TOOLS.find((t: AxFunction) => t.name === "rlm_workflow")
+  if (!rlmWorkflowTool?.func) throw new Error("orchestrate tool not found in RLM_WORKFLOW_TOOLS")
+  const out = await rlmWorkflowTool.func(
     { task, strategy: "parallel", branches: 1, model, ...(effort !== undefined ? { effort } : {}) },
     { sessionId: `live-multimodel-${model}`, ai: liveAi, abortSignal: new AbortController().signal },
   )
@@ -129,9 +129,9 @@ export const runPlanLive = async (
   task: string,
   liveAi: AxAIService = buildLiveAi(),
 ): Promise<string> => {
-  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
-  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
-  const out = await orchestrateTool.func(
+  const rlmWorkflowTool = RLM_WORKFLOW_TOOLS.find((t: AxFunction) => t.name === "rlm_workflow")
+  if (!rlmWorkflowTool?.func) throw new Error("orchestrate tool not found in RLM_WORKFLOW_TOOLS")
+  const out = await rlmWorkflowTool.func(
     { task, strategy: "plan" },
     { sessionId: "live-plan", ai: liveAi, abortSignal: new AbortController().signal },
   )
@@ -147,9 +147,9 @@ export const runDecomposeLive = async (
   liveAi: AxAIService = buildLiveAi(),
   task = "Work the listed subtasks; each sub-agent handles exactly one.",
 ): Promise<string> => {
-  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
-  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
-  const out = await orchestrateTool.func(
+  const rlmWorkflowTool = RLM_WORKFLOW_TOOLS.find((t: AxFunction) => t.name === "rlm_workflow")
+  if (!rlmWorkflowTool?.func) throw new Error("orchestrate tool not found in RLM_WORKFLOW_TOOLS")
+  const out = await rlmWorkflowTool.func(
     { task, subtasks, strategy: "parallel" },
     { sessionId: "live-decompose", ai: liveAi, abortSignal: new AbortController().signal },
   )
@@ -166,9 +166,9 @@ export const runFanOutLive = async (
   liveAi: AxAIService = buildLiveAi(),
   task = "Work the listed subtasks; each sub-agent handles exactly one.",
 ): Promise<string> => {
-  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
-  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
-  const out = await orchestrateTool.func(
+  const rlmWorkflowTool = RLM_WORKFLOW_TOOLS.find((t: AxFunction) => t.name === "rlm_workflow")
+  if (!rlmWorkflowTool?.func) throw new Error("orchestrate tool not found in RLM_WORKFLOW_TOOLS")
+  const out = await rlmWorkflowTool.func(
     { task, subtasks, strategy: "parallel" },
     { sessionId: "live-fanout", ai: liveAi, abortSignal: new AbortController().signal },
   )
@@ -185,9 +185,9 @@ export const runGracefulMaxStepsLive = async (
   task: string,
   liveAi: AxAIService = buildLiveAi(),
 ): Promise<string> => {
-  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
-  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
-  const out = await orchestrateTool.func(
+  const rlmWorkflowTool = RLM_WORKFLOW_TOOLS.find((t: AxFunction) => t.name === "rlm_workflow")
+  if (!rlmWorkflowTool?.func) throw new Error("orchestrate tool not found in RLM_WORKFLOW_TOOLS")
+  const out = await rlmWorkflowTool.func(
     { task, strategy: "parallel", branches: 1 },
     { sessionId: "live-graceful", ai: liveAi, abortSignal: new AbortController().signal },
   )
@@ -207,7 +207,7 @@ export const runRlmLive = async (
   runRlm(context, query, liveAi, `live-rlm:${Date.now()}`, new AbortController().signal)
 
 // A non-empty REAL reply = a string with actual content that is NOT one of the
-// handler's failure/partial sentinels (orch-tools.ts: "orchestration failed: …",
+// handler's failure/partial sentinels (rlm-workflow.ts: "orchestration failed: …",
 // "partial: …", "error: …"). Those compile and return a string but mean the live
 // run did NOT succeed — the exact false-green the tsc gate missed.
 const isRealReply = (s: string): boolean => {

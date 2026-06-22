@@ -19,7 +19,7 @@ import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { BASE_PROMPT, limits, llm, MODEL, onEvent, rateLimiter } from "./runtime.ts"
-import { ORCH_TOOLS } from "./orch-tools.ts"
+import { RLM_WORKFLOW_TOOLS } from "./rlm-workflow.ts"
 import { RLM_TOOLS } from "./rlm-tool.ts"
 
 const MAX_STEPS = limits.maxSteps // max tool-call iterations per turn — the HARD per-turn stop
@@ -33,30 +33,30 @@ const TOKEN_BUDGET = limits.tokenBudget
 const PROVIDER = "cloudflare.workers-ai"
 
 // BASE_PROMPT (the capable base system prompt) lives in runtime.ts — the neutral
-// cycle-breaker module — so orchestration NODE gens (orch-tools.ts) can import it
-// without re-introducing the agent ⇄ orch-tools static init cycle. Re-exported here
+// cycle-breaker module — so orchestration NODE gens (rlm-workflow.ts) can import it
+// without re-introducing the agent ⇄ rlm-workflow static init cycle. Re-exported here
 // so callers that think of it as "the main agent's prompt" find it on agent.ts. A node
-// is built from BASE_PROMPT + a persona overlay (NOT this ORCH_OVERLAY): a node is the
+// is built from BASE_PROMPT + a persona overlay (NOT this RLM_WORKFLOW_OVERLAY): a node is the
 // main agent minus orchestration.
 export { BASE_PROMPT }
 
 // The orchestration paragraphs — appended to the MAIN chat gen ONLY (it alone carries
-// ORCH_TOOLS). A node gen is built from BASE_PROMPT (above) WITHOUT this overlay: it has
-// no orchestration tools, so telling it about orchestrate/run_orch_script would be a lie.
-const ORCH_OVERLAY = [
+// RLM_WORKFLOW_TOOLS). A node gen is built from BASE_PROMPT (above) WITHOUT this overlay: it has
+// no orchestration tools, so telling it about rlm_workflow would be a lie.
+const RLM_WORKFLOW_OVERLAY = [
   // ── ORCHESTRATION GUIDANCE ────────────────────────────────────────────────────────
   // Beyond a single reply you can drive deterministic multi-node runs (nodes render live
-  // in a tree). Two tools: orchestrate (fan out sub-agents) and run_rlm (mine a big blob
+  // in a tree). Two tools: rlm_workflow (fan out sub-agents) and run_rlm (mine a big blob
   // in a code runtime). The unit everywhere is a NODE.
   "## Orchestration",
-  "You can run deterministic multi-node flows, not just single replies. Tools: `orchestrate` (fan out sub-agents over distinct subtasks) and `run_rlm` (mine a huge blob in a code runtime). The unit is always a NODE.",
+  "You can run deterministic multi-node flows, not just single replies. Tools: `rlm_workflow` (fan out sub-agents over distinct subtasks) and `run_rlm` (mine a huge blob in a code runtime). The unit is always a NODE.",
   // WHEN to orchestrate.
-  "WHEN to orchestrate: (1) the task SPLITS into independent parts that don't depend on each other's output — fan them out (`orchestrate` with distinct `subtasks`); (2) you want the BEST of N attempts or to VERIFY an answer — use strategy `judge`/`best_of_n` (best-of-N) or `verify` (skeptics vote); (3) a BIG blob (long file, pasted log, whole concatenated module) won't fit the window — use `run_rlm`.",
+  "WHEN to orchestrate: (1) the task SPLITS into independent parts that don't depend on each other's output — fan them out (`rlm_workflow` with distinct `subtasks`); (2) you want the BEST of N attempts or to VERIFY an answer — use strategy `judge`/`best_of_n` (best-of-N) or `verify` (skeptics vote); (3) a BIG blob (long file, pasted log, whole concatenated module) won't fit the window — use `run_rlm`.",
   // WHEN NOT.
   "WHEN NOT: a trivial or strictly sequential task — DO IT DIRECTLY with your own file/shell tools. Do NOT fan out a one-liner. Do NOT spin up a node to read one file or run one command. Sequential steps (read → edit → test) are ONE node's task (yours): orchestration is for INDEPENDENT work or N-way redundancy, never to wrap a single linear chore.",
   // The strategy menu — one line each.
-  "STRATEGY MENU (orchestrate's `strategy`, default `parallel`): `parallel` = fan DISTINCT subtasks, return all (division of labour); `judge` = run N, one judge picks the single best verbatim; `verify` = answer once, N skeptics vote accept/reject; `best_of_n` = re-run the fan-out until the survivor count is stable, then judge; `plan` = a planner node auto-decomposes `task` into distinct subtasks, then fans out one node per subtask.",
-  "Examples: `orchestrate({ subtasks: ['audit src/auth for bugs', 'check tests cover edge cases', 'review error handling'] })` (parallel division of labour); `orchestrate({ task: 'design a rate limiter', strategy: 'judge', branches: 3 })` (best of 3); `orchestrate({ task: 'is this migration safe?', strategy: 'verify', branches: 4 })` (answer + 3 skeptics); `orchestrate({ task: 'refactor the auth module', strategy: 'plan' })` (auto-decompose then fan out).",
+  "STRATEGY MENU (rlm_workflow's `strategy`, default `parallel`): `parallel` = fan DISTINCT subtasks, return all (division of labour); `judge` = run N, one judge picks the single best verbatim; `verify` = answer once, N skeptics vote accept/reject; `best_of_n` = re-run the fan-out until the survivor count is stable, then judge; `plan` = a planner node auto-decomposes `task` into distinct subtasks, then fans out one node per subtask.",
+  "Examples: `rlm_workflow({ subtasks: ['audit src/auth for bugs', 'check tests cover edge cases', 'review error handling'] })` (parallel division of labour); `rlm_workflow({ task: 'design a rate limiter', strategy: 'judge', branches: 3 })` (best of 3); `rlm_workflow({ task: 'is this migration safe?', strategy: 'verify', branches: 4 })` (answer + 3 skeptics); `rlm_workflow({ task: 'refactor the auth module', strategy: 'plan' })` (auto-decompose then fan out).",
   // The hard rules.
   "HARD RULES: (1) give DISTINCT subtasks, never N copies of the same string — pass `subtasks` for division of labour; only omit them (and pass `task` alone) when you genuinely want N REDUNDANT attempts (e.g. `best_of_n`). (2) Stay BOUNDED — `branches` caps at 100 (~8 run at once, the rest queue); don't request more nodes than the task has distinct parts. (3) Pick MODEL + THINKING per node — pass `model` ('kimi' default | 'glm') and `effort` ('low'..'max') to route a node to a stronger/cheaper engine. (4) Sub-agent nodes carry the file/shell tools ONLY and canNOT themselves orchestrate (one level deep). (5) An RLM actor writes PURE JS in a sandbox — NEVER `require`/`import`; the data is already a runtime variable.",
 ].join(" ")
@@ -79,15 +79,15 @@ const loadProjectDoc = (): string => {
 
 export const projectDocLoaded = (["AGENTS.md", "CLAUDE.md"] as const).find((f) => existsSync(f)) ?? null
 
-// The MAIN chat gen gets BASE_TOOLS + ORCH_TOOLS — it alone may self-orchestrate.
-// Every orchestration sub-run NODE (orch-tools.ts) is built with BASE_TOOLS only, so a
+// The MAIN chat gen gets BASE_TOOLS + RLM_WORKFLOW_TOOLS — it alone may self-orchestrate.
+// Every orchestration sub-run NODE (rlm-workflow.ts) is built with BASE_TOOLS only, so a
 // node physically cannot re-orchestrate: the structural one-level recursion guard.
-const CHAT_TOOLS = [...BASE_TOOLS, ...ORCH_TOOLS, ...RLM_TOOLS]
+const CHAT_TOOLS = [...BASE_TOOLS, ...RLM_WORKFLOW_TOOLS, ...RLM_TOOLS]
 const chat = ax("message:string -> reply:string", { functions: CHAT_TOOLS })
-// PROMPT SIZE (telemetry leap 2): the assembled system prompt (BASE_PROMPT + ORCH_OVERLAY +
+// PROMPT SIZE (telemetry leap 2): the assembled system prompt (BASE_PROMPT + RLM_WORKFLOW_OVERLAY +
 // projectDoc) is sent on EVERY turn. Record its char count so prompt bloat is visible on the
 // span — an 8000-char projectDoc + full overlay every turn is a real latency lever.
-const SYSTEM_PROMPT = `${BASE_PROMPT} ${ORCH_OVERLAY}${loadProjectDoc()}`
+const SYSTEM_PROMPT = `${BASE_PROMPT} ${RLM_WORKFLOW_OVERLAY}${loadProjectDoc()}`
 export const SYSTEM_PROMPT_CHARS = SYSTEM_PROMPT.length
 chat.setDescription(SYSTEM_PROMPT)
 

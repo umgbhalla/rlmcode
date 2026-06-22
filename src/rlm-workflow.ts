@@ -1,12 +1,11 @@
-// Agent-callable ORCHESTRATION tools — the agent SELF-orchestrates. The model, mid-
-// turn, decides to fan out / judge / verify / best-of-N over a sub-task (`orchestrate`)
-// or to load + run a saved .ax/orch/<name> script (`run_orch_script`). Both run the
-// EXISTING engine (the 5 prims in orch.ts + the 4 recipes in orch-recipes.ts) — this
-// file adds NO 6th core primitive; it only composes what is already there.
+// Agent-callable RLM_WORKFLOW tool — the agent SELF-orchestrates. The model, mid-turn,
+// decides to fan out / judge / verify / best-of-N over a sub-task via `rlm_workflow`.
+// It runs the EXISTING engine (the 5 prims in orch.ts + the recipes in orch-recipes.ts)
+// — this file adds NO 6th core primitive; it only composes what is already there.
 //
 // THE SAFETY MODEL (an LLM that can spawn fan-outs that spawn fan-outs = runaway cost):
 //   1. STRUCTURAL one-level recursion guard: every worker NODE gen (nodeGen/nodeWorker — the
-//      nodes that loop file/shell tools) carries BASE_TOOLS only, NEVER +ORCH_TOOLS, so it
+//      nodes that loop file/shell tools) carries BASE_TOOLS only, NEVER +RLM_WORKFLOW_TOOLS, so it
 //      physically cannot re-orchestrate (structural, not a race-prone depth counter). The judge
 //      + skeptic gens carry NO functions at all (pure reasoning over produced text) — strictly
 //      stronger, so the one-level contract holds a fortiori.
@@ -116,8 +115,8 @@ const boundary = (sessionId: string, signal: AbortSignal, rootId: string) => {
 }
 
 // A sub-run node gen — a REAL sub-agent: the SAME capable BASE_PROMPT as the main agent (from
-// runtime.ts, the neutral cycle-breaker — NOT agent.ts, so no agent ⇄ orch-tools init cycle),
-// with the caller's `persona` as an OVERLAY. It carries BASE_TOOLS ONLY (no ORCH_TOOLS/overlay)
+// runtime.ts, the neutral cycle-breaker — NOT agent.ts, so no agent ⇄ rlm-workflow init cycle),
+// with the caller's `persona` as an OVERLAY. It carries BASE_TOOLS ONLY (no RLM_WORKFLOW_TOOLS/overlay)
 // — the structural one-level recursion guard: a node physically cannot re-orchestrate. A fresh
 // AxGen per call (never shared across concurrent branches) keeps each node's getUsage() its own.
 // LEAF_TOOL_SCOPE is a terse tool-scoping overlay (claude_code Explore-style) appended AFTER the
@@ -212,7 +211,7 @@ type OrchestrationOpts = {
   rootId: string
   choice?: NodeModelChoice | undefined // MULTI-MODEL: per-run routing for WORKER nodes (absent ⇒ Kimi)
 }
-const runOrchestration = async ({
+const runRlmWorkflow = async ({
   ai,
   strategy,
   task,
@@ -353,10 +352,10 @@ const runOrchestration = async ({
 }
 
 // ── Tool 1: orchestrate ────────────────────────────────────────────────────────────
-const orchestrateTool: AxFunction = {
-  name: "orchestrate",
+const rlmWorkflowTool: AxFunction = {
+  name: "rlm_workflow",
   description:
-    "Fan a task out across parallel sub-agent NODES (each carrying the file/shell tools) and combine the results. WHEN TO USE: the work splits into INDEPENDENT parts (division of labour), OR you want the best-of-N / a verified answer. WHEN NOT: a trivial or strictly sequential chore — do that directly yourself; do NOT fan out a one-liner. EXAMPLE (division of labour): orchestrate({ subtasks: ['audit src/auth for bugs', 'check the tests cover edge cases', 'review error handling'] }) — branch i works subtasks[i], real distinct work. EXAMPLE (best of N): orchestrate({ task: 'design a token-bucket rate limiter', strategy: 'judge', branches: 3 }). EXAMPLE (auto-decompose): orchestrate({ task: 'refactor the auth module', strategy: 'plan' }) — a PLANNER node splits the task into distinct subtasks itself, then fans out one node per subtask and returns the plan + each branch's output. PARAMS: task (the overall goal); subtasks (PREFERRED — a list of DISTINCT, independent pieces; branch i gets subtasks[i] and the list length drives the branch count); strategy (default 'parallel': 'parallel' fan out + return all, 'judge' fan out then one judge picks the best verbatim, 'verify' answer once then skeptics vote accept/reject, 'best_of_n' re-run the fan-out until the survivor count is stable then judge, 'plan' planner auto-decomposes then fans out); branches (1-100, default 2; ignored when subtasks is given); model ('kimi' default | 'glm') and effort ('low'..'max') route the sub-agents per node. RULE: give DISTINCT subtasks, NOT N copies — only omit subtasks (run `task` on every branch) when you genuinely want N redundant attempts (e.g. best_of_n). branches caps at 100 (~8 run at once; the rest queue). Sub-agents CANNOT themselves orchestrate (one level deep). See .ax/orch/GUIDE.md for full examples.",
+    "Fan a task out across parallel sub-agent NODES (each carrying the file/shell tools) and combine the results. WHEN TO USE: the work splits into INDEPENDENT parts (division of labour), OR you want the best-of-N / a verified answer. WHEN NOT: a trivial or strictly sequential chore — do that directly yourself; do NOT fan out a one-liner. EXAMPLE (division of labour): rlm_workflow({ subtasks: ['audit src/auth for bugs', 'check the tests cover edge cases', 'review error handling'] }) — branch i works subtasks[i], real distinct work. EXAMPLE (best of N): rlm_workflow({ task: 'design a token-bucket rate limiter', strategy: 'judge', branches: 3 }). EXAMPLE (auto-decompose): rlm_workflow({ task: 'refactor the auth module', strategy: 'plan' }) — a PLANNER node splits the task into distinct subtasks itself, then fans out one node per subtask and returns the plan + each branch's output. PARAMS: task (the overall goal); subtasks (PREFERRED — a list of DISTINCT, independent pieces; branch i gets subtasks[i] and the list length drives the branch count); strategy (default 'parallel': 'parallel' fan out + return all, 'judge' fan out then one judge picks the best verbatim, 'verify' answer once then skeptics vote accept/reject, 'best_of_n' re-run the fan-out until the survivor count is stable then judge, 'plan' planner auto-decomposes then fans out); branches (1-100, default 2; ignored when subtasks is given); model ('kimi' default | 'glm') and effort ('low'..'max') route the sub-agents per node. RULE: give DISTINCT subtasks, NOT N copies — only omit subtasks (run `task` on every branch) when you genuinely want N redundant attempts (e.g. best_of_n). branches caps at 100 (~8 run at once; the rest queue). Sub-agents CANNOT themselves orchestrate (one level deep).",
   parameters: {
     type: "object",
     properties: {
@@ -409,7 +408,7 @@ const orchestrateTool: AxFunction = {
     const choice = choiceFromArgs({ model: args?.model, effort: args?.effort }) // MULTI-MODEL: no model/effort ⇒ default Kimi
     try {
       const out = await otelContext.with(otelContext.active(), () =>
-        runOrchestration({ ai, strategy, task: overall, subtasks, branches, optsFor, budget, rootId, choice }),
+        runRlmWorkflow({ ai, strategy, task: overall, subtasks, branches, optsFor, budget, rootId, choice }),
       )
       // COST-METER: append a usage footer (… · N branches · Xk tok [· ~$cost]) so the
       // model — and whoever reads the tool result — sees what the fan-out actually cost.
@@ -417,7 +416,7 @@ const orchestrateTool: AxFunction = {
       return clip(`${out.reply}\n\n· ${costMeterSummary(out.branches, spent)}`)
     } catch (e) {
       // BUDGET ceiling (guard 2): the soft budget is ADVISORY (never throws — a completed
-      // node is always returned, see runOrchestration/runNode). So this only fires for a
+      // node is always returned, see runRlmWorkflow/runNode). So this only fires for a
       // genuine RUNAWAY (the HARD ceiling) or an explicit freeze() — return a PARTIAL string
       // rather than throwing the whole turn. spent()/total surface that the sub-run was capped.
       if (e instanceof BudgetExhaustedError) {
@@ -430,4 +429,4 @@ const orchestrateTool: AxFunction = {
 
 // The agent-callable orchestration tool — added to the MAIN chat gen ONLY (agent.ts),
 // never to a sub-run node gen (nodes carry BASE_TOOLS), so the one-level recursion guard holds.
-export const ORCH_TOOLS: AxFunction[] = [orchestrateTool]
+export const RLM_WORKFLOW_TOOLS: AxFunction[] = [rlmWorkflowTool]

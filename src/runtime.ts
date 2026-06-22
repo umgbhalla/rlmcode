@@ -1,8 +1,8 @@
 // Neutral low-level runtime helpers shared by the agent and the orchestration
-// modules. Extracted here so agent.ts (the turn() owner) and orch-tools.ts /
+// modules. Extracted here so agent.ts (the turn() owner) and rlm-workflow.ts /
 // orch-load.ts / orch-run.ts (the orchestration drivers) all pull the SAME model
 // id, AI service, budget ceilings, node-event sink and usage reader from a module
-// that imports NONE of them — breaking the old agent ⇄ orch-tools static cycle.
+// that imports NONE of them — breaking the old agent ⇄ rlm-workflow static cycle.
 import { ai, type AxRateLimiterFunction } from "@ax-llm/ax"
 import * as Effect from "effect/Effect"
 import { type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
@@ -44,13 +44,13 @@ const minIntervalRateLimiter = (rps: number): AxRateLimiterFunction => {
 export const rateLimiter: AxRateLimiterFunction = minIntervalRateLimiter(MAX_RPS)
 
 // The capable base system prompt shared by the MAIN agent (agent.ts re-exports it)
-// and every orchestration NODE (orch-tools.ts nodeGen). Lives HERE — the neutral
-// cycle-breaker module that imports neither agent.ts nor orch-tools.ts — so a node can
+// and every orchestration NODE (rlm-workflow.ts nodeGen). Lives HERE — the neutral
+// cycle-breaker module that imports neither agent.ts nor rlm-workflow.ts — so a node can
 // be as capable as the main agent MINUS orchestration without re-introducing the
-// agent ⇄ orch-tools static init cycle (orch-tools.ts importing BASE_PROMPT from
-// agent.ts deadlocked agent.ts's top-level `const chat = ax(...)` on ORCH_TOOLS). The
-// orchestration overlay (the orchestrate/run_orch_script paragraphs) is appended ONLY
-// to the main chat gen in agent.ts (ORCH_OVERLAY) — a node never sees it, since a node
+// agent ⇄ rlm-workflow static init cycle (rlm-workflow.ts importing BASE_PROMPT from
+// agent.ts deadlocked agent.ts's top-level `const chat = ax(...)` on RLM_WORKFLOW_TOOLS). The
+// orchestration overlay (the rlm_workflow paragraphs) is appended ONLY
+// to the main chat gen in agent.ts (RLM_WORKFLOW_OVERLAY) — a node never sees it, since a node
 // carries BASE_TOOLS only and must not be told it can orchestrate.
 export const BASE_PROMPT = [
   "You are a capable coding agent running inside a terminal, in the user's project directory.",
@@ -69,8 +69,8 @@ const MAX_STEPS = Number(process.env.AX2_MAX_STEPS ?? 50) // max tool-call itera
 // BudgetExhaustedError when a turn's cumulative usage crosses it.
 const TOKEN_BUDGET = Number(process.env.AX2_TOKEN_BUDGET ?? 2_000_000)
 
-// The shared AI service. Exported so turn() (agent.ts) and every orchestration
-// driver (orch-run.ts/orch-tools.ts/orch-load.ts) drive the SAME provider — one
+// The shared AI service. Exported so turn() (agent.ts) and the rlm-workflow driver
+// (rlm-workflow.ts) drive the SAME provider — one
 // client, one trace. agent.ts attaches the live logger + captureFetch via
 // setOptions at its module load (mutating this shared instance in place).
 export const llm = ai({

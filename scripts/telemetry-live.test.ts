@@ -61,7 +61,7 @@ await (async () => {
     return { res, wallMs: Date.now() - t0 }
   })
   const hi = await Effect.runPromise(Effect.provide(hiProgram, Layer.merge(TracingLive, Layer.empty)))
-  // SYSTEM_PROMPT_CHARS is the assembled system prompt size (BASE_PROMPT+ORCH_OVERLAY+projectDoc).
+  // SYSTEM_PROMPT_CHARS is the assembled system prompt size (BASE_PROMPT+RLM_WORKFLOW_OVERLAY+projectDoc).
   const { SYSTEM_PROMPT_CHARS } = await import("../src/agent.ts")
   console.log("─".repeat(60))
   console.log("(1)(2)(3) TRIVIAL 'hi' TURN — attribution:")

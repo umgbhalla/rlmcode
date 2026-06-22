@@ -1,7 +1,7 @@
 // AUTO-DECOMPOSITION — the PLANNER node behind the orchestrate tool's 'plan' strategy.
 // A planner sub-agent splits a task into a DISTINCT subtask list ITSELF (the model's own
 // division of labour) so the orchestrate fan-out is over a plan the model produced, NOT a
-// subtask list the caller hand-wrote. Lives in its OWN module so orch-tools.ts stays under
+// subtask list the caller hand-wrote. Lives in its OWN module so rlm-workflow.ts stays under
 // the line budget; it adds NO 6th core primitive — it composes runNode() (orch-recipes.ts)
 // over a typed gen, exactly like the judge/skeptic reasoning nodes.
 import { ax, type AxAIService, type AxGen } from "@ax-llm/ax"
@@ -28,7 +28,7 @@ const plannerGen = (): AxGen => {
 // case-insensitively, clamped to `cap` = the branch cap). Charged to the shared advisory
 // budget. Renders as a node under rootId (phase "plan: decompose") so the live tree shows
 // the plan as the first step. onEvent/usageOf are threaded in so this module stays free of
-// the runtime.ts singletons (the caller in orch-tools.ts supplies them).
+// the runtime.ts singletons (the caller in rlm-workflow.ts supplies them).
 export const runPlanner = async (opts: {
   ai: AxAIService
   task: string
