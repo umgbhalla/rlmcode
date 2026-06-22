@@ -17,10 +17,10 @@
 //   4. abortSignal: threaded into every node forward via NodeOpts.
 import { ax, AxMemory, type AxAIService, type AxGen } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { BASE_PROMPT, limits, onEvent, readUsageOf } from "./runtime.ts"
+import { BASE_PROMPT, limits, makeOnEvent, readUsageOf } from "./runtime.ts"
 import { type NodeModelChoice, nodeForwardOpts } from "./models.ts"
 import { finalizeOnMaxSteps, judge as judgeRecipe, parallelLimit, runNode } from "./orch-recipes.ts"
-import { pipeline as pipelineCore, type Budget, type NodeOpts } from "./orch.ts"
+import { type ActivitySink, pipeline as pipelineCore, type Budget, type NodeOpts } from "./orch.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { runRlm } from "./rlm-node.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
@@ -84,13 +84,18 @@ export const buildWorkflowPrims = (
   budget: Budget,
   signal: AbortSignal,
   choice: NodeModelChoice | undefined,
-  args: unknown = undefined,
+  // PER-TURN activity sink: the tool handler passes the forward `extra.emit` (the per-turn
+  // closure runTurn threaded). The node-lifecycle sink (onEvent) is built over it, and it rides
+  // NodeOpts.emit so each node's tool rows tag with its id — replacing the deleted module global.
+  emit: ActivitySink,
 ): WorkflowPrims => {
   const tracer = otelTrace.getTracer(SERVICE_NAME, SERVICE_VERSION)
   const traceContext = otelContext.active()
   setNodeSpanTracer(tracer)
+  const onEvent = makeOnEvent(emit)
   // A fresh NodeOpts per node — forked AxMemory (concurrent nodes never share a mutating
-  // history), the turn's abort, the ambient trace context, and the per-node model routing.
+  // history), the turn's abort, the ambient trace context, the per-node model routing, and the
+  // per-turn activity emit (so the node's tool logger feeds THIS turn's queue).
   const optsFor = (c?: NodeModelChoice): NodeOpts => ({
     mem: new AxMemory(),
     sessionId: rootId,
@@ -99,6 +104,7 @@ export const buildWorkflowPrims = (
     maxSteps: limits.maxSteps,
     stream: false,
     abortSignal: signal,
+    emit,
     ...nodeForwardOpts(c ?? choice),
   })
 
@@ -235,7 +241,7 @@ export const buildWorkflowPrims = (
     const nodeId = nextId()
     if (context.length === 0) return "error: rlm() requires a non-empty context blob to mine"
     try {
-      const out = await otelContext.with(otelContext.active(), () => runRlm(context, query, ai, nodeId, signal))
+      const out = await otelContext.with(otelContext.active(), () => runRlm(context, query, ai, nodeId, signal, onEvent))
       const evidence = out.evidence.length > 0 ? `\n\nEvidence:\n${out.evidence.map((e) => `- ${e}`).join("\n")}` : ""
       return `${out.answer}${evidence}`
     } catch (e) {
@@ -261,5 +267,8 @@ export const buildWorkflowPrims = (
     remaining: () => (refresh(), remainingSnapshot),
   }
 
-  return { phase, log, agent, parallel, pipeline, judge, rlm, budget: budgetView, args }
+  // `args` is the script's input — always undefined for ax2 self-orchestration (the model
+  // authors the whole script body; there is no separate input payload). Kept on the prim surface
+  // for assistant-Workflow-API parity.
+  return { phase, log, agent, parallel, pipeline, judge, rlm, budget: budgetView, args: undefined }
 }

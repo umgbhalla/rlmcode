@@ -5,7 +5,7 @@
 // that imports NONE of them — breaking the old agent ⇄ rlm-workflow static cycle.
 import { ai, type AxAIService, type AxRateLimiterFunction } from "@ax-llm/ax"
 import * as Effect from "effect/Effect"
-import { type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
+import { type ActivitySink, type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
 import { makeMockAI } from "./mock-ai.ts"
 import { KIMI, MODEL_DOC } from "./models.ts"
 
@@ -90,12 +90,33 @@ export const llm: AxAIService = process.env.AX2_MOCK === "1"
       config: { model: MODEL as any },
     })
 
-// Node-lifecycle sink handed to the runNode() recipe. emit() is Effect<void> (an
-// Effect.sync body: bus push + active-OTel-span addEvent). We run it synchronously
-// at the session boundary — the recipe stays Promise-native and never touches
-// Effect. runNode() runs inside otelContext.with(traceContext), so getActiveSpan()
-// inside emit() resolves to the live chat.turn span (not a forked/empty context).
-export const onEvent = (event: NodeEvent): void => Effect.runSync(emit(event))
+// PER-TURN node-lifecycle sink factory handed to the runNode() recipe. Builds a NodeEvent sink
+// closing over THIS turn's ActivitySink (the per-turn emit closure from runTurn) — REPLACING the
+// old module-global onEvent that pushed into the deleted global activity sink. emit() is
+// Effect<void> (an Effect.sync body: per-turn sink push + active-OTel-span addEvent); we run it
+// synchronously at the session boundary so the recipe stays Promise-native and never touches
+// Effect. runNode() runs inside otelContext.with(traceContext), so getActiveSpan() inside emit()
+// resolves to the live chat.turn span (not a forked/empty context). The tool handlers
+// (workflow.ts) build their onEvent from the per-turn emit recovered via getTurnEmit(sessionId).
+export const makeOnEvent =
+  (sink: ActivitySink) =>
+  (event: NodeEvent): void =>
+    Effect.runSync(emit(event, sink))
+
+// PER-TURN emit registry, keyed by sessionId. ax forwards a FIXED extra to a tool handler
+// (sessionId/ai/abortSignal/…) — NOT arbitrary forward opts — so a workflow/mock tool cannot
+// read the turn's `emit` off `extra`. turn() stashes THIS turn's emit here by sessionId; the tool
+// handler recovers it via getTurnEmit(extra.sessionId). This is the SAME sessionId-keyed per-turn
+// store pattern as orch-spans' setTurnContext (also needed because ax drops the traceContext).
+// Concurrency-correct: each session has its own entry; serialized turns (busyAtom) never collide.
+// ponytail: module Map keyed by sessionId. Upgrade: a context object threaded end-to-end if ax
+// ever forwards arbitrary tool extras. Absent ⇒ no-op (a standalone tool call with no turn).
+const turnEmits = new Map<string, ActivitySink>()
+export const setTurnEmit = (sessionId: string, sink: ActivitySink): void => {
+  turnEmits.set(sessionId, sink)
+}
+export const getTurnEmit = (sessionId: string | undefined): ActivitySink =>
+  (sessionId !== undefined ? turnEmits.get(sessionId) : undefined) ?? (() => {})
 
 // Generic usage reader: a getUsage() probe over any AxGen the orchestration drivers
 // forward. Exported so a sub-run charges the shared Budget from each node's usage,

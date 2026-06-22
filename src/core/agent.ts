@@ -18,7 +18,7 @@ import * as Telemetry from "effect/unstable/ai/Telemetry"
 import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 import { setNodeSpanTracer, setTurnContext } from "./orch-spans.ts"
-import { BASE_PROMPT, limits, llm, makeOnEvent, MODEL, rateLimiter } from "./runtime.ts"
+import { BASE_PROMPT, limits, llm, makeOnEvent, MODEL, rateLimiter, setTurnEmit } from "./runtime.ts"
 import { makeMockAI, MOCK_MODEL, setMockEmit } from "./mock-ai.ts"
 import { MOCK_ORCH_TOOL } from "./mock.ts"
 import { WORKFLOW_TOOLS } from "./workflow.ts"
@@ -108,35 +108,11 @@ class ChatError {
 const asBudgetExhausted = (e: unknown): BudgetExhaustedError | undefined =>
   e instanceof ChatError && e.cause instanceof BudgetExhaustedError ? e.cause : undefined
 
-// gen_ai.response.finish_reason is the one signal ax exposes nowhere on its
-// public program API (getUsage gives tokens, getChatLog gives the response id,
-// but finish_reason lives only on ax's internal gen_ai child-span event). The
-// only no-ax-patch way to read it is the raw /chat/completions JSON, so we wrap
-// fetch and skim choices[0].finish_reason off a clone (ax still consumes the
-// real body).
-//
-// PER-TURN (concurrency-safe): the finish-reason latch is NOT a module global any
-// more — it lives in a TurnContext allocated per turn() invocation, and the fetch
-// wrapper is a per-turn closure (makeCaptureFetch) threaded into THIS turn's forward
-// opts (ax accepts a per-call `fetch` — AxProgramForwardOptions extends
-// AxAIServiceOptions, which carries `fetch?`). So two concurrent/injected turns each
-// skim into their OWN ctx; no shared `let` a second agent could corrupt.
-type TurnContext = { finishReason?: string }
-// Cast: Bun's `typeof fetch` carries a `.preconnect` member ax never calls.
-const makeCaptureFetch = (ctx: TurnContext): typeof fetch =>
-  (async (input: any, init: any): Promise<Response> => {
-    const res = await fetch(input, init)
-    try {
-      if (res.ok) {
-        const j: any = await res.clone().json()
-        const fr = j?.choices?.[0]?.finish_reason
-        if (typeof fr === "string") ctx.finishReason = fr
-      }
-    } catch {
-      /* non-JSON / streaming / error body — ignore, finish_reason just stays unset */
-    }
-    return res
-  }) as typeof fetch
+// SEAL (core/tui split): the finish_reason skim (a fetch.clone() wrapper reading
+// choices[0].finish_reason) and the response-id read (getChatLog().remoteId) are GONE. Their only
+// public output was finishReason/response.id — both provider-wire signals, dropped from the
+// normalized public TurnResult (src/core/run.ts). ax's own gen_ai child span still carries
+// finish_reason as an event for motel; we no longer surface it on our span or the result.
 
 // Metrics -> OTLP /v1/metrics via the PeriodicExportingMetricReader.
 const turnsTotal = Metric.counter("chat_turns_total", { description: "completed chat turns" })
@@ -175,18 +151,9 @@ const readUsage = (gen: AxGen): Usage | undefined => {
 const reasoningOf = (u: Usage | undefined): number | undefined =>
   u === undefined ? undefined : (u.reasoningTokens ?? u.thoughtsTokens)
 
-
-// ponytail: provider response id read off ax's getChatLog() (remoteId). ax doesn't
-// expose finish_reason publicly (it's on ax's own gen_ai child span already), so
-// we only surface the id here. Ceiling: yields nothing if ax changes the log shape.
-// Upgrade: ax public response-metadata API (id + finish_reason).
-const readResponseId = (gen: AxGen): string | undefined => {
-  const log = (gen as any).getChatLog?.()
-  const last = Array.isArray(log) ? log[log.length - 1] : undefined
-  return last?.remoteId ?? undefined
-}
-
-export type TurnResult = { reply: string; tokens?: number | undefined; reasoningTokens?: number | undefined; finishReason?: string | undefined; budget: boolean }
+// The INTERNAL turn result (driven by runTurn, which normalizes it into the public TurnResult in
+// src/core/run.ts). No finishReason / response.id — those provider-wire signals were sealed off.
+export type TurnResult = { reply: string; tokens?: number | undefined; reasoningTokens?: number | undefined; budget: boolean }
 
 // ── DI: createAgent — the injectable factory ───────────────────────────────────
 // The THREE things that used to be module singletons (the AI service, the chat gen,
@@ -227,7 +194,7 @@ export const createAgent = (config: AxAgentConfig) => {
   // Bind debug + rateLimiter on the injected service. The LOGGER is NO LONGER bound here — it is
   // a PER-TURN forward option (makeLiveLogger(emit), threaded by turn() from runTurn's per-turn
   // emit), which kills the last module-load global (the old service-level liveLogger binding).
-  // fetch is also a per-turn forward option (makeCaptureFetch). setOptions reassigns every field.
+  // setOptions reassigns every field.
   service.setOptions({ debug: true, rateLimiter })
 
   // One in-flight AbortController per session (overwritten each turn), scoped to THIS
@@ -278,16 +245,15 @@ export const createAgent = (config: AxAgentConfig) => {
         // cluster's call rows would never reach the live feed otherwise; setMockEmit re-binds the
         // sink per turn (serialized turns, so no cross-feed). Unset AX2_MOCK ⇒ never called.
         if (process.env.AX2_MOCK === "1") setMockEmit(emit)
-        // Stash THIS turn's OTel context by sessionId so a tool handler (workflow/RLM) can
-        // recover it: ax does not forward traceContext into a tool func's extra, and the
-        // streaming for-await drain loses the ALS active() context — without this the workflow
-        // tool's node + RLM spans fragment into a NEW trace. Overwritten each turn (serialized).
+        // Stash THIS turn's emit + OTel context by sessionId so a tool handler (workflow/RLM)
+        // can recover them: ax forwards a FIXED extra (sessionId/ai/abortSignal/…) to a tool
+        // func — NOT arbitrary forward opts — so neither the per-turn `emit` nor the traceContext
+        // reaches the handler via opts. A workflow node's lifecycle rows would otherwise vanish
+        // and its spans fragment into a NEW trace. Both keyed by sessionId, overwritten each turn
+        // (serialized by busyAtom, so no cross-feed).
+        setTurnEmit(sessionId, emit)
         setTurnContext(sessionId, traceContext)
 
-        // Per-turn finish-reason context + its fetch wrapper (concurrency-safe — replaces
-        // the old module-global latch). The wrapper is threaded into THIS turn's forward
-        // opts below, so a concurrent/injected turn can never overwrite our finish reason.
-        const turnCtx: TurnContext = {}
         const aborter = new AbortController()
       turnAborters.set(sessionId, aborter)
       // One ADVISORY token budget for the whole turn. runNode() charges it from the forward
@@ -342,8 +308,9 @@ export const createAgent = (config: AxAgentConfig) => {
               // we append each to the per-turn emit → atoms grows the in-flight message → the dim-
               // italic thinking + the reply render token-by-token. Tools render via the per-turn
               // logger (makeLiveLogger(emit), set in `opts.logger` below — replaces the old service-
-              // level liveLogger binding). `emit` also rides the opts so a tool handler (workflow)
-              // builds its onEvent from the SAME per-turn sink. stepHooks + abortSignal ride along.
+              // level liveLogger binding). A tool handler recovers the SAME per-turn emit via
+              // getTurnEmit(sessionId) (ax drops non-standard opts from `extra`). stepHooks +
+              // abortSignal ride along.
               const opts = {
                 mem,
                 sessionId,
@@ -353,10 +320,8 @@ export const createAgent = (config: AxAgentConfig) => {
                 stream: true,
                 abortSignal: aborter.signal,
                 stepHooks,
-                fetch: makeCaptureFetch(turnCtx),
                 logger: makeLiveLogger(emit),
                 debug: true,
-                emit,
               }
               let reply = ""
               for await (const d of chat.streamingForward(service, { message: msg }, opts as Parameters<typeof chat.streamingForward>[2])) {
@@ -403,9 +368,9 @@ export const createAgent = (config: AxAgentConfig) => {
         )
       }
 
-      // Canonical gen_ai annotations via Effect's own helper (no hand-typed keys).
-      // response.id = provider completion id (from ax's chat log) so a turn can be
-      // cross-referenced with provider-side logs.
+      // Canonical gen_ai annotations via Effect's own helper (no hand-typed keys). response.id /
+      // finish_reason are NOT surfaced here (provider-wire, sealed off) — ax's own gen_ai child
+      // span still carries finish_reason as an event for motel.
       const span = yield* Effect.currentSpan
       // 'parsed' — ax has parsed the response into the structured reply + usage by now.
       otelSpan.addEvent("parsed")
@@ -413,11 +378,7 @@ export const createAgent = (config: AxAgentConfig) => {
         system: PROVIDER as any,
         operation: { name: "chat" },
         request: { model },
-        response: {
-          model,
-          id: readResponseId(chat),
-          finishReasons: turnCtx.finishReason ? [turnCtx.finishReason] : undefined,
-        },
+        response: { model },
       })
       // Single gen now (the in-loop finalize answers on the SAME chat gen/mem), so usage is
       // just chat's — no separate answerGen to sum. sumUsage retained for orchestration paths.
@@ -472,7 +433,6 @@ export const createAgent = (config: AxAgentConfig) => {
         reply,
         tokens: usage?.totalTokens,
         reasoningTokens,
-        finishReason: turnCtx.finishReason,
         budget: budgetExhausted,
       }
       return result

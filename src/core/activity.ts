@@ -26,22 +26,6 @@ export type Activity =
   | { readonly kind: "replyDelta"; readonly text: string } // a piece of the streamed final reply
   | { readonly kind: "thinkingDelta"; readonly text: string } // a piece of the streamed reasoning_content
 
-// ponytail: single global sink — assumes one in-flight turn (the UI gates this).
-// Ceiling: concurrent turns would interleave events. Upgrade: Effect PubSub/Queue scoped per turn.
-const sinkState: { sink: ((a: Activity) => void) | null } = { sink: null }
-
-export const setActivitySink = (f: ((a: Activity) => void) | null) => {
-  sinkState.sink = f
-}
-
-export const emitActivity = (a: Activity) => {
-  try {
-    sinkState.sink?.(a)
-  } catch {
-    /* never let UI plumbing break the agent */
-  }
-}
-
 // Tool-call args as a string for the UI. ax hands params as a string or object; we
 // stringify the object case. (Same logic the main-turn liveLogger uses — kept here so
 // both the main and per-node loggers share ONE mapping.)
@@ -95,13 +79,6 @@ const emitFromLog = (emit: (a: Activity) => void, m: { name?: string; value?: un
 // makeNodeLogger (below) is already a per-id factory; this gives the main turn the SAME shape,
 // so run.ts can build BOTH from one per-turn emit and the module-load global sink can die.
 export const makeLiveLogger = (emit: (a: Activity) => void): AxLoggerFunction => (m) => emitFromLog(emit, m)
-
-// COMPAT (step 1 of the core/tui split): the module-global MAIN-turn logger, kept bound to the
-// global emitActivity sink so agent.ts's module-load default behaves byte-for-byte as before.
-// The real per-turn wiring (run.ts builds makeLiveLogger over its own queue) lands in step 3;
-// the global sink + this binding are deleted in step 5. ponytail: module-global sink binding.
-// Upgrade: per-turn makeLiveLogger(emit) inside runTurn (src/core/run.ts) — kills setActivitySink.
-export const liveLogger: AxLoggerFunction = makeLiveLogger(emitActivity)
 
 // PER-NODE logger factory: returns an AxLoggerFunction that STAMPS every tool/result it
 // emits with `nodeId`, so the node's own tools route to its OrchTree node (not the main

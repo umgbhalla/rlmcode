@@ -4,8 +4,9 @@
 // zero-network AI itself lives in mock-ai.ts; the agent.ts AX2_MOCK seam mounts it. Keep
 // this SMALL — fixtures, not a second provider.
 import type { AxFunction } from "@ax-llm/ax"
-import { emitActivity } from "./activity.ts"
-import type { NodeEvent } from "./orch.ts"
+import type { Activity } from "./activity.ts"
+import type { ActivitySink, NodeEvent } from "./orch.ts"
+import { getTurnEmit } from "./runtime.ts"
 
 // ── CANNED ORCH FEED ────────────────────────────────────────────────────────────────
 // A fixed NodeEvent script so the orch tree renders deterministically with NO model: a
@@ -43,36 +44,38 @@ const MOCK_NODE_TOOLS: ReadonlyArray<{ id: string; name: string; args: string; r
   { id: "mt_err", name: "bash", args: JSON.stringify({ command: "missing-bin" }), result: "exit 127: command not found", isError: true },
 ]
 
-// Replay the canned NodeEvent feed through the REAL activity bus (kind:"node"). The atoms
-// sink (installed for the duration of the turn) folds these into the live OrchTree exactly
-// as real orch.emit() events would, so flatten() draws the velocity tree in the live UI.
-// Mapped to the bus shape: start carries parentId+detail(phase); done carries tokens; error
-// carries the cause as detail. Then the per-node tool cluster + error card replay under the
-// running `research` node. Pure replay — no forward(), no network.
-const feedMockNodes = (): void => {
+// Replay the canned NodeEvent feed through the PER-TURN activity emit (kind:"node"). The emit
+// is the turn's closure (run.ts), threaded into the tool via the forward `extra.emit` — the
+// atoms reducer folds these into the live OrchTree exactly as real orch.emit() events would, so
+// flatten() draws the velocity tree in the live UI. Mapped to the bus shape: start carries
+// parentId+detail(phase); done carries tokens; error carries the cause as detail. Then the
+// per-node tool cluster + error card replay under the running `research` node. No forward/network.
+const feedMockNodes = (emit: ActivitySink): void => {
+  const push = (a: Activity): void => emit(a)
   for (const e of MOCK_NODES) {
     if (e.type === "start")
-      emitActivity({ kind: "node", nodeId: e.nodeId, event: "start", parentId: e.parentId, detail: e.phase })
+      push({ kind: "node", nodeId: e.nodeId, event: "start", parentId: e.parentId, detail: e.phase })
     else if (e.type === "done")
-      emitActivity({ kind: "node", nodeId: e.nodeId, event: "done", detail: String(e.result), tokens: e.tokens })
-    else if (e.type === "error") emitActivity({ kind: "node", nodeId: e.nodeId, event: "error", detail: String(e.cause) })
+      push({ kind: "node", nodeId: e.nodeId, event: "done", detail: String(e.result), tokens: e.tokens })
+    else if (e.type === "error") push({ kind: "node", nodeId: e.nodeId, event: "error", detail: String(e.cause) })
   }
   for (const t of MOCK_NODE_TOOLS) {
-    emitActivity({ kind: "tool", id: t.id, name: t.name, args: t.args, nodeId: "research" })
-    emitActivity({ kind: "result", id: t.id, result: t.result, isError: t.isError, nodeId: "research" })
+    push({ kind: "tool", id: t.id, name: t.name, args: t.args, nodeId: "research" })
+    push({ kind: "result", id: t.id, result: t.result, isError: t.isError, nodeId: "research" })
   }
 }
 
 // TEST-ONLY orch tool (registered into the mock chat gen's toolset under the AX2_MOCK seam
-// in agent.ts). When the mock AI scripts a call to it, it replays MOCK_NODES through the
-// activity bus so the orch-tree frame renders from canned data. Returns a fixed string so
-// the tool loop settles to the canned final reply. NOT in BASE_TOOLS — off in production.
+// in agent.ts). When the mock AI scripts a call to it, it replays MOCK_NODES through the PER-TURN
+// emit (recovered via getTurnEmit(sessionId) — ax forwards only a fixed extra to a tool func) so
+// the orch-tree frame renders from canned data. Returns a fixed string so the tool loop settles
+// to the canned final reply. NOT in BASE_TOOLS — off in production. No turn boundary ⇒ no-op feed.
 export const MOCK_ORCH_TOOL: AxFunction = {
   name: "mock_orch",
   description: "TEST ONLY: replay a canned orchestration node feed for the headless TUI harness.",
   parameters: { type: "object", properties: {}, required: [] },
-  func: async () => {
-    feedMockNodes()
+  func: async (_args: unknown, extra?: Readonly<{ sessionId?: string; abortSignal?: AbortSignal }>) => {
+    feedMockNodes(getTurnEmit(extra?.sessionId))
     return "orchestrated 4 nodes (1 error)"
   },
 }

@@ -16,9 +16,9 @@
 //       interleaved into one stream (concurrency-correct: per-node logger closures, no global).
 import type { AxAIService, AxGen, AxGenIn, AxGenOut, AxLoggerData } from "@ax-llm/ax"
 import { AxMemory } from "@ax-llm/ax"
-import { type Activity, setActivitySink } from "../src/core/activity.ts"
+import type { Activity } from "../src/core/activity.ts"
 import { runNode } from "../src/core/orch-recipes.ts"
-import type { NodeOpts } from "../src/core/orch.ts"
+import type { ActivitySink, NodeOpts } from "../src/core/orch.ts"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {
@@ -29,7 +29,10 @@ const assert = (cond: boolean, msg: string) => {
 }
 
 const fakeAi = {} as AxAIService
-const optsFor = (): NodeOpts =>
+// The per-turn activity sink now rides NodeOpts.emit (the per-turn closure, replacing the deleted
+// global sink): withNodeLogger builds makeNodeLogger(opts.emit, nodeId) so a node's tool rows tag
+// with its id. The test threads its capture sink here.
+const optsFor = (emit?: ActivitySink): NodeOpts =>
   ({
     mem: new AxMemory(),
     sessionId: "test",
@@ -38,6 +41,7 @@ const optsFor = (): NodeOpts =>
     maxSteps: 1,
     stream: false,
     abortSignal: new AbortController().signal,
+    ...(emit !== undefined ? { emit } : {}),
   }) as unknown as NodeOpts
 
 // A FAKE AxGen whose forward() drives the per-call logger (opts.logger) with ax's native step
@@ -83,21 +87,20 @@ await (async () => {
 
   // THREE CONCURRENT nodes, each running its OWN tooling gen with a DISTINCT tool + call id.
   const router = makeRouter()
-  setActivitySink(router.sink)
 
   const specs = [
     { nodeId: "orch:root/branch-0", gen: toolingGen("bash", "c0") },
     { nodeId: "orch:root/branch-1", gen: toolingGen("read_file", "c1") },
     { nodeId: "orch:root/branch-2", gen: toolingGen("grep", "c2") },
   ]
-  // Run them CONCURRENTLY (Promise.all) — the real fan-out shape. With a global logger their
-  // tools would interleave into one stream; with per-node logger closures each lands under its
-  // own node. (FAKE forwards are synchronous-ish, but concurrency-correctness is structural: the
-  // logger is bound per-node in runNode, never a shared global currentNodeId.)
+  // Run them CONCURRENTLY (Promise.all) — the real fan-out shape. The per-turn activity sink is
+  // threaded via NodeOpts.emit (the per-turn closure, replacing the deleted global sink); each
+  // node's withNodeLogger closure tags tools with ITS id, so they never interleave. (FAKE forwards
+  // are synchronous-ish, but concurrency-correctness is structural: the logger is bound per-node
+  // in runNode, never a shared global currentNodeId.)
   await Promise.all(
-    specs.map((s) => runNode({ nodeId: s.nodeId, parentId: "orch:root", gen: s.gen, opts: optsFor(), onEvent: () => {} }, fakeAi, { message: "go" })),
+    specs.map((s) => runNode({ nodeId: s.nodeId, parentId: "orch:root", gen: s.gen, opts: optsFor(router.sink), onEvent: () => {} }, fakeAi, { message: "go" })),
   )
-  setActivitySink(null)
 
   // (1)+(3): each node has EXACTLY its own one tool, tagged with its own id — no interleave.
   for (const s of specs) {

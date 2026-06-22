@@ -18,9 +18,9 @@
 // traceContext), so node emits nest under the live chat.turn span in the SAME OrchTree.
 import { type AxAIService, type AxFunction } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { estimatedCostOf, llm, makeOnEvent } from "./runtime.ts"
+import { estimatedCostOf, getTurnEmit, llm, makeOnEvent } from "./runtime.ts"
 import { choiceFromArgs } from "./models.ts"
-import { type ActivitySink, allocate, BudgetExhaustedError } from "./orch.ts"
+import { allocate, BudgetExhaustedError } from "./orch.ts"
 import { getTurnContext, setNodeSpanTracer } from "./orch-spans.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 import { buildWorkflowPrims, type WorkflowPrims } from "./workflow-prims.ts"
@@ -80,7 +80,7 @@ const workflowTool: AxFunction = {
   },
   func: async (
     args: { script?: string; model?: string; effort?: string },
-    extra?: Readonly<{ sessionId?: string; ai?: AxAIService; abortSignal?: AbortSignal; emit?: ActivitySink }>,
+    extra?: Readonly<{ sessionId?: string; ai?: AxAIService; abortSignal?: AbortSignal }>,
   ) => {
     const script = String(args?.script ?? "").trim()
     if (script.length === 0) return "error: workflow requires a non-empty `script`"
@@ -90,10 +90,10 @@ const workflowTool: AxFunction = {
     const rootId = `workflow:${sessionId}:${Date.now()}`
     const choice = choiceFromArgs({ model: args?.model, effort: args?.effort })
     const budget = allocate(WF_TOKEN_BUDGET, WF_TOKEN_HARD)
-    // PER-TURN activity sink: threaded through the forward `extra` (turn() sets opts.emit =
-    // runTurn's per-turn closure). Absent ⇒ a no-op (a standalone live-harness call with no turn
-    // boundary) — the run still works, it just emits no live tree rows. onEvent wraps it.
-    const emit = extra?.emit ?? (() => {})
+    // PER-TURN activity sink: recovered via getTurnEmit(sessionId) (turn() stashed it; ax forwards
+    // only a fixed extra to a tool func, so it can't ride the forward opts). Absent ⇒ a no-op
+    // (a standalone call with no turn boundary) — the run still works, it just emits no tree rows.
+    const emit = getTurnEmit(extra?.sessionId)
     const onEvent = makeOnEvent(emit)
     // Wire the node-span minter under this root (the live-harness path has no turn()).
     setNodeSpanTracer(otelTrace.getTracer(SERVICE_NAME, SERVICE_VERSION))

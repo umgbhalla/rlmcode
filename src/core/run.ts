@@ -13,7 +13,7 @@
 // from ever leaking the final reply as a 'message' event, so the reply arm is the SOLE carrier.
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
-import { type Activity, setActivitySink } from "./activity.ts"
+import type { Activity } from "./activity.ts"
 import { abortTurn, turn, type TurnResult as RawTurnResult } from "./agent.ts"
 import { coreRuntime } from "../otel.ts"
 import { sessionsRT } from "./sessions.ts"
@@ -177,15 +177,13 @@ export async function* runTurn(sessionId: string, message: string, opts?: TurnOp
     return
   }
 
-  // PER-TURN emit: push every Activity (mapped to a flat TurnEvent) into THIS turn's queue.
-  // Step 3 BRIDGE: the three producers (orch.emit / ax logger / streaming deltas) still route
-  // through the module-global emitActivity, so we install this turn's push AS the global sink
-  // for the turn's duration. Step 5 deletes the global sink and threads `emit` natively, after
-  // which setActivitySink is gone. ponytail: global-sink bridge for the alongside runTurn.
-  // Upgrade: thread `emit` into makeLiveLogger/orch.emit per turn (step 5 of the core/tui split).
+  // PER-TURN emit: THE per-turn closure that replaces the deleted module-global sink. Every
+  // Activity (mapped to a flat TurnEvent) pushes into THIS turn's queue. It is threaded NATIVELY
+  // into turn() — which wires it into all three producers: ax's logger (makeLiveLogger(emit) in
+  // the forward opts), the orch NodeEvent path (makeOnEvent(emit) + forward `extra.emit` for tool
+  // handlers), and the streaming reply/thinking deltas. No module-global sink whatsoever.
   const queue = new TurnQueue<TurnEvent>()
   const emit = (a: Activity): void => queue.push(toEvent(a))
-  setActivitySink(emit)
 
   // Abort: a caller signal aborts THIS session's in-flight turn (wraps agent.ts abortTurn).
   const onAbort = (): void => void abortTurn(sessionId)
@@ -199,7 +197,7 @@ export async function* runTurn(sessionId: string, message: string, opts?: TurnOp
   // turn()'s Effect requires OtelTracerProvider — coreRuntime (TracingLive) supplies it, so the
   // program type keeps that requirement and runPromise discharges it. Let it infer (annotating
   // R=never would wrongly assert the requirement is gone before runPromise provides it).
-  const program = turn(rt.mem, rt.parent, sessionId)(text).pipe(
+  const program = turn(rt.mem, rt.parent, sessionId, emit)(text).pipe(
     Effect.map(okResult),
     Effect.catchCause((c) => Effect.succeed(errorResult(c))),
   )
@@ -207,7 +205,6 @@ export async function* runTurn(sessionId: string, message: string, opts?: TurnOp
     .runPromise(program)
     .catch((e: unknown) => errorResult(Cause.fail(e)))
     .finally(() => {
-      setActivitySink(null)
       if (opts?.signal !== undefined) opts.signal.removeEventListener("abort", onAbort)
       queue.close()
     })

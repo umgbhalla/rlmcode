@@ -38,9 +38,9 @@ import {
   AxMemory,
 } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { limits, onEvent } from "./runtime.ts"
+import { limits } from "./runtime.ts"
 import { allocate } from "./orch.ts"
-import { withTimeout } from "./orch-recipes.ts"
+import { type EmitSink, withTimeout } from "./orch-recipes.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 
@@ -69,14 +69,21 @@ const RLM_TIMEOUT_MS = (() => {
 
 const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
 
-// Steer BOTH actor stages (distiller + executor) away from CommonJS. The AxJSRuntime worker
-// is a least-privilege ESM sandbox (no require/import/Node modules — by design); an RLM mines
-// an in-memory context blob, so it never needs them. Kimi defaults to require() out of habit,
-// which throws "require is not defined" and loops the run to a timeout — this reinforces the
-// pure-JS contract the runtime already enforces. Variable-name-generic (executor sees
-// executorRequest/distilledContext, distiller sees the raw context global).
+// Steer BOTH actor stages (distiller + executor) away from CommonJS AND away from giving up via
+// askClarification / a globalThis scan. The AxJSRuntime worker is a least-privilege ESM sandbox
+// (no require/import/Node modules — by design); an RLM mines an in-memory blob, so it never needs
+// them. Kimi defaults to require() out of habit, which throws "require is not defined" and loops
+// the run to a timeout. This text is PREPENDED as the actor's base description (signatureBuilders.
+// ts:268-281 — our executorDescription/contextDescription is the `baseDefinition` axBuildExecutor/
+// DistillerDefinition wraps; ax's accurate per-stage template still follows it). So it MUST NOT
+// contradict that template: the blob lands in DIFFERENT variables per stage — the distiller reads
+// the raw `context` global, the EXECUTOR reads `inputs.executorRequest` + `inputs.distilledContext`
+// (raw `context` is NOT in the executor scope; see rlm/executor.md). An earlier version named
+// `context` for both, so the executor wrote `context.slice(...)` → "context is not defined", looped
+// on policy errors, and lost the buried fact. The rule now defers variable NAMING to ax's per-stage
+// template and only adds the genuinely-additive steers (no require, no askClarification, mine it).
 const SANDBOX_RULE =
-  "The code runtime is a SANDBOXED ES-MODULE environment: NO require(), NO import, NO Node modules (no fs, path, process, child_process, http). NEVER call require or import — they are undefined and throw. The data you need is ALREADY present as runtime variables — read it directly, never load it from disk. Use ONLY plain JavaScript (String/Array/Object methods, regex, JSON, Math, console.log) plus the injected primitives (llmQuery, final, askClarification). Write ONE small observable step per turn — a single console.log to inspect, or final(...) to finish."
+  "The code runtime is a SANDBOXED ES-MODULE environment: NO require(), NO import, NO Node modules (no fs, path, process, child_process, http). NEVER call require or import — they are undefined and throw. The full source/document you must mine is ALREADY loaded into the runtime as a string input for this stage (the distiller reads the `context` variable; the executor reads `inputs.executorRequest` and `inputs.distilledContext` — follow the per-stage instructions below for the exact names; raw `context` is not in the executor scope). It is NOT missing — read the provided input string DIRECTLY and slice/regex it. NEVER scan `Object.keys(globalThis)` for it, and NEVER call askClarification or ask the user to provide the source — the source is already loaded; mine it. Use ONLY plain JavaScript (String/Array/Object methods, regex, JSON, Math, console.log) plus the injected primitives `llmQuery` (sub-LM over a narrowed slice) and `final` (to answer). Write ONE small observable step per turn — a single console.log to inspect, or final(...) to finish."
 
 // Build a REAL single-level RLM and forward it over { context, query }, bridging the
 // actor/context callbacks into the node-event tree. Returns the responder's answer +
@@ -88,6 +95,10 @@ export const runRlm = async (
   ai: AxAIService,
   rootId: string,
   signal: AbortSignal,
+  // PER-TURN node-event sink (the per-turn activity closure, via makeOnEvent). Threaded from the
+  // workflow prim, replacing the deleted module-global onEvent. Defaults to a no-op so a
+  // standalone live-harness call (no turn boundary) still runs — it just emits no live tree rows.
+  onEvent: EmitSink = () => {},
 ): Promise<{ answer: string; evidence: string[]; turns: number; callbacks: number }> => {
   const budget = allocate(RLM_TOKEN_BUDGET, RLM_TOKEN_HARD)
   // SPAN GRANULARITY (telemetry 2b): the RLM's internal loop (distiller → executor turn 1..N
@@ -130,11 +141,10 @@ export const runRlm = async (
     maxSteps: limits.maxSteps,
     contextPolicy: { preset: "checkpointed", budget: "balanced" },
     // The actor (Kimi) defaults to CommonJS (`require(...)`), but the AxJSRuntime worker is a
-    // SANDBOXED ES-MODULE context with NO require/import/Node modules — require-style code
-    // throws "require is not defined" every actor turn and the run times out. Both actor
-    // stages write code (distiller mines the raw context global; executor works the
-    // distilledContext), so steer BOTH — variable-name-generic (the executor sees
-    // executorRequest/distilledContext, NOT the raw `context`).
+    // SANDBOXED ES-MODULE context with NO require/import/Node modules — require-style code throws
+    // "require is not defined" every actor turn and the run times out. Steer BOTH stages off
+    // require AND off the askClarification/globalThis-scan dead-ends; variable NAMING is left to
+    // ax's per-stage template (distiller: `context`; executor: inputs.executorRequest/distilledContext).
     contextOptions: { description: SANDBOX_RULE },
     executorOptions: { description: SANDBOX_RULE },
     // actorTurnCallback fires once per executor turn (1-based). Bridge each turn into a

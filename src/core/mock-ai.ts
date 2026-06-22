@@ -2,7 +2,18 @@
 // (mock.ts → agent.ts; agent.ts → mock-ai.ts for the AX2_MOCK seam; keeping the AI
 // builder here breaks that cycle). Zero network, zero Cloudflare.
 import { AxMockAIService, type AxChatRequest, type AxChatResponse } from "@ax-llm/ax"
-import { emitActivity } from "./activity.ts"
+import type { ActivitySink } from "./orch.ts"
+
+// TEST-ONLY per-turn activity sink (off in prod — only reachable under AX2_MOCK). The activity
+// bus is per-turn now (no module-global sink): turn() threads runTurn's per-turn `emit` here via
+// setMockEmit() at the top of each turn, so the GROUP variant below can surface its tool-CALL
+// rows onto THIS turn's live feed (AxMockAIService.chat() bypasses ax's response logging, so
+// those rows would otherwise never render). Absent ⇒ no-op (a direct ai.chat() caller with no
+// turn boundary, e.g. mock.test). Re-set per turn, so two turns never cross-feed.
+const mockEmitState: { sink: ActivitySink } = { sink: () => {} }
+export const setMockEmit = (emit: ActivitySink): void => {
+  mockEmitState.sink = emit
+}
 
 // The model id the mock answers as — a fixed fake so meta/tracing read a stable value.
 export const MOCK_MODEL = "@mock/kimi"
@@ -61,10 +72,10 @@ const wantsGroup = (req: Readonly<AxChatRequest<unknown>>): boolean => {
 // with no prior call is dropped by atoms' in-place settle, so the mock's tool STEPS never
 // render. For the group variant we need the three explore steps to land as turn steps, so we
 // emit their tool-call activities ourselves — exactly what logResponse would have, onto the
-// same global sink the running turn's liveLogger is bound to. Scoped to the group path so the
+// THIS turn's per-turn emit (set by setMockEmit at turn start). Scoped to the group path so the
 // existing single-bash/orch frame fixtures are byte-unchanged.
 const emitGroupCalls = (): void => {
-  for (const c of MOCK_GROUP_TOOLS) emitActivity({ kind: "tool", id: c.id, name: c.function.name, args: c.function.params })
+  for (const c of MOCK_GROUP_TOOLS) mockEmitState.sink({ kind: "tool", id: c.id, name: c.function.name, args: c.function.params })
 }
 // Route on the CURRENT turn's user message (the LAST user turn), not "any historical user
 // message" — a shared session memory retains prior turns, so matching any of them would make

@@ -11,7 +11,7 @@
 import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxLoggerFunction, type AxModelConfig, type AxProgramForwardOptions, type AxMemory, type AxStepHooks } from "@ax-llm/ax"
 import { type Context as OtelContext, type Tracer, trace as otelTrace } from "@opentelemetry/api"
 import * as Effect from "effect/Effect"
-import { emitActivity, type Activity } from "./activity.ts"
+import type { Activity } from "./activity.ts"
 import { endNodeSpan, errorNodeSpan, startNodeSpan } from "./orch-spans.ts"
 
 // The real forward() opts bag threaded by turn() (agent.ts). This is a STRUCTURAL
@@ -61,6 +61,12 @@ export type NodeOpts = {
   // service-level logger/debug (the main turn's untagged transcript logger), i.e. UNCHANGED.
   logger?: AxLoggerFunction | undefined
   debug?: boolean | undefined
+  // PER-TURN activity sink (the closure runTurn threads). When a node forward runs WITHOUT an
+  // explicit `logger`, withNodeLogger (orch-recipes) builds makeNodeLogger(emit, nodeId) from
+  // this so the node's tool/result activities tag with its id and land in THIS turn's queue —
+  // replacing the deleted module-global activity sink. Omitted ⇒ a no-op feed (a standalone
+  // recipe call with no turn boundary, e.g. a headless test) — the forward still runs.
+  emit?: ActivitySink | undefined
   // PER-CALL fetch override (finish-reason capture). A real ax forward option:
   // AxProgramForwardOptions extends AxAIServiceOptions, which declares `fetch?`. turn()
   // (agent.ts) threads a per-turn capture wrapper here instead of mutating the shared
@@ -165,13 +171,20 @@ export async function* pipeline<T>(
   for await (const item of items as AsyncIterable<T>) yield* run(item, 0)
 }
 
-// 4. emit — thin hook over the existing activity bus + the active OTel span. Maps
-// each NodeEvent variant to an Activity (pushed via emitActivity) AND annotates the
-// span in scope (addEvent + attributes). Stays Effect<void>: the session boundary
-// (turn() in agent.ts) runs it; the body is sync (bus push + span annotate).
-export const emit = (event: NodeEvent, _opts?: EmitOpts): Effect.Effect<void> =>
+// The per-turn Activity destination — a plain closure created INSIDE runTurn (src/core/run.ts)
+// pushing into THAT turn's queue. Threaded into emit() (below) and the loggers in activity.ts,
+// REPLACING the deleted module-global sink. Concurrency-correct: each turn has its own sink, so
+// two turns' node events never interleave into one buffer.
+export type ActivitySink = (a: Activity) => void
+
+// 4. emit — thin hook over the per-turn activity sink + the active OTel span. Maps each
+// NodeEvent variant to an Activity (pushed via the supplied `sink`) AND annotates the span in
+// scope (addEvent + attributes). Stays Effect<void>: the session boundary (turn() in agent.ts)
+// runs it; the body is sync (sink push + span annotate). The `sink` is the per-turn emit closure
+// threaded from runTurn — no module global.
+export const emit = (event: NodeEvent, sink: ActivitySink, _opts?: EmitOpts): Effect.Effect<void> =>
   Effect.sync(() => {
-    // 1) activity bus — orchestration node lifecycle row (atoms sink handles it).
+    // 1) activity sink — orchestration node lifecycle row (the turn's queue / atoms reducer).
     // parentId travels on EVERY node Activity (not just start). delta/done/error
     // NodeEvents don't carry it, so it's undefined there — atoms preserves the
     // already-known parentId on update, so a child resolving before its parent's
@@ -184,7 +197,7 @@ export const emit = (event: NodeEvent, _opts?: EmitOpts): Effect.Effect<void> =>
           : event.type === "error"
             ? { kind: "node", nodeId: event.nodeId, event: "error", parentId: undefined, detail: causeText(event.cause) }
             : { kind: "node", nodeId: event.nodeId, event: "start", parentId: event.parentId, detail: event.phase }
-    emitActivity(activity)
+    sink(activity)
 
     // 1b) SPAN GRANULARITY (telemetry 2b) — mirror this NodeEvent as a REAL child span so
     // the trace shows per-node timing, not one opaque blob. start mints a child span (under
