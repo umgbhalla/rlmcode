@@ -13,10 +13,25 @@
 //
 // GATED behind AX2_LIVE=1 (costs nothing in normal lint). Run:
 //   AX2_LIVE=1 bun --env-file=.env scripts/workflow-live.test.ts   (or `bun run live:workflow`)
-import { type AxAIService } from "@ax-llm/ax"
+import { ai, type AxAIService } from "@ax-llm/ax"
 import { type Activity, setActivitySink } from "../src/core/activity.ts"
 import { WORKFLOW_TOOLS } from "../src/core/workflow.ts"
-import { buildLiveAi } from "./orch-live.test.ts"
+import { MODEL, rateLimiter } from "../src/core/runtime.ts"
+
+// Build the CF-Kimi AxAIService EXACTLY like src/runtime.ts's `llm` (openai-shaped Cloudflare
+// Workers AI endpoint). A standalone builder — NOT imported from orch-live.test.ts (that module
+// has a top-level live IIFE + process.exit that would pre-empt this suite) and NOT the shared
+// `llm` singleton (agent.ts mutates that one). Same shape as orch-live's buildLiveAi.
+const buildLiveAi = (): AxAIService => {
+  const apiKey = process.env.CLOUDFLARE_API_TOKEN
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID
+  if (!apiKey || !accountId) {
+    throw new Error("live harness needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in .env (run via `bun run live:workflow`)")
+  }
+  const svc = ai({ name: "openai", apiKey, apiURL: `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`, config: { model: MODEL as never } })
+  svc.setOptions({ rateLimiter })
+  return svc
+}
 
 const live = process.env.AX2_LIVE === "1"
 if (!live) {
