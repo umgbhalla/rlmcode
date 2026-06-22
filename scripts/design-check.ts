@@ -21,8 +21,10 @@ export type Finding = { tag: "broken" | "delete" | "native" | "cycle" | "shrink"
 // chat.tsx = app entry; orch.ts = orchestration-core library surface; orch-recipes.ts
 // = userland recipe surface (runNode() by turn(); judge/loopUntilDry/adversarialVerify
 // by orch-run.orchestrate()) — kept a root so the recipe library surface isn't pruned
-// to only its current callers.
-const ENTRY = new Set(["src/chat.tsx", "src/orch.ts", "src/orch-recipes.ts"])
+// to only its current callers. orch-optimize.ts + orch-tasks.ts = the OPT-IN GEPA
+// scaffold surface, consumed by scripts/gepa.test.ts (a script entry, outside the
+// src/-only scan) — kept roots so the scaffold exports aren't flagged dead.
+const ENTRY = new Set(["src/chat.tsx", "src/orch.ts", "src/orch-recipes.ts", "src/orch-optimize.ts", "src/orch-tasks.ts"])
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
 const NEST_BUDGET = 5 // block nesting depth per function
 const PARAM_BUDGET = 6 // parameters per function
