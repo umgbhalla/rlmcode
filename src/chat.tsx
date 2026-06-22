@@ -15,7 +15,7 @@ import { abortTurn, projectDocLoaded } from "./agent.ts"
 import { appAtom, busyAtom, type Msg, newSessionAtom, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
-import { toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
+import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
 
 const projectDoc = projectDocLoaded
 const mdStyle = SyntaxStyle.create()
@@ -79,32 +79,44 @@ function Spinner() {
   return <text fg="#ffd166">{`${frames[i % frames.length]} thinking…`}</text>
 }
 
-function ToolView({ m, expanded, cols, onToggle }: { m: ToolMsg; expanded: boolean; cols: number; onToggle: () => void }) {
+const statusColor = (status: ToolMsg["status"]) =>
+  status === "error" ? "#f38ba8" : status === "ok" ? "#a6e3a1" : "#7f849c"
+const previewColor = (tone: PreviewLine["tone"]) => (tone === "add" ? "#a6e3a1" : tone === "del" ? "#f38ba8" : "#6c7086")
+const previewSign = (tone: PreviewLine["tone"]) => (tone === "add" ? "+" : tone === "del" ? "-" : "│")
+
+// Clickable header row: brightens on hover when the row has a drill-down body.
+function ToolHeader({ m, expanded, hasBody, onToggle }: { m: ToolMsg; expanded: boolean; hasBody: boolean; onToggle: () => void }) {
   const [hover, setHover] = useState(false)
   const running = m.status === "running"
-  const isError = m.status === "error"
-  const color = isError ? "#f38ba8" : m.status === "ok" ? "#a6e3a1" : "#7f849c"
-  const mark = running ? "◌" : isError ? "✗" : toolIcon(m.name)
-  const label = toolLabel(m.name, m.args)
-  const summary = running ? "running…" : toolSummary(m.name, m.result, isError)
-  const hasBody = !running && toolHasBody(m.name, m.result, isError)
-  const hot = hasBody && hover // clickable + hovered -> brighten
-  const diff = expanded && hasBody ? toolDiff(m.name, m.args, isError) : null
-  const preview = expanded && hasBody && !diff ? toolPreview(m.name, m.args, m.result, isError, Math.max(20, cols - 10)) : []
+  const color = statusColor(m.status)
+  const mark = running ? "◌" : m.status === "error" ? "✗" : toolIcon(m.name)
+  const summary = running ? "running…" : toolSummary(m.name, m.result, m.status === "error")
+  const hot = hasBody && hover
   return (
-    <box flexDirection="column" style={{ marginTop: expanded && hasBody ? 1 : 0 }}>
-      <text
-        fg={color}
-        selectable={false}
-        onMouseDown={(hasBody ? onToggle : undefined) as any}
-        onMouseOver={(hasBody ? (() => setHover(true)) : undefined) as any}
-        onMouseOut={(() => setHover(false)) as any}
-      >
-        <span fg={hot ? "#ffffff" : color}>{`${mark} `}</span>
-        <span fg={hot ? "#ffffff" : "#cdd6f4"}>{label}</span>
-        <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${summary}`}</span>
-        {hasBody ? <span fg={hot ? "#cdd6f4" : "#585b70"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
-      </text>
+    <text
+      fg={color}
+      selectable={false}
+      onMouseDown={(hasBody ? onToggle : undefined) as any}
+      onMouseOver={(hasBody ? (() => setHover(true)) : undefined) as any}
+      onMouseOut={(() => setHover(false)) as any}
+    >
+      <span fg={hot ? "#ffffff" : color}>{`${mark} `}</span>
+      <span fg={hot ? "#ffffff" : "#cdd6f4"}>{toolLabel(m.name, m.args)}</span>
+      <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${summary}`}</span>
+      {hasBody ? <span fg={hot ? "#cdd6f4" : "#585b70"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
+    </text>
+  )
+}
+
+function ToolView({ m, expanded, cols, onToggle }: { m: ToolMsg; expanded: boolean; cols: number; onToggle: () => void }) {
+  const isError = m.status === "error"
+  const hasBody = m.status !== "running" && toolHasBody(m.name, m.result, isError)
+  const open = expanded && hasBody
+  const diff = open ? toolDiff(m.name, m.args, isError) : null
+  const preview = open && !diff ? toolPreview(m.name, m.args, m.result, isError, Math.max(20, cols - 10)) : []
+  return (
+    <box flexDirection="column" style={{ marginTop: open ? 1 : 0 }}>
+      <ToolHeader m={m} expanded={expanded} hasBody={hasBody} onToggle={onToggle} />
       {diff ? (
         <box style={{ paddingLeft: INDENT, paddingTop: 1 }}>
           <diff diff={diff.diff} view={cols > 120 ? "split" : "unified"} filetype={diff.filetype} showLineNumbers syntaxStyle={mdStyle} />
@@ -112,9 +124,7 @@ function ToolView({ m, expanded, cols, onToggle }: { m: ToolMsg; expanded: boole
       ) : (
         <box flexDirection="column" style={{ paddingLeft: INDENT }}>
           {preview.map((p, i) => (
-            <text key={i} fg={p.tone === "add" ? "#a6e3a1" : p.tone === "del" ? "#f38ba8" : "#6c7086"}>
-              {`${p.tone === "add" ? "+" : p.tone === "del" ? "-" : "│"} ${p.text}`}
-            </text>
+            <text key={i} fg={previewColor(p.tone)}>{`${previewSign(p.tone)} ${p.text}`}</text>
           ))}
         </box>
       )}
