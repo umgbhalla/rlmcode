@@ -77,6 +77,6 @@ export const liveLogger: AxLoggerFunction = (m) => emitFromLog(m)
 
 // PER-NODE logger factory: returns an AxLoggerFunction that STAMPS every tool/result it
 // emits with `nodeId`, so the node's own tools route to its OrchTree node (not the main
-// transcript). Passed in a node's forward() opts (LeafOpts.logger) — concurrency-correct:
+// transcript). Passed in a node's forward() opts (NodeOpts.logger) — concurrency-correct:
 // each parallel node builds its OWN logger closing over its OWN id, so tools never interleave.
 export const makeNodeLogger = (nodeId: string): AxLoggerFunction => (m) => emitFromLog(m, nodeId)

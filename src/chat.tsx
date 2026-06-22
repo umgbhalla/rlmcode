@@ -12,7 +12,7 @@ import { createCliRenderer, decodePasteBytes, RenderableEvents, SyntaxStyle } fr
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { abortTurn, projectDocLoaded } from "./agent.ts"
-import { appAtom, busyAtom, type Msg, newSessionAtom, orchestrateAtom, type OrchNode, type OrchTree, runScriptAtom, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
+import { appAtom, busyAtom, deleteSessionAtom, type Msg, newSessionAtom, orchestrateAtom, type OrchNode, type OrchTree, runScriptAtom, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
@@ -334,7 +334,7 @@ function NodeView(p: NodeViewProps) {
 function List({ sessions, cursor }: { sessions: readonly SessionView[]; cursor: number }) {
   return (
     <box flexDirection="column" padding={1}>
-      <text fg="#888888">SESSIONS · n new · ↑↓ move · enter open · q quit</text>
+      <text fg="#888888">SESSIONS · n new · ↑↓ move · enter open · d close · q quit</text>
       {sessions.length === 0 ? (
         <text fg="#666666">no sessions. press n to start.</text>
       ) : (
@@ -402,6 +402,7 @@ function App() {
   const busy = useAtomValue(busyAtom)
   const setApp = useAtomSet(appAtom)
   const newSession = useAtomSet(newSessionAtom)
+  const deleteSession = useAtomSet(deleteSessionAtom)
   const [, send] = useAtom(sendAtom)
   const [, orchestrate] = useAtom(orchestrateAtom)
   const [, runScript] = useAtom(runScriptAtom)
@@ -636,6 +637,11 @@ function App() {
   const onListKey = (k: any) => {
     if (k.name === "q" || k.name === "escape") return process.exit(0)
     if (k.name === "n") return void newSession()
+    // d — close the highlighted session: aborts its turn + frees its sessionsRT entry.
+    if (k.name === "d") {
+      const target = state.sessions[state.cursor]
+      return void (target && deleteSession(target.id))
+    }
     if (k.name === "up" || k.name === "k") return setApp((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) }))
     if (k.name === "down" || k.name === "j")
       return setApp((s) => ({ ...s, cursor: Math.min(s.sessions.length - 1, s.cursor + 1) }))

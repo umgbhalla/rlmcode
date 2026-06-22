@@ -33,7 +33,7 @@ import {
   type BudgetUsage,
   emit,
   type EmitOpts,
-  type LeafOpts,
+  type NodeOpts,
   node,
   type NodeEvent,
   parallel,
@@ -84,7 +84,7 @@ export type OrchPrims = {
 
 // The run context handed to a loaded script's orchestrate(ctx, prims). Mirrors the
 // boundary state orch-run builds: the LLM service, the shared budget, the lifecycle
-// sink (already wired to emit() at the session boundary), a per-branch LeafOpts
+// sink (already wired to emit() at the session boundary), a per-branch NodeOpts
 // factory that FORKS a fresh AxMemory (never shared across concurrent nodes), the
 // usage reader for budget charging, plus a stable rootId to nest nodes under.
 export type OrchLoadCtx = {
@@ -102,7 +102,7 @@ export type OrchLoadCtx = {
   // MULTI-MODEL: optsFor takes an OPTIONAL per-node routing choice. A loaded script can
   // route a stage/node to 'glm' (or a thinking level) by passing a choice; absent ⇒ the
   // default session model (Kimi) at default effort — UNCHANGED for existing scripts.
-  readonly optsFor: (choice?: NodeModelChoice) => LeafOpts
+  readonly optsFor: (choice?: NodeModelChoice) => NodeOpts
   readonly usageOf: (gen: unknown) => BudgetUsage | undefined
 }
 
@@ -114,7 +114,7 @@ type OrchScriptFn = (ctx: OrchLoadCtx, prims: OrchPrims) => Promise<unknown> | u
 type OrchScriptModule = { orchestrate?: OrchScriptFn; default?: OrchScriptFn }
 
 // re-export the prim TYPES so a script can `import type` them for annotations.
-export type { AgentNode, Budget, BudgetExhaustedError, BudgetUsage, EmitOpts, EmitSink, Journal, JournaledNodeSpec, LeafOpts, NodeEvent, PipelineStage }
+export type { AgentNode, Budget, BudgetExhaustedError, BudgetUsage, EmitOpts, EmitSink, Journal, JournaledNodeSpec, NodeOpts, NodeEvent, PipelineStage }
 // MULTI-MODEL: re-export the routing choice type so a loaded script can `import type`
 // it for its optsFor(choice) calls, and the model-name resolver for routing decisions.
 export type { NodeModelChoice }
@@ -239,8 +239,8 @@ export const loadAndRunOrch = (parent: AnySpan, sessionId: string, scriptRef: st
     const rootId = `orch:${sessionId}:${scriptRef}`
 
     // MULTI-MODEL: optsFor takes an optional per-node routing choice (model + thinking
-    // level), resolved via nodeForwardOpts() and spread onto LeafOpts. Absent ⇒ default Kimi.
-    const optsFor = (choice?: NodeModelChoice): LeafOpts => ({
+    // level), resolved via nodeForwardOpts() and spread onto NodeOpts. Absent ⇒ default Kimi.
+    const optsFor = (choice?: NodeModelChoice): NodeOpts => ({
       mem: new AxMemory(),
       sessionId,
       tracer,

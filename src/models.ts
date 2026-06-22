@@ -103,7 +103,7 @@ export type NodeModelChoice = {
 }
 
 // nodeForwardOpts — turn a routing choice into the forward()-opts FRAGMENT to spread
-// onto a node's LeafOpts: the resolved CF model id, the modelConfig (effort + maxTokens
+// onto a node's NodeOpts: the resolved CF model id, the modelConfig (effort + maxTokens
 // floor), and the optional thinkingTokenBudget (a sibling forward option, NOT inside
 // modelConfig). An EMPTY choice (or none) yields ONLY the maxTokens floor under the
 // DEFAULT model — so default routing keeps Kimi behaviour, just with a safe content

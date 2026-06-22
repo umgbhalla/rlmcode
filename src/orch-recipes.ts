@@ -8,7 +8,7 @@
 // worker/task/job/unit/runner are forbidden as names for the unit.
 import type { AxAIService, AxGen, AxGenIn, AxGenOut, AxStepHooks } from "@ax-llm/ax"
 import { makeNodeLogger } from "./activity.ts"
-import { type Budget, type BudgetUsage, node, type LeafOpts, type NodeEvent, pipeline, tokensOf } from "./orch.ts"
+import { type Budget, type BudgetUsage, node, type NodeOpts, type NodeEvent, pipeline, tokensOf } from "./orch.ts"
 import { resilientNode } from "./orch-resilience.ts"
 // Re-export the resilience surface so callers/tests keep a single recipe import site.
 export { LEAF_TIMEOUT_MS, NodeTimeoutError, resilientNode, withRetry, withTimeout } from "./orch-resilience.ts"
@@ -71,7 +71,7 @@ const noopSink: EmitSink = () => {}
 // of which call this before the forward. `debug:true` is set per-call so ax INVOKES the logger
 // even when the AI service has no service-level debug (forward opts win over service options).
 // A caller that already supplied a logger keeps it (never clobber an explicit override).
-const withNodeLogger = (opts: LeafOpts, nodeId: string): LeafOpts =>
+const withNodeLogger = (opts: NodeOpts, nodeId: string): NodeOpts =>
   opts.logger !== undefined ? opts : { ...opts, logger: makeNodeLogger(nodeId), debug: true }
 
 // GRACEFUL MAX-STEPS — a CEILING, not a cliff (claude_code model). ax runs the tool-calling
@@ -153,7 +153,7 @@ export type AgentNode<I extends AxGenIn, O extends AxGenOut> = {
   nodeId: string
   parentId?: string | undefined
   gen: AxGen<I, O>
-  opts: LeafOpts
+  opts: NodeOpts
   onEvent?: EmitSink
   phase?: string
   budget?: Budget
@@ -202,12 +202,14 @@ export const runNode = async <I extends AxGenIn, O extends AxGenOut>(
     // never throws for the soft line, so the node result below is ALWAYS returned. When
     // spend crosses the soft ceiling we emit a delta nudge (visible in the tree/span) but
     // do NOT discard the node — a runaway is bounded by the hard ceiling + maxSteps.
-    // COST-METER: read this node's usage ONCE — charge the (advisory) budget AND stamp the
-    // per-node token count on the done event so the OrchTree can show it + sum a run total.
-    let nodeTokens: number | undefined
-    if (usageOf !== undefined) nodeTokens = tokensOf(usageOf(gen))
+    // COST-METER: read this node's usage ONCE (the gen's getUsage() is CUMULATIVE over every
+    // forward it ran — including the graceful-finalize nudge forward above — so a single late
+    // read both charges the budget AND stamps the per-node token count, with the nudge's spend
+    // already folded in; the old double-read called usageOf twice and let the nudge tokens slip).
+    const usage = usageOf?.(gen)
+    const nodeTokens = usageOf !== undefined ? tokensOf(usage) : undefined
     if (budget !== undefined) {
-      budget.charge(usageOf?.(gen))
+      budget.charge(usage)
       if (budget.overSoft()) onEvent({ type: "delta", nodeId, chunk: "⚠ over soft token budget (advisory — continuing)" })
     }
     onEvent({ type: "done", nodeId, result, tokens: nodeTokens })
@@ -225,7 +227,7 @@ export const judge = async <C, I extends AxGenIn, O extends AxGenOut>(
   ai: AxAIService,
   candidates: ReadonlyArray<C>,
   judgeGen: AxGen<I, O>,
-  judgeOpts: LeafOpts,
+  judgeOpts: NodeOpts,
   toInput: (candidates: ReadonlyArray<C>) => I,
 ): Promise<O> => node(judgeGen, judgeOpts)(ai, toInput(candidates))
 
@@ -351,7 +353,7 @@ export const verifiedStep = async <T>(spec: {
 
 // structuredPipeline — FIRST-CLASS typed structured pipeline. Each stage is a node:
 // a gen typed by its OWN signature (e.g. `text:string -> facts:json` then
-// `facts:json -> summary:string`) plus its LeafOpts. The recipe threads the TYPED
+// `facts:json -> summary:string`) plus its NodeOpts. The recipe threads the TYPED
 // output of stage k straight into stage k+1's input — no string flattening between
 // stages, no intermediate collection. The KEY invariant: stage k's output object must
 // match stage k+1's input field shape (the gen signatures encode this), so the chain
@@ -374,7 +376,7 @@ export const verifiedStep = async <T>(spec: {
 // at compile time (e.g. a fluent `.then(gen)` chain that carries the running output type).
 export type PipelineStage = {
   readonly gen: AxGen<AxGenIn, AxGenOut>
-  readonly opts: LeafOpts
+  readonly opts: NodeOpts
   readonly nodeId?: string
   readonly phase?: string
   readonly budget?: Budget

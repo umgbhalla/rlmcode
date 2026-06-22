@@ -39,6 +39,7 @@ import {
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import { limits, llm, onEvent } from "./runtime.ts"
 import { allocate, BudgetExhaustedError } from "./orch.ts"
+import { withTimeout } from "./orch-recipes.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 
@@ -51,6 +52,19 @@ const RLM_TOKEN_BUDGET = Number(process.env.AX2_RLM_TOKEN_BUDGET ?? 2_000_000)
 // HARD runaway backstop — the ONLY ceiling that aborts (BudgetExhaustedError). Very high
 // (~20M) so a single genuine RLM run never trips it; it only catches a true runaway loop.
 const RLM_TOKEN_HARD = Number(process.env.AX2_RLM_TOKEN_HARD ?? 20_000_000)
+
+// Wall-clock TIMEOUT for a whole RLM run. The per-NODE LEAF_TIMEOUT_MS (120s, orch-resilience)
+// is the wrong backstop for an RLM: it explores a big blob across MANY executor turns +
+// sub-LM queries (long-horizon), so a 120s cap would GUILLOTINE a legitimate run. run_rlm
+// never goes through runNode/resilientNode (it forwards an axAgent directly), so that 120s
+// never actually applied — but we add a MUCH larger, RLM-specific ceiling here as the real
+// backstop against a hung run, while still honoring the turn's abortSignal for a true cancel
+// (withTimeout forks a child signal off `signal`, so cancel + timeout both abort the forward).
+// AX2_RLM_TIMEOUT_MS overrides; default 600s. Clamped to a sane floor.
+const RLM_TIMEOUT_MS = (() => {
+  const v = Number(process.env.AX2_RLM_TIMEOUT_MS ?? 600_000)
+  return Number.isFinite(v) && v > 0 ? Math.max(10_000, Math.floor(v)) : 600_000
+})()
 
 const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
 
@@ -159,16 +173,23 @@ export const runRlm = async (
     },
   })
 
-  // forward() drives the whole distiller→executor→responder loop. abortSignal honours a
-  // cancelled turn; mem is a FRESH AxMemory (forked — never the turn's shared history).
-  // tracer + traceContext thread into forward() so ax nests its internal gen_ai stage spans
-  // under run_rlm (the same way turn() hands them to the chat forward). They are turn-level
-  // extensions AxProgramForwardOptions tolerates but does not declare — cast through, like
-  // node() does in orch.ts (sound, not an `any`: a known structural superset).
-  const out = (await rlm.forward(
-    ai,
-    { context, query },
-    { abortSignal: signal, mem: new AxMemory(), tracer, traceContext } as Parameters<typeof rlm.forward>[2],
+  // forward() drives the whole distiller→executor→responder loop. mem is a FRESH AxMemory
+  // (forked — never the turn's shared history). tracer + traceContext thread into forward() so
+  // ax nests its internal gen_ai stage spans under run_rlm (the same way turn() hands them to
+  // the chat forward). They are turn-level extensions AxProgramForwardOptions tolerates but does
+  // not declare — cast through, like node() does in orch.ts (sound, not an `any`: a known
+  // structural superset).
+  //
+  // RLM TIMEOUT: race the whole forward against RLM_TIMEOUT_MS (a generous long-horizon ceiling
+  // — NOT the per-node 120s). withTimeout forks a child signal off the turn's `signal`, so a
+  // real cancel (signal abort) AND the timeout both abort the in-flight forward; we hand that
+  // forked signal to forward() as its abortSignal so ax actually stops the request.
+  const out = (await withTimeout(rootId, RLM_TIMEOUT_MS, signal, (rlmSignal) =>
+    rlm.forward(
+      ai,
+      { context, query },
+      { abortSignal: rlmSignal, mem: new AxMemory(), tracer, traceContext } as Parameters<typeof rlm.forward>[2],
+    ),
   )) as { answer?: unknown; evidence?: unknown }
 
   // Reconcile any tail usage not seen by the per-turn callback (e.g. the responder stage),

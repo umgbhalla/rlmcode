@@ -12,3 +12,9 @@ export type SessionRT = {
 }
 
 export const sessionsRT = new Map<string, SessionRT>()
+
+// LEAK FIX: drop a closed session's runtime objects (its AxMemory + the ExternalSpan
+// handle) so a long-lived process doesn't accumulate dead sessions' memory. The Map is
+// the ONLY non-serializable session store (atoms holds the serializable view); closing a
+// session in the UI must call this so its mem is released. Returns whether an entry existed.
+export const deleteSession = (id: string): boolean => sessionsRT.delete(id)

@@ -20,7 +20,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { resolve as resolvePath } from "node:path"
 import type { AxAIService, AxGen, AxGenIn, AxGenOut } from "@ax-llm/ax"
-import { type LeafOpts, node } from "./orch.ts"
+import { type NodeOpts, node } from "./orch.ts"
 
 // Where journals live: .ax/journal/<sessionId>.json (one file per run/session). Sits
 // under the same trusted .ax/ root as the orch scripts dir; created on first save.
@@ -90,12 +90,12 @@ const fnv1a = (s: string): string => {
 // determining) and are EXCLUDED — including them would make every restart miss the cache
 // (a fresh AxMemory / AbortController is a new object every run). maxSteps + functionCall
 // DO shape the model's behavior, so they ARE in the key.
-const optsFingerprint = (opts: LeafOpts): string =>
+const optsFingerprint = (opts: NodeOpts): string =>
   stableStringify({ maxSteps: opts.maxSteps, functionCall: opts.functionCall ?? "auto", stream: opts.stream })
 
 // journalKey — the deterministic (nodeId, hash(input), hash(opts-relevant)) key. Same
 // inputs ⇒ same key across process restarts. Exported so a caller can pre-check / dedupe.
-export const journalKey = (nodeId: string, input: AxGenIn, opts: LeafOpts): string =>
+export const journalKey = (nodeId: string, input: AxGenIn, opts: NodeOpts): string =>
   `${nodeId}:${fnv1a(stableStringify(input))}:${fnv1a(optsFingerprint(opts))}`
 
 // loadJournal — read .ax/journal/<sessionId>.json on run start (RESUME). A missing file
@@ -176,7 +176,7 @@ export type JournaledNodeSpec = {
 //   - ENABLED + key MISS: run node() (the real forward), record the result under the key,
 //     fire persist() so it survives a crash, then return it.
 export const journaledNode =
-  <I extends AxGenIn, O extends AxGenOut>(gen: AxGen<I, O>, opts: LeafOpts, spec: JournaledNodeSpec) =>
+  <I extends AxGenIn, O extends AxGenOut>(gen: AxGen<I, O>, opts: NodeOpts, spec: JournaledNodeSpec) =>
   async (ai: AxAIService, input: I): Promise<O> => {
     const { journal, nodeId, enabled = false, persist = saveJournal } = spec
     if (!enabled || journal === undefined) return node(gen, opts)(ai, input)

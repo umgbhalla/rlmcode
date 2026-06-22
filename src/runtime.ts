@@ -115,5 +115,5 @@ export const estimatedCostOf = (tokens: number): number | undefined => {
 }
 
 // Tool-call iteration ceiling + per-orchestration token ceiling, so every
-// orchestration driver builds LeafOpts/Budget with the same limits as turn().
+// orchestration driver builds NodeOpts/Budget with the same limits as turn().
 export const limits = { maxSteps: MAX_STEPS, tokenBudget: TOKEN_BUDGET } as const

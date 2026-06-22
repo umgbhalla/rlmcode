@@ -16,7 +16,7 @@ import {
   loadJournal,
   saveJournal,
 } from "../src/orch-journal.ts"
-import type { LeafOpts } from "../src/orch.ts"
+import type { NodeOpts } from "../src/orch.ts"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {
@@ -46,8 +46,8 @@ const countingGen = (reply: string) => {
 
 const fakeAi = {} as AxAIService
 
-// A minimal LeafOpts — the fake forward() ignores most fields; maxSteps/stream feed the key.
-const opts = (over: Partial<LeafOpts> = {}): LeafOpts =>
+// A minimal NodeOpts — the fake forward() ignores most fields; maxSteps/stream feed the key.
+const opts = (over: Partial<NodeOpts> = {}): NodeOpts =>
   ({
     mem: {},
     sessionId: "journal-test",
@@ -57,7 +57,7 @@ const opts = (over: Partial<LeafOpts> = {}): LeafOpts =>
     stream: false,
     abortSignal: new AbortController().signal,
     ...over,
-  }) as unknown as LeafOpts
+  }) as unknown as NodeOpts
 
 // A unique sessionId per run so a stale file from a prior run can't mask a regression.
 const SESSION = `journal-test-${process.pid}`

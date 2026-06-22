@@ -6,7 +6,7 @@
 // over a typed gen, exactly like the judge/skeptic reasoning nodes.
 import { ax, type AxAIService, type AxGen } from "@ax-llm/ax"
 import { type EmitSink, runNode } from "./orch-recipes.ts"
-import type { Budget, BudgetUsage, LeafOpts } from "./orch.ts"
+import type { Budget, BudgetUsage, NodeOpts } from "./orch.ts"
 
 // PLANNER node gen — AUTO-decomposition. A pure REASONING node (NO tools, like judge/
 // skeptic — strictly STRONGER than the BASE_TOOLS-only recursion guard: zero functions ⇒ it
@@ -33,7 +33,7 @@ export const runPlanner = async (opts: {
   ai: AxAIService
   task: string
   cap: number
-  optsFor: () => LeafOpts
+  optsFor: () => NodeOpts
   budget: Budget
   rootId: string
   onEvent: EmitSink

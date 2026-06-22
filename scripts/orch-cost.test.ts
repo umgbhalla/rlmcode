@@ -10,7 +10,7 @@
 import type { AxAIService, AxGen, AxGenIn, AxGenOut } from "@ax-llm/ax"
 import { AxMemory } from "@ax-llm/ax"
 import { runNode, structuredPipeline, type EmitSink } from "../src/orch-recipes.ts"
-import { allocate, type BudgetUsage, type LeafOpts, type NodeEvent, tokensOf } from "../src/orch.ts"
+import { allocate, type BudgetUsage, type NodeOpts, type NodeEvent, tokensOf } from "../src/orch.ts"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {
@@ -34,7 +34,7 @@ const fakeGen = (reply: AxGenOut) =>
   ({ forward: async () => reply }) as unknown as AxGen<AxGenIn, AxGenOut>
 
 const fakeAi = {} as AxAIService
-const optsFor = (): LeafOpts =>
+const optsFor = (): NodeOpts =>
   ({
     mem: new AxMemory(),
     sessionId: "test",
@@ -43,7 +43,7 @@ const optsFor = (): LeafOpts =>
     maxSteps: 1,
     stream: false,
     abortSignal: new AbortController().signal,
-  }) as unknown as LeafOpts
+  }) as unknown as NodeOpts
 
 // The OrchTree fold the UI (atoms.installSink) uses: a done event sets the node's tokens,
 // the run total is the sum over every node. Reproduced here so the test pins the same

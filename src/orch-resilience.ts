@@ -15,7 +15,7 @@
 //     retried — re-running yields the same error and burns tokens/time.
 // Default = NOT transient (fail fast). Only the known-transient shapes opt INTO a retry.
 import { AxFunctionError, type AxAIService, type AxGen, type AxGenIn, type AxGenOut } from "@ax-llm/ax"
-import { BudgetExhaustedError, type LeafOpts, node } from "./orch.ts"
+import { BudgetExhaustedError, type NodeOpts, node } from "./orch.ts"
 
 // Max forward attempts for a transient failure (the first try + retries). Env override
 // AX2_NODE_RETRIES (a RETRY count; attempts = retries + 1). Clamped 1..5, default 3 attempts.
@@ -126,7 +126,7 @@ export const withRetry = async <T>(
 // AbortController off the turn's `parentSignal` (so a cancelled turn STILL aborts the
 // node), and ALSO abort it when the timer fires — so a hung forward() (which honors
 // opts.abortSignal) is cut loose and the race rejects with NodeTimeoutError. The node's
-// LeafOpts.abortSignal must be the forked signal so ax actually aborts the in-flight HTTP.
+// NodeOpts.abortSignal must be the forked signal so ax actually aborts the in-flight HTTP.
 export const withTimeout = <T>(
   nodeId: string,
   timeoutMs: number,
@@ -134,7 +134,7 @@ export const withTimeout = <T>(
   run: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> => {
   const ctrl = new AbortController()
-  // A missing parent signal (a bare-stub LeafOpts in a test, or a caller that didn't thread
+  // A missing parent signal (a bare-stub NodeOpts in a test, or a caller that didn't thread
   // one) falls back to a never-aborted signal — so the timeout still works and cancellation
   // is simply a no-op, never a crash.
   const parent = parentSignal ?? new AbortController().signal
@@ -162,13 +162,13 @@ export const withTimeout = <T>(
 // hang aborts + surfaces NodeTimeoutError (the caller's fanOut maps it to a null slot).
 export const resilientNode = <I extends AxGenIn, O extends AxGenOut>(
   gen: AxGen<I, O>,
-  opts: LeafOpts,
+  opts: NodeOpts,
   nodeId: string,
   ai: AxAIService,
   input: I,
   onRetry: (tryIndex: number, err: unknown, delayMs: number) => void = () => {},
 ): Promise<O> => {
-  // A bare-stub LeafOpts (tests) or a caller that didn't thread one falls back to a never-
+  // A bare-stub NodeOpts (tests) or a caller that didn't thread one falls back to a never-
   // aborted signal — resilience still works, cancellation is just a no-op.
   const signal = opts.abortSignal ?? new AbortController().signal
   return withRetry(

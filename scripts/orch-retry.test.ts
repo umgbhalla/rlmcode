@@ -18,7 +18,7 @@ process.env.AX2_NODE_RETRIES = "2"
 const { NodeTimeoutError, parallelLimit, resilientNode, runNode, withRetry, withTimeout } = await import("../src/orch-recipes.ts")
 type EmitSink = import("../src/orch-recipes.ts").EmitSink
 const { BudgetExhaustedError } = await import("../src/orch.ts")
-type LeafOpts = import("../src/orch.ts").LeafOpts
+type NodeOpts = import("../src/orch.ts").NodeOpts
 type NodeEvent = import("../src/orch.ts").NodeEvent
 
 let failed = 0
@@ -31,10 +31,10 @@ const assert = (cond: boolean, msg: string) => {
 
 const fakeAi = {} as AxAIService
 
-// A LeafOpts whose abortSignal is real (resilientNode forks a child off it). The other
+// A NodeOpts whose abortSignal is real (resilientNode forks a child off it). The other
 // fields are inert under the fake forward(), so minimal stubs suffice.
-const optsFor = (signal: AbortSignal = new AbortController().signal): LeafOpts =>
-  ({ mem: {}, sessionId: "test", tracer: undefined, traceContext: undefined, maxSteps: 1, stream: false, abortSignal: signal }) as unknown as LeafOpts
+const optsFor = (signal: AbortSignal = new AbortController().signal): NodeOpts =>
+  ({ mem: {}, sessionId: "test", tracer: undefined, traceContext: undefined, maxSteps: 1, stream: false, abortSignal: signal }) as unknown as NodeOpts
 
 const recorder = () => {
   const events: NodeEvent[] = []

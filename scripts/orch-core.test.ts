@@ -8,7 +8,7 @@
 // orchestration engine off-LLM: it pins the verify-before-accept flow's contract.
 import type { AxAIService, AxGen } from "@ax-llm/ax"
 import { adversarialVerify, type EmitSink, MAX_CONCURRENCY, parallelLimit, runNode, structuredPipeline, untilGate, verifiedStep, verifyHarden } from "../src/orch-recipes.ts"
-import { allocate, BudgetExhaustedError, type LeafOpts, type NodeEvent, parallel, pipeline } from "../src/orch.ts"
+import { allocate, BudgetExhaustedError, type NodeOpts, type NodeEvent, parallel, pipeline } from "../src/orch.ts"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {
@@ -36,8 +36,8 @@ const fakeGen = <O>(reply: O, opts: { fail?: boolean; usageTokens?: number } = {
 }
 const fakeAi = {} as AxAIService
 
-// A minimal LeafOpts — never used by the fake forward(), but the recipe API requires it.
-const opts = {} as LeafOpts
+// A minimal NodeOpts — never used by the fake forward(), but the recipe API requires it.
+const opts = {} as NodeOpts
 
 // A recording sink: captures every NodeEvent so we can assert the lifecycle order.
 const recorder = () => {

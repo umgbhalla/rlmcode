@@ -7,11 +7,11 @@ import * as Effect from "effect/Effect"
 import * as Tracer from "effect/Tracer"
 import * as Atom from "effect/unstable/reactivity/Atom"
 import { setActivitySink } from "./activity.ts"
-import { turn } from "./agent.ts"
+import { abortTurn, turn } from "./agent.ts"
 import { loadAndRunOrch } from "./orch-load.ts"
 import { orchestrate } from "./orch-run.ts"
 import { appRuntime } from "./otel.ts"
-import { sessionsRT } from "./sessions.ts"
+import { deleteSession, sessionsRT } from "./sessions.ts"
 
 const MODEL = "@cf/moonshotai/kimi-k2.7-code"
 
@@ -96,6 +96,34 @@ export const newSessionAtom = appRuntime.fn((_: void, get) =>
       sessions: [...s.sessions, view],
     })
     yield* Effect.logInfo("session.new").pipe(Effect.annotateLogs({ "session.id": id }))
+  }),
+)
+
+/**
+ * Close a session: abort any in-flight turn, DROP its non-serializable runtime objects
+ * (the sessionsRT entry — AxMemory + root span handle) so a long-running process doesn't
+ * leak dead sessions, and remove its serializable view, fixing the cursor/activeId/view.
+ * The sessionsRT Map was previously never cleaned (newSessionAtom set, nothing deleted).
+ */
+export const deleteSessionAtom = appRuntime.fn((id: string, get) =>
+  Effect.gen(function* () {
+    const s = get(appAtom)
+    const idx = s.sessions.findIndex((x) => x.id === id)
+    if (idx === -1) return
+    abortTurn(id) // stop a running turn so its fiber doesn't write to a dropped session
+    deleteSession(id) // LEAK FIX: release the AxMemory + span handle held in sessionsRT
+    const sessions = s.sessions.filter((x) => x.id !== id)
+    // If we closed the active/last session, fall back to the list; otherwise keep the
+    // remaining selection sane (clamp the cursor, drop activeId if it was this one).
+    const wasActive = s.activeId === id
+    const cursor = Math.max(0, Math.min(sessions.length - 1, s.cursor > idx ? s.cursor - 1 : s.cursor))
+    get.set(appAtom, {
+      view: wasActive ? "list" : s.view,
+      activeId: wasActive ? null : s.activeId,
+      cursor,
+      sessions,
+    })
+    yield* Effect.logInfo("session.delete").pipe(Effect.annotateLogs({ "session.id": id }))
   }),
 )
 
@@ -233,11 +261,10 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
       Effect.catchCause((c) => {
         const e = Cause.squash(c) as { cause?: { message?: string }; message?: string }
         const raw = e?.cause?.message ?? e?.message ?? String(e)
-        const msg = /abort/i.test(raw)
-          ? "Interrupted."
-          : /max steps reached/i.test(raw)
-            ? "Hit the step limit while working — see the steps above. Narrow the task, or ask me to continue."
-            : raw.split("\n")[0]!.slice(0, 240)
+        // GRACEFUL MAX-STEPS removed the "max steps reached" throw (turn() now finalizes
+        // in-loop with tools stripped, never throwing that string), so only abort + the
+        // raw first line remain — the old max-steps string-match branch is dead.
+        const msg = /abort/i.test(raw) ? "Interrupted." : raw.split("\n")[0]!.slice(0, 240)
         return Effect.succeed({ reply: `⚠ ${msg}`, tokens: undefined, finishReason: undefined, budget: false })
       }),
     )

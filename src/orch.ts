@@ -17,9 +17,9 @@ import { endNodeSpan, errorNodeSpan, startNodeSpan } from "./orch-spans.ts"
 // The real forward() opts bag threaded by turn() (agent.ts). This is a STRUCTURAL
 // SUPERSET of AxProgramForwardOptions, NOT an alias: sessionId/tracer/traceContext
 // are custom turn-level extensions that forward() tolerates today but does not
-// declare. Keeping LeafOpts an honest description of the real bag — node() casts to
+// declare. Keeping NodeOpts an honest description of the real bag — node() casts to
 // Readonly<AxProgramForwardOptions<string>> at the forward() boundary (see node).
-export type LeafOpts = {
+export type NodeOpts = {
   mem: AxMemory
   sessionId: string
   tracer: Tracer // @opentelemetry/api Tracer (same instance turn() builds)
@@ -47,7 +47,7 @@ export type LeafOpts = {
   // carries the AxModelConfig fragment (effort hint + the maxTokens FLOOR that keeps a
   // thinking model's reasoning from starving its content). `thinkingTokenBudget` is ax's
   // string-level thinking control. ALL are real AxProgramForwardOptions fields; node() casts
-  // the bag through. Built by src/models.ts nodeForwardOpts() and spread onto LeafOpts.
+  // the bag through. Built by src/models.ts nodeForwardOpts() and spread onto NodeOpts.
   model?: string | undefined
   modelConfig?: AxModelConfig | undefined
   thinkingTokenBudget?: "minimal" | "low" | "medium" | "high" | "highest" | "none" | undefined
@@ -123,11 +123,11 @@ export const tokensOf = (u: BudgetUsage | undefined): number =>
 
 // 1. node — the ONLY thing that calls ax. Curried so opts bind once, then (ai,input)
 // runs the forward. opts is cast to Readonly<AxProgramForwardOptions> at the boundary:
-// LeafOpts is a known structural superset (carries sessionId/tracer/traceContext that
+// NodeOpts is a known structural superset (carries sessionId/tracer/traceContext that
 // AxProgramForwardOptions omits); the <string> arg matches forward()'s model-key param.
 // This is sound — not `any`, no ponytail needed.
 export const node =
-  <I extends AxGenIn, O extends AxGenOut>(gen: AxGen<I, O>, opts: LeafOpts) =>
+  <I extends AxGenIn, O extends AxGenOut>(gen: AxGen<I, O>, opts: NodeOpts) =>
   (ai: AxAIService, input: I): Promise<O> =>
     gen.forward(ai, input, opts as Readonly<AxProgramForwardOptions<string>>)
 

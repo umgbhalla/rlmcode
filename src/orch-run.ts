@@ -23,7 +23,7 @@ import * as Effect from "effect/Effect"
 import type { AnySpan } from "effect/Tracer"
 import { limits, llm, MODEL, onEvent, readUsageOf } from "./runtime.ts"
 import { adversarialVerify, judge, loopUntilDry, runNode } from "./orch-recipes.ts"
-import { allocate, type Budget, type LeafOpts, parallel } from "./orch.ts"
+import { allocate, type Budget, type NodeOpts, parallel } from "./orch.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 
 // Tool-free single-shot gens: the demo proves orchestration, not tool loops — the
@@ -84,9 +84,9 @@ export const orchestrate = (parent: AnySpan, sessionId: string, message: string)
     const budget = allocate(limits.tokenBudget)
     const rootId = `orch:${sessionId}`
 
-    // Per-branch LeafOpts: each call returns a FRESH AxMemory (a fork) so concurrent
+    // Per-branch NodeOpts: each call returns a FRESH AxMemory (a fork) so concurrent
     // nodes never mutate a shared history. The session's real mem is owned by turn().
-    const optsFor = (): LeafOpts => ({
+    const optsFor = (): NodeOpts => ({
       mem: new AxMemory(),
       sessionId,
       tracer,
@@ -120,7 +120,7 @@ export const orchestrate = (parent: AnySpan, sessionId: string, message: string)
 const run = async (
   rootId: string,
   message: string,
-  optsFor: () => LeafOpts,
+  optsFor: () => NodeOpts,
   budget: Budget,
 ): Promise<OrchestrateResult> => {
   onEvent({ type: "start", nodeId: rootId, phase: "orchestrate" })
@@ -195,7 +195,7 @@ const run = async (
 const fanOut = async (
   rootId: string,
   message: string,
-  optsFor: () => LeafOpts,
+  optsFor: () => NodeOpts,
   budget: Budget,
 ): Promise<string[]> => {
   const raw = await parallel(
@@ -217,7 +217,7 @@ const skeptic = async (
   i: number,
   message: string,
   answer: string,
-  opts: LeafOpts,
+  opts: NodeOpts,
   budget: Budget,
 ): Promise<boolean> => {
   const nodeId = `${rootId}/skeptic-${i}`
@@ -237,7 +237,7 @@ const skeptic = async (
 const runNodeAt = <I extends AxGenIn, O extends AxGenOut>(
   nodeId: string,
   gen: AxGen<I, O>,
-  opts: LeafOpts,
+  opts: NodeOpts,
   budget: Budget,
   input: I,
 ): Promise<O> =>

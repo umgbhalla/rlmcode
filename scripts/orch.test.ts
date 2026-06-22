@@ -12,7 +12,7 @@
 import type { AxAIService, AxGen } from "@ax-llm/ax"
 import { AxMemory } from "@ax-llm/ax"
 import { runNode, type EmitSink } from "../src/orch-recipes.ts"
-import { type LeafOpts, node, type NodeEvent, parallel, pipeline } from "../src/orch.ts"
+import { type NodeOpts, node, type NodeEvent, parallel, pipeline } from "../src/orch.ts"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {
@@ -38,7 +38,7 @@ const recorder = () => {
 // starts calling more methods on the gen.
 const memWritingGen = (reply: string) =>
   ({
-    forward: async (_ai: unknown, input: { tag: string }, o: LeafOpts): Promise<{ reply: string }> => {
+    forward: async (_ai: unknown, input: { tag: string }, o: NodeOpts): Promise<{ reply: string }> => {
       // The branch records its own request into ITS forked memory.
       o.mem.addRequest([{ role: "user", content: input.tag }])
       return { reply }
@@ -49,7 +49,7 @@ const fakeAi = {} as AxAIService
 
 // optsFor() mirrors orch-run.optsFor(): a FRESH AxMemory per call (the fork). The other
 // fields are inert under the fake forward(), so minimal stubs suffice.
-const optsFor = (): LeafOpts =>
+const optsFor = (): NodeOpts =>
   ({
     mem: new AxMemory(),
     sessionId: "test",
@@ -58,7 +58,7 @@ const optsFor = (): LeafOpts =>
     maxSteps: 1,
     stream: false,
     abortSignal: new AbortController().signal,
-  }) as unknown as LeafOpts
+  }) as unknown as NodeOpts
 
 // Read the single user turn a branch wrote into its forked memory (or "" if empty).
 const soleTurn = (m: AxMemory): string => {

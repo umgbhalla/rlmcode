@@ -24,7 +24,7 @@
 //      at <= ORCH_CONCURRENCY in flight (the rest QUEUE), so a 100-branch request runs
 //      concurrency-at-a-time, never 100 simultaneous CF hits. The service-level rateLimiter
 //      (runtime.ts) is the second throttle. This keeps the cap high (real scale) yet bounded.
-//   4. abortSignal: extra.abortSignal threads into every LeafOpts, so a cancelled turn
+//   4. abortSignal: extra.abortSignal threads into every NodeOpts, so a cancelled turn
 //      cancels the whole sub-run (ax honors it in forward()).
 //
 // CONTEXT/TRACE: a tool handler runs Promise-native INSIDE forward(), which turn() runs
@@ -37,7 +37,7 @@ import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import { BASE_PROMPT, estimatedCostOf, limits, llm, onEvent, readUsageOf } from "./runtime.ts"
 import { choiceFromArgs, type NodeModelChoice, nodeForwardOpts } from "./models.ts"
 import { adversarialVerify, finalizeOnMaxSteps, judge, loopUntilDry, MAX_CONCURRENCY, parallelLimit, runNode } from "./orch-recipes.ts"
-import { allocate, type Budget, BudgetExhaustedError, type LeafOpts } from "./orch.ts"
+import { allocate, type Budget, BudgetExhaustedError, type NodeOpts } from "./orch.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
 import { runPlanner } from "./orch-plan.ts"
@@ -96,7 +96,7 @@ const costMeterSummary = (branches: number, tokens: number): string => {
 const signalOf = (extra: { abortSignal?: AbortSignal } | undefined): AbortSignal =>
   extra?.abortSignal ?? new AbortController().signal
 
-// Build the SHARED boundary state for a self-orchestration: the FORKED-memory LeafOpts
+// Build the SHARED boundary state for a self-orchestration: the FORKED-memory NodeOpts
 // factory (a fresh AxMemory per call → concurrent leaves never share a mutating history),
 // a fresh Budget at the ORCH ceiling, and a stable rootId the sub-run nests under. tracer
 // + traceContext are read from the AMBIENT OTel context (the live chat.turn span set by
@@ -105,8 +105,8 @@ const boundary = (sessionId: string, signal: AbortSignal, rootId: string) => {
   const tracer = otelTrace.getTracer(SERVICE_NAME, SERVICE_VERSION)
   const traceContext = otelContext.active()
   setNodeSpanTracer(tracer) // telemetry 2b: node spans under the orchestrate root (live-harness path has no turn())
-  // MULTI-MODEL: optsFor takes an OPTIONAL routing choice — nodeForwardOpts() spreads {model, modelConfig, thinkingTokenBudget} onto LeafOpts (absent ⇒ default Kimi).
-  const optsFor = (choice?: NodeModelChoice): LeafOpts => ({
+  // MULTI-MODEL: optsFor takes an OPTIONAL routing choice — nodeForwardOpts() spreads {model, modelConfig, thinkingTokenBudget} onto NodeOpts (absent ⇒ default Kimi).
+  const optsFor = (choice?: NodeModelChoice): NodeOpts => ({
     mem: new AxMemory(),
     sessionId,
     tracer,
@@ -158,7 +158,7 @@ type NodeWorkerOpts = {
   i: number
   task: string
   persona: string
-  optsFor: (choice?: NodeModelChoice) => LeafOpts
+  optsFor: (choice?: NodeModelChoice) => NodeOpts
   budget: Budget
   choice?: NodeModelChoice | undefined // MULTI-MODEL: routing choice; absent ⇒ default Kimi
 }
@@ -177,7 +177,7 @@ const nodeWorker = ({ ai, rootId, i, task, persona, optsFor, budget, choice }: N
   // GRACEFUL MAX-STEPS for a node: strip the node's tools on its last permitted step so it
   // returns its BEST reply (from work already done) instead of throwing — a node that exhausts
   // steps yields real output, never an error/empty branch. The marker renders on this node.
-  const opts: LeafOpts = { ...optsFor(choice), stepHooks: finalizeOnMaxSteps(BASE_TOOL_NAMES, onEvent, nodeId) }
+  const opts: NodeOpts = { ...optsFor(choice), stepHooks: finalizeOnMaxSteps(BASE_TOOL_NAMES, onEvent, nodeId) }
   return runNode(
     { nodeId, parentId: rootId, phase: `branch ${i + 1}: ${clip(task, 48)}`, gen, opts, onEvent, budget, usageOf: (g) => readUsageOf(g) },
     ai,
@@ -208,7 +208,7 @@ type OrchestrationOpts = {
   // model is told to PREFER distinct subtasks; same-task is the cheap default only.
   subtasks: string[]
   branches: number
-  optsFor: (choice?: NodeModelChoice) => LeafOpts
+  optsFor: (choice?: NodeModelChoice) => NodeOpts
   budget: Budget
   rootId: string
   choice?: NodeModelChoice | undefined // MULTI-MODEL: per-run routing for WORKER nodes (absent ⇒ Kimi)

@@ -18,7 +18,7 @@ import type { AxAIService, AxGen, AxGenIn, AxGenOut, AxLoggerData } from "@ax-ll
 import { AxMemory } from "@ax-llm/ax"
 import { type Activity, setActivitySink } from "../src/activity.ts"
 import { runNode } from "../src/orch-recipes.ts"
-import type { LeafOpts } from "../src/orch.ts"
+import type { NodeOpts } from "../src/orch.ts"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {
@@ -29,7 +29,7 @@ const assert = (cond: boolean, msg: string) => {
 }
 
 const fakeAi = {} as AxAIService
-const optsFor = (): LeafOpts =>
+const optsFor = (): NodeOpts =>
   ({
     mem: new AxMemory(),
     sessionId: "test",
@@ -38,7 +38,7 @@ const optsFor = (): LeafOpts =>
     maxSteps: 1,
     stream: false,
     abortSignal: new AbortController().signal,
-  }) as unknown as LeafOpts
+  }) as unknown as NodeOpts
 
 // A FAKE AxGen whose forward() drives the per-call logger (opts.logger) with ax's native step
 // feed: one ChatResponseResults carrying a tool call, then one FunctionResults carrying its
