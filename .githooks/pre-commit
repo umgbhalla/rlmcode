@@ -1,6 +1,13 @@
 #!/bin/sh
 # Static-analysis gate: tsc+Effect LS, gate tests, yuku design, debt.
-bun run lint || exit 1
+# design/debt run in --staged mode: they analyze the whole tree (cross-file
+# correctness) but only BLOCK on findings in files THIS commit staged, so a
+# concurrent agent's WIP can't fail an unrelated commit. `bun run lint` stays
+# whole-tree for CI / manual full sweeps.
+bun run check || exit 1
+bun run test || exit 1
+bun scripts/design-check.ts --staged || exit 1
+bun scripts/ponytail-debt.ts --staged || exit 1
 
 # Guard-preservation: src/tools.ts is the unsandboxed trust boundary (bash,
 # read/write/edit run real fs/shell). Block a commit that nets-out a guard

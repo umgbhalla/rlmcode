@@ -36,8 +36,17 @@ export const harvest = (path: string, text: string): DebtResult => {
 
 if (import.meta.main) {
   const BUDGET = Number(process.env.LOC_BUDGET ?? 0)
+  const staged = process.argv.includes("--staged")
   const SCAN_DIRS = ["src", "scripts"]
   const SCAN_FILES = ["smoke-emit.ts", "smoke-tools.ts", "build-viz.ts", "_turn_repro.ts"]
+
+  // As a pre-commit gate, only block on no-trigger markers in STAGED files, so
+  // one agent's WIP marker can't fail another's commit. Whole-tree otherwise.
+  let stage: Set<string> | null = null
+  if (staged) {
+    const r = Bun.spawnSync(["git", "diff", "--cached", "--name-only"])
+    stage = new Set(r.success ? r.stdout.toString().split("\n").map((s) => s.trim()).filter(Boolean) : [])
+  }
 
   const files: string[] = [...SCAN_FILES]
   // skip *.test.ts — their fixtures contain deliberate marker strings.
@@ -45,6 +54,7 @@ if (import.meta.main) {
 
   const markers: string[] = []
   let noTrigger = 0
+  let stagedNoTrigger = 0
   let loc = 0
   for (const path of files) {
     const r = harvest(
@@ -55,11 +65,13 @@ if (import.meta.main) {
     )
     markers.push(...r.markers)
     noTrigger += r.noTrigger
+    if (!stage || stage.has(path)) stagedNoTrigger += r.noTrigger
     loc += r.loc
   }
 
-  console.log(`ponytail-debt: ${markers.length} marker(s), ${noTrigger} with no trigger.`)
+  console.log(`ponytail-debt: ${markers.length} marker(s), ${noTrigger} with no trigger${stage ? ` (${stagedNoTrigger} in staged files)` : ""}.`)
   if (markers.length) console.log(markers.join("\n"))
   console.log(`loc: ${loc} code lines${BUDGET ? ` (budget ${BUDGET})` : ""}`)
-  process.exit(noTrigger > 0 || (BUDGET > 0 && loc > BUDGET) ? 1 : 0)
+  const blockingNoTrigger = stage ? stagedNoTrigger : noTrigger
+  process.exit(blockingNoTrigger > 0 || (BUDGET > 0 && loc > BUDGET) ? 1 : 0)
 }

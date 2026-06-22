@@ -174,19 +174,39 @@ export const unusedDeps = (imported: Set<string>, deps: string[], allow = RUNTIM
     .filter((d) => !imported.has(d) && !allow.has(d))
     .map((d) => ({ tag: "delete" as const, msg: `package.json: dependency "${d}" is never imported. Remove it.` }))
 
+// Files a finding refers to (multiple for cycles). Cross-file analysis needs the
+// WHOLE tree, but as a pre-commit gate we only BLOCK on findings in files the
+// committer actually staged — so one agent's WIP can't fail another's commit.
+export const findingFiles = (msg: string): string[] => msg.match(/(?:src|scripts)\/[^\s:→]+|package\.json/g) ?? []
+
+const stagedSet = (): Set<string> => {
+  const r = Bun.spawnSync(["git", "diff", "--cached", "--name-only"])
+  if (!r.success) return new Set()
+  return new Set(r.stdout.toString().split("\n").map((s) => s.trim()).filter(Boolean))
+}
+
 if (import.meta.main) {
+  const staged = process.argv.includes("--staged")
   const files: { path: string; source: string }[] = []
   for await (const p of new Bun.Glob("src/**/*.{ts,tsx}").scan(".")) files.push({ path: p, source: await Bun.file(p).text() })
   const a = buildAnalyzer(files)
   const pkg = await Bun.file("package.json").json()
   const out = [...analyze(a), ...unusedDeps(importedRoots(a), Object.keys(pkg.dependencies ?? {}))]
 
+  // In --staged mode, a finding blocks only if it touches a staged file.
+  const stage = staged ? stagedSet() : null
+  const blocks = (f: Finding) => !stage || findingFiles(f.msg).some((p) => stage.has(p))
+
   if (out.length === 0) {
     console.log("design-check: lean. ✓")
     process.exit(0)
   }
   const order = { delete: 0, native: 1, cycle: 2, shrink: 3, yagni: 4 }
-  for (const f of out.sort((x, y) => order[x.tag] - order[y.tag])) console.error(`  ${f.tag}: ${f.msg}`)
-  console.error(`\ndesign-check: ${out.length} finding(s).`)
-  process.exit(1)
+  const blocking = out.filter(blocks)
+  for (const f of out.sort((x, y) => order[x.tag] - order[y.tag])) {
+    const tag = stage && !blocks(f) ? `${f.tag}*` : f.tag // * = other file, not blocking this commit
+    console.error(`  ${tag}: ${f.msg}`)
+  }
+  console.error(`\ndesign-check: ${out.length} finding(s)${stage ? `, ${blocking.length} in staged files` : ""}.`)
+  process.exit(blocking.length > 0 ? 1 : 0)
 }
