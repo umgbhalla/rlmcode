@@ -79,7 +79,11 @@ function toTurns(messages: readonly Msg[]): Turn[] {
   for (const t of turns) {
     for (let i = t.steps.length - 1; i >= 0; i--) {
       const s = t.steps[i]!
-      if (s.kind === "agent") {
+      // SEQUENCE STABILITY: only the TRUE final reply (the one carrying meta, appended at
+      // turn end) is promoted out of the step stream. Streaming narration chunks are also
+      // kind:"agent" but carry NO meta — promoting the last of those mid-turn made the green
+      // "final" slot flicker and the rows reorder on every chunk. They stay as ordered steps.
+      if (s.kind === "agent" && s.meta) {
         t.final = s.text
         t.meta = s.meta
         t.steps = [...t.steps.slice(0, i), ...t.steps.slice(i + 1)]
@@ -388,6 +392,25 @@ const orchFocusables = (rows: readonly OrchRow[]): string[] => {
   return out
 }
 
+// Only worth showing the orchestration tree when there's real fan-out — more than one
+// node, or a node that owns tools. A plain turn emits a SINGLE childless, tool-less root
+// node that just mirrors the reply; rendering it repeats the thought and triples the token
+// count (turn meta + node badge + Σ) for nothing. (Trivial-orch redundancy.)
+const orchWorthShowing = (orch: OrchTree): boolean => {
+  const nodes = Object.values(orch.nodes)
+  return nodes.length > 1 || nodes.some((n) => (n.tools?.length ?? 0) > 0)
+}
+
+// Show the orch tree only on real fan-out (has roots + worth-showing). Narrows `orch`
+// so callers get a defined tree. Pulled out of App to keep its cyclomatic budget.
+const computeShowOrch = (orch: OrchTree | undefined): orch is OrchTree =>
+  orch !== undefined && orch.roots.length > 0 && orchWorthShowing(orch)
+
+// Wrap the focus cursor over the focusable-row ring (empty ring ⇒ none). Pure; extracted
+// from App so the cursor-wrap ternary doesn't count against App's complexity budget.
+const pickFocused = (keys: readonly string[], cursor: number): string | undefined =>
+  keys.length ? keys[((cursor % keys.length) + keys.length) % keys.length] : undefined
+
 // Σ footer summary: the live run total — COST-METER tokens (preserved from orch.totalTokens)
 // · node count · error count. Computed over the whole node map (not just visible rows) so a
 // collapsed subtree still counts toward the totals.
@@ -487,7 +510,11 @@ function App() {
   // immutable tree into ordered, connector-prefixed Rows (one per visible node) — all
   // tree geometry lives in the pure helper; the render is a flat list of <text> rows.
   const orch = active?.orch
-  const orchRows = useMemo(() => (orch ? flatten(orch, expNodes) : []), [orch, expNodes])
+  // Only surface the orch tree on real fan-out — a plain turn's single childless node is
+  // pure redundancy (repeats the reply + triples the token count). Gate BOTH the render and
+  // the focus ring on this so hidden node rows never join the Tab cycle.
+  const showOrch = computeShowOrch(orch)
+  const orchRows = useMemo(() => (showOrch && orch ? flatten(orch, expNodes) : []), [showOrch, orch, expNodes])
   const isExpanded = (t: Turn) => expTurns.has(t.idx) || t.final === null // in-progress auto-expands
 
   // STICKY SELF-RESTORING FOCUS (focus-sticky): opentui focus is a SINGLE imperative
@@ -529,7 +556,7 @@ function App() {
   // Orchestration node + tool rows join the Tab ring too (derived from the same flattened
   // rows). `node:<id>` collapses a node; `tool:<id>` (same key as transcript tools) drives a tool.
   focusables.push(...orchFocusables(orchRows))
-  const focusedKey = focusables.length ? focusables[((focus % focusables.length) + focusables.length) % focusables.length] : undefined
+  const focusedKey = pickFocused(focusables, focus)
   const toggleFocused = () => {
     if (!focusedKey) return
     const [kind, val] = [focusedKey.slice(0, focusedKey.indexOf(":")), focusedKey.slice(focusedKey.indexOf(":") + 1)]
@@ -627,7 +654,7 @@ function App() {
   }
 
   const onListKey = (k: any) => {
-    if (k.name === "q" || k.name === "escape") return process.exit(0)
+    if (k.name === "q" || k.name === "escape") return quit()
     if (k.name === "n") return void newSession()
     // d — close the highlighted session (aborts its turn + frees its sessionsRT entry).
     // Arm-then-confirm: a first `d` arms the highlighted row, a second `d` on the SAME
@@ -645,6 +672,21 @@ function App() {
       const target = state.sessions[state.cursor]
       if (target) setApp((s) => ({ ...s, view: "chat", activeId: target.id }))
     }
+  }
+
+  // Graceful quit: tear the renderer down (restores the main screen, disables mouse
+  // tracking + bracketed-paste mode) so the terminal isn't left spewing escape garbage —
+  // the "unicode pressed" mess. destroy() DEFERS the restore when it fires mid-render (our
+  // key handler does), so a bare process.exit() right after killed the process before the
+  // restore sequences flushed. Give the deferred teardown a tick to flush, then hard-exit
+  // as a fallback (OTel/appRuntime timers can otherwise keep the loop alive and hang quit).
+  const quit = () => {
+    try {
+      renderer.destroy()
+    } catch {
+      /* ignore — exit regardless */
+    }
+    setTimeout(() => process.exit(0), 50)
   }
 
   const goToList = () => {
@@ -676,7 +718,7 @@ function App() {
   }
 
   useKeyboard((k) => {
-    if (k.ctrl && k.name === "c") return process.exit(0)
+    if (k.ctrl && k.name === "c") return quit()
     return state.view === "list" ? onListKey(k) : onChatKey(k)
   })
 
@@ -716,7 +758,7 @@ function App() {
             onToggleTool={(id) => toggleTool(id)}
           />
         ))}
-        {orch && orch.roots.length > 0 && (
+        {showOrch && orch && (
           <box flexDirection="column" style={{ marginTop: 1, paddingLeft: 1 }}>
             <text fg="#7f849c">orchestration</text>
             {/* VELOCITY UNICODE TREE: one flat <text> per flattened Row, connectors
