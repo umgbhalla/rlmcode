@@ -8,7 +8,7 @@
 //               · PgUp/PgDn/Home/End scroll · click a ▸/▾ to expand
 //               · Esc back (idle) / Esc-twice interrupt (busy) · select to copy
 import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/atom-react"
-import { createCliRenderer, decodePasteBytes, SyntaxStyle } from "@opentui/core"
+import { createCliRenderer, decodePasteBytes, RenderableEvents, SyntaxStyle } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { abortTurn, projectDocLoaded } from "./agent.ts"
@@ -472,18 +472,34 @@ function App() {
   const childrenOf = useMemo(() => childrenIndex(orch), [orch])
   const isExpanded = (t: Turn) => expTurns.has(t.idx) || t.final === null // in-progress auto-expands
 
-  // Focus re-assertion: opentui focus is imperative and one-shot — the static
-  // `focused` prop on the textarea only fires focus() once (on mount), and any
-  // later click on a selectable=false row OR an orchestration re-render routes
-  // focus through focusRenderable(), which blur()s the textarea. Re-call focus()
-  // whenever the state that drives those re-renders changes; focus() early-returns
-  // if we still hold focus, so this is a cheap no-op in the common case. Keyed on
-  // busy (turn lifecycle), orch tree size (live fan-out rows mounting), the
-  // keyboard focus cursor + expansion sets (Tab/Enter row toggles), and view.
-  const orchNodeCount = orch ? Object.keys(orch.nodes).length : 0
+  // STICKY SELF-RESTORING FOCUS (focus-sticky): opentui focus is a SINGLE imperative
+  // focused-renderable. The composer textarea is the DEFAULT focus owner — but a click
+  // on a selectable=false transcript/orch row, a Tab/Enter row toggle, or an
+  // orchestration re-render routes focus through the renderer's focusRenderable(), which
+  // blur()s the textarea (it loses the highlight AND keystrokes). Renderable.focus()
+  // early-returns if already focused, and the static `focused` prop only fires once on
+  // mount, so a dep-keyed re-focus MISSES mouse-steal events. Instead we subscribe to the
+  // textarea's own BLURRED event and immediately re-claim focus: the composer always wins
+  // focus back the instant it's stolen. The Tab cycle is purely VISUAL (focusedKey drives
+  // a highlight; keystrokes are intercepted by useKeyboard at the renderer, not the
+  // textarea), so there is no "row focus mode" that should hold real focus — the composer
+  // is always the rightful owner here. Guarded to the chat view + a live, non-destroyed
+  // handle. focus() early-returns when we already hold it, so the initial focus + any
+  // re-render is a cheap no-op; only an actual steal triggers the re-claim.
   useEffect(() => {
-    if (state.view === "chat") taRef.current?.focus?.()
-  }, [state.view, busy, orchNodeCount, focus, expTurns, expTools, expNodes])
+    const ta = taRef.current
+    if (!ta || state.view !== "chat") return
+    ta.focus?.()
+    const reclaim = () => {
+      // Re-focus on the next tick: the steal (focusRenderable) is mid-flight when BLURRED
+      // fires, so deferring lets it settle, then we take focus back cleanly.
+      queueMicrotask(() => {
+        if (state.view === "chat") taRef.current?.focus?.()
+      })
+    }
+    ta.on?.(RenderableEvents.BLURRED, reclaim)
+    return () => ta.off?.(RenderableEvents.BLURRED, reclaim)
+  }, [state.view])
 
   // Expandable rows in transcript order = Tab focus ring (turn-steps header, then
   // its tool rows when that turn is expanded). Enter toggles the focused one.
