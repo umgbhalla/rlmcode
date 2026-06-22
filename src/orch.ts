@@ -4,8 +4,9 @@
 // NOT inside the combinators. agent()/judge/loopUntilDry/workflow() are userland
 // recipes (each <15 lines in these 5 prims), DELIBERATELY not reified here.
 import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxProgramForwardOptions, type AxMemory } from "@ax-llm/ax"
-import type { Context as OtelContext, Tracer } from "@opentelemetry/api"
+import { type Context as OtelContext, type Tracer, trace as otelTrace } from "@opentelemetry/api"
 import * as Effect from "effect/Effect"
+import { emitActivity, type Activity } from "./activity.ts"
 
 // The real forward() opts bag threaded by turn() (agent.ts). This is a STRUCTURAL
 // SUPERSET of AxProgramForwardOptions, NOT an alias: sessionId/tracer/traceContext
@@ -78,11 +79,42 @@ export async function* pipeline<T>(
   for await (const item of items as AsyncIterable<T>) yield* run(item, 0)
 }
 
-// 4. emit — STUB. Thin hook over the existing activity bus + OTel span annotation.
-// ponytail: no-op skeleton; the NodeEvent never reaches the bus or a span yet.
-// Ceiling: orchestration nodes are invisible in the TUI/traces. Upgrade: wire to
-// emitActivity + span annotation (emit-wire).
-export const emit = (_event: NodeEvent, _opts?: EmitOpts): Effect.Effect<void> => Effect.void
+// 4. emit — thin hook over the existing activity bus + the active OTel span. Maps
+// each NodeEvent variant to an Activity (pushed via emitActivity) AND annotates the
+// span in scope (addEvent + attributes). Stays Effect<void>: the session boundary
+// (turn() in agent.ts) runs it; the body is sync (bus push + span annotate).
+export const emit = (event: NodeEvent, _opts?: EmitOpts): Effect.Effect<void> =>
+  Effect.sync(() => {
+    // 1) activity bus — orchestration node lifecycle row (atoms sink handles it).
+    const activity: Activity =
+      event.type === "delta"
+        ? { kind: "node", nodeId: event.nodeId, event: "delta", detail: event.chunk }
+        : event.type === "done"
+          ? { kind: "node", nodeId: event.nodeId, event: "done", detail: clip(event.result) }
+          : event.type === "error"
+            ? { kind: "node", nodeId: event.nodeId, event: "error", detail: clip(event.cause) }
+            : { kind: "node", nodeId: event.nodeId, event: "start", detail: event.phase }
+    emitActivity(activity)
+
+    // 2) active OTel span — addEvent + structured attributes. getActiveSpan() returns
+    // a non-recording no-op span when there is none, so this is always safe.
+    const span = otelTrace.getActiveSpan()
+    if (span !== undefined) {
+      span.addEvent(`orch.node.${event.type}`, {
+        "orch.node.id": event.nodeId,
+        ...(event.type === "start" ? { "orch.node.parent_id": event.parentId ?? "", "orch.node.phase": event.phase } : {}),
+        ...(event.type === "delta" ? { "orch.node.chunk": event.chunk } : {}),
+        ...(event.type === "done" ? { "orch.node.result": clip(event.result) } : {}),
+        ...(event.type === "error" ? { "orch.node.cause": clip(event.cause) } : {}),
+      })
+    }
+  })
+
+// Stringify an unknown payload for a span attribute / activity detail, bounded.
+const clip = (v: unknown, max = 256): string => {
+  const s = typeof v === "string" ? v : (() => { try { return JSON.stringify(v) ?? String(v) } catch { return String(v) } })()
+  return s.length > max ? `${s.slice(0, max)}…` : s
+}
 
 // 5. allocate — STUB. Token gate. spent/remaining resolve to 0/total, freeze is a no-op.
 // ponytail: advisory-only skeleton; no real usage read, no enforcement.

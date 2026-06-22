@@ -110,6 +110,11 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
             m.map((x) => (x.kind === "tool" && x.id === a.id ? { ...x, status: a.isError ? "error" : "ok", result: a.result } : x)),
           )
           break
+        case "node":
+          // ponytail: orchestration node lifecycle is span-only for now; no TUI row.
+          // Ceiling: orch nodes are invisible in the transcript. Upgrade: render a
+          // collapsible node tree (parentId->nodeId) in chat.tsx (orch-tree).
+          break
       }
     })
 
