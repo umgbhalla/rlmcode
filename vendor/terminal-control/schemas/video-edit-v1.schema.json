@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kitlangton/terminal-control/schemas/video-edit-v1.schema.json",
+  "title": "Terminal Control video edit plan v1",
+  "description": "Selects named marker ranges from a .termctrl recording and stitches them into an annotated demo video.",
+  "type": "object",
+  "required": ["clips"],
+  "additionalProperties": false,
+  "properties": {
+    "clips": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/clip" }
+    }
+  },
+  "$defs": {
+    "clip": {
+      "type": "object",
+      "required": ["from", "to"],
+      "additionalProperties": false,
+      "properties": {
+        "from": { "type": "string", "minLength": 1 },
+        "to": { "type": "string", "minLength": 1 },
+        "caption": { "type": "string", "maxLength": 1000 },
+        "speed": { "type": "number", "exclusiveMinimum": 0 },
+        "hold_ms": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
