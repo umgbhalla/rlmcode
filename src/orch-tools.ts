@@ -35,9 +35,13 @@ import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 
-// Per-self-orchestration token ceiling. Distinct from the per-turn TOKEN_BUDGET: a
-// self-orch sub-run gets its OWN smaller cap so a tool call can't burn the whole turn.
-const ORCH_TOKEN_BUDGET = Number(process.env.AX2_ORCH_TOKEN_BUDGET ?? 40_000)
+// Per-self-orchestration token ceiling, SHARED across the sub-run's branches. A real
+// exploration leaf spends 70k–400k tokens, so a 4-branch fan-out needs ~2M of headroom;
+// the old 40k default killed every leaf instantly (BudgetExhaustedError). This is a
+// backstop against runaway loops, NOT a tight per-leaf budget.
+// ponytail: ONE shared ceiling across concurrent branches — a greedy branch can starve
+// the others. Upgrade: per-branch budgets (allocate per worker) so fan-out is fair.
+const ORCH_TOKEN_BUDGET = Number(process.env.AX2_ORCH_TOKEN_BUDGET ?? 2_000_000)
 
 // BRANCH cap — hard upper bound on parallel leaves, regardless of what the model asks.
 const MAX_BRANCHES = 4
@@ -95,12 +99,13 @@ type WorkerOpts = {
 }
 const worker = ({ ai, rootId, i, task, persona, optsFor, budget }: WorkerOpts): Promise<string> => {
   const nodeId = `${rootId}/branch-${i}`
-  onEvent({ type: "start", nodeId, parentId: rootId, phase: `branch ${i + 1}` })
+  // agent() emits the single start (with parentId+label) and the done/error — no
+  // double-emit here, which previously overwrote the "branch N" label with "agent".
   const gen = leafGen(
     `${persona} You are a capable coding agent with file/shell tools (bash, read_file, write_file, edit_file, glob, grep, web_fetch). Use them to do real work before answering. Reply concisely in GitHub-flavored markdown.`,
   )
   return agent(
-    { nodeId, gen, opts: optsFor(), onEvent, budget, usageOf: (g) => readUsageOf(g) },
+    { nodeId, parentId: rootId, phase: `branch ${i + 1}`, gen, opts: optsFor(), onEvent, budget, usageOf: (g) => readUsageOf(g) },
     ai,
     { message: task },
   ).then((o) => String((o as { reply?: string }).reply ?? ""))

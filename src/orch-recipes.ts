@@ -22,6 +22,7 @@ const noopSink: EmitSink = () => {}
 // charge that crosses `total` throws BudgetExhaustedError, surfacing as a node error.
 export type AgentNode<I extends AxGenIn, O extends AxGenOut> = {
   nodeId: string
+  parentId?: string
   gen: AxGen<I, O>
   opts: LeafOpts
   onEvent?: EmitSink
@@ -34,8 +35,8 @@ export const agent = async <I extends AxGenIn, O extends AxGenOut>(
   ai: AxAIService,
   input: I,
 ): Promise<O> => {
-  const { nodeId, gen, opts, onEvent = noopSink, phase = "agent", budget, usageOf } = node
-  onEvent({ type: "start", nodeId, phase })
+  const { nodeId, parentId, gen, opts, onEvent = noopSink, phase = "agent", budget, usageOf } = node
+  onEvent({ type: "start", nodeId, parentId, phase })
   try {
     const result = await leaf(gen, opts)(ai, input)
     if (budget !== undefined) budget.charge(usageOf?.(gen))
