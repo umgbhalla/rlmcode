@@ -217,39 +217,65 @@ await (async () => {
     assert(orderRaw.join(",") === "0,,2,,4,", `parallelLimit preserves input order + maps failures to null, got ${JSON.stringify(orderRaw)}`)
 
     // NEVER MORE THAN n IN FLIGHT: 20 thunks, limit 4 — a shared counter tracks concurrent
-    // executions; the peak must be <= 4. Each thunk yields (await a macrotask) so the pool
-    // is genuinely saturated before any completes.
+    // executions; the peak must be <= 4. DETERMINISTIC (no wall-clock): each thunk parks on a
+    // shared manual-resolve GATE promise instead of a timer, so the pool stays saturated until
+    // we choose to release it. A `saturated` promise resolves the instant in-flight reaches the
+    // expected peak — the test AWAITS that signal (real settling, not a sleep), asserts the
+    // peak, THEN opens the gate and awaits the results. No setTimeout: the peak is observed
+    // exactly when n thunks are parked.
     const N = 4
-    let inFlight = 0
-    let peak = 0
-    const slow = (i: number) => async (): Promise<number> => {
-      inFlight++
-      peak = Math.max(peak, inFlight)
-      await new Promise((r) => setTimeout(r, 5))
-      inFlight--
-      return i
+    {
+      let inFlight = 0
+      let peak = 0
+      let openGate!: () => void
+      const gate = new Promise<void>((r) => (openGate = r))
+      let signalSaturated!: () => void
+      const saturated = new Promise<void>((r) => (signalSaturated = r))
+      const slow = (i: number) => async (): Promise<number> => {
+        inFlight++
+        peak = Math.max(peak, inFlight)
+        if (inFlight >= N) signalSaturated() // pool full → unblock the assertion
+        await gate
+        inFlight--
+        return i
+      }
+      const resP = parallelLimit<number>(Array.from({ length: 20 }, (_, i) => slow(i)), N)
+      await saturated // deterministic: n thunks are now parked on the gate
+      assert(peak <= N, `parallelLimit never runs more than n=${N} in flight, peak was ${peak}`)
+      assert(peak === N, `parallelLimit saturates the pool to n=${N} (peak ${peak}) — proves it QUEUES the rest`)
+      openGate() // release every parked thunk; remaining slots drain through the pool
+      const res = await resP
+      assert(res.join(",") === Array.from({ length: 20 }, (_, i) => i).join(","), `parallelLimit returns all 20 in input order, got ${JSON.stringify(res)}`)
     }
-    const res = await parallelLimit<number>(Array.from({ length: 20 }, (_, i) => slow(i)), N)
-    assert(peak <= N, `parallelLimit never runs more than n=${N} in flight, peak was ${peak}`)
-    assert(peak === N, `parallelLimit saturates the pool to n=${N} (peak ${peak}) — proves it QUEUES the rest`)
-    assert(res.join(",") === Array.from({ length: 20 }, (_, i) => i).join(","), `parallelLimit returns all 20 in input order, got ${JSON.stringify(res)}`)
 
     // CLAMP: an out-of-range n is clamped to 1..MAX_CONCURRENCY. n=1000 → still serializes
-    // at <= MAX_CONCURRENCY; n=0/NaN falls back to the default. We only assert it does not
-    // exceed the input length and preserves order (the clamp itself is exercised by peak<=n).
-    let highPeak = 0
-    let highInFlight = 0
-    const tracked = (i: number) => async (): Promise<number> => {
-      highInFlight++
-      highPeak = Math.max(highPeak, highInFlight)
-      await new Promise((r) => setTimeout(r, 1))
-      highInFlight--
-      return i
+    // at <= MAX_CONCURRENCY; n=0/NaN falls back to the default. Same DETERMINISTIC gate: 10
+    // thunks all park, so the observed peak is the clamped pool width (bounded by the 10-thunk
+    // count here). We await saturation (peak reaches min(10, clamp)), assert, then release.
+    {
+      let highInFlight = 0
+      let highPeak = 0
+      const expectedPeak = Math.min(10, MAX_CONCURRENCY)
+      let openGate!: () => void
+      const gate = new Promise<void>((r) => (openGate = r))
+      let signalSaturated!: () => void
+      const saturated = new Promise<void>((r) => (signalSaturated = r))
+      const tracked = (i: number) => async (): Promise<number> => {
+        highInFlight++
+        highPeak = Math.max(highPeak, highInFlight)
+        if (highInFlight >= expectedPeak) signalSaturated()
+        await gate
+        highInFlight--
+        return i
+      }
+      const clampedP = parallelLimit<number>(Array.from({ length: 10 }, (_, i) => tracked(i)), 1000)
+      await saturated
+      assert(highPeak <= MAX_CONCURRENCY, `parallelLimit clamps n to <= MAX_CONCURRENCY (${MAX_CONCURRENCY}), peak ${highPeak}`)
+      assert(highPeak <= 10, `with 10 thunks the peak is bounded by the thunk count, got ${highPeak}`)
+      openGate()
+      const clamped = await clampedP
+      assert(clamped.join(",") === Array.from({ length: 10 }, (_, i) => i).join(","), "parallelLimit (clamped n) preserves order")
     }
-    const clamped = await parallelLimit<number>(Array.from({ length: 10 }, (_, i) => tracked(i)), 1000)
-    assert(highPeak <= MAX_CONCURRENCY, `parallelLimit clamps n to <= MAX_CONCURRENCY (${MAX_CONCURRENCY}), peak ${highPeak}`)
-    assert(highPeak <= 10, `with 10 thunks the peak is bounded by the thunk count, got ${highPeak}`)
-    assert(clamped.join(",") === Array.from({ length: 10 }, (_, i) => i).join(","), "parallelLimit (clamped n) preserves order")
 
     // n<=0 / non-finite falls back to the default (>=1) and still completes every slot in order.
     const fallback = await parallelLimit<number>(Array.from({ length: 5 }, (_, i) => () => Promise.resolve(i)), 0)

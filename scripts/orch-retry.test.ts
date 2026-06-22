@@ -120,7 +120,7 @@ await (async () => {
     let nodeAborted = false
     let threw: unknown
     try {
-      await withTimeout("hang", 20, new AbortController().signal, (signal) => {
+      await withTimeout("hang", 50, new AbortController().signal, (signal) => {
         signal.addEventListener("abort", () => (nodeAborted = true))
         return new Promise<never>(() => {}) // never resolves — a hang.
       })
@@ -135,15 +135,24 @@ await (async () => {
   {
     const parent = new AbortController()
     let nodeAborted = false
+    // DETERMINISTIC settling (no wall-clock): the run() never resolves and the deadline is 10s,
+    // so the race promise won't settle on abort — the actual abort-propagation signal is the
+    // FORKED signal's abort event firing. We resolve `aborted` from inside that listener and
+    // await it, so the assertion runs exactly when the abort has threaded through (parent →
+    // forked controller → forward's signal), not after a fixed sleep.
+    let signalAborted!: () => void
+    const aborted = new Promise<void>((r) => (signalAborted = r))
     const p = withTimeout("cancel", 10_000, parent.signal, (signal) => {
-      signal.addEventListener("abort", () => (nodeAborted = true))
+      signal.addEventListener("abort", () => {
+        nodeAborted = true
+        signalAborted()
+      })
       return new Promise<never>(() => {})
     }).catch(() => "caught")
     parent.abort()
-    await Promise.resolve()
-    await new Promise((r) => setTimeout(r, 5))
+    await aborted
     assert(nodeAborted === true, "cancelling the parent (turn) signal aborts the in-flight node")
-    await p
+    void p // the race stays pending (10s deadline); we don't await it — the abort is what we test
   }
 
   // 4) a HANG in a FAN-OUT never stalls the whole fan-out: parallelLimit maps the timed-out
@@ -162,7 +171,7 @@ await (async () => {
     // with a tiny deadline inside the thunk, mirroring what resilientNode does internally.
     const results = await parallelLimit<{ reply: string }>(
       [
-        () => withTimeout("hang-node", 20, okOpts.abortSignal, (s) => hangGen.forward(fakeAi, { message: "q" }, { ...okOpts, abortSignal: s })),
+        () => withTimeout("hang-node", 50, okOpts.abortSignal, (s) => hangGen.forward(fakeAi, { message: "q" }, { ...okOpts, abortSignal: s })),
         () => runNode({ nodeId: "ok-node", gen: fastGen, opts: okOpts, onEvent: sink }, fakeAi, { message: "q" }),
       ],
       2,
