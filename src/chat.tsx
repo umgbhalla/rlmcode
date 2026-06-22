@@ -630,16 +630,22 @@ function App() {
   }
 
   const submit = () => {
-    let v = taRef.current?.plainText ?? text
-    for (const p of pastesRef.current) v = v.split(p.ph).join(p.text)
-    pastesRef.current = []
-    const t = v.trim()
-    setInput("")
-    setHistIdx(null)
-    draftRef.current = ""
-    if (t.length === 0) return
-    history.push(t)
-    send(t)
+    // IME DEFER (P0): under CJK composition the Enter that submits can fire BEFORE the textarea
+    // commits the last composed char into plainText — reading synchronously drops or doubles it.
+    // Double-defer the read (two microtasks) so the composition commit flushes first, then submit.
+    const run = () => {
+      let v = taRef.current?.plainText ?? text
+      for (const p of pastesRef.current) v = v.split(p.ph).join(p.text)
+      pastesRef.current = []
+      const t = v.trim()
+      setInput("")
+      setHistIdx(null)
+      draftRef.current = ""
+      if (t.length === 0) return
+      history.push(t)
+      send(t)
+    }
+    queueMicrotask(() => queueMicrotask(run))
   }
 
   const onPaste = (event: any) => {
