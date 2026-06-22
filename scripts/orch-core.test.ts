@@ -7,7 +7,7 @@
 // asserts the NodeEvent stream and result shapes. This is the first exercise of the
 // orchestration engine off-LLM: it pins the verify-before-accept flow's contract.
 import type { AxAIService, AxGen } from "@ax-llm/ax"
-import { adversarialVerify, type EmitSink, MAX_CONCURRENCY, parallelLimit, runNode, structuredPipeline } from "../src/orch-recipes.ts"
+import { adversarialVerify, type EmitSink, MAX_CONCURRENCY, parallelLimit, runNode, structuredPipeline, untilGate, verifiedStep, verifyHarden } from "../src/orch-recipes.ts"
 import { allocate, BudgetExhaustedError, type LeafOpts, type NodeEvent, parallel, pipeline } from "../src/orch.ts"
 
 let failed = 0
@@ -349,6 +349,115 @@ await (async () => {
     }
     assert(threw, "structuredPipeline rethrows a stage failure")
     assert(events.some((e) => e.type === "error"), "structuredPipeline emits an error event on stage failure")
+  }
+
+  // 11) untilGate(): retries produce() until gate passes — feeds the failure back.
+  {
+    // produce returns the attempt count; gate passes at >=3. We assert it loops to 3,
+    // that produce SAW the prior (failed) result on each retry, and reports passed=true.
+    let calls = 0
+    const seen: Array<number | undefined> = []
+    const gated = await untilGate<number>(
+      (prev) => {
+        seen.push(prev)
+        return Promise.resolve(++calls)
+      },
+      (r) => r >= 3,
+      8,
+    )
+    assert(gated.passed === true, "untilGate reports passed once the gate is satisfied")
+    assert(gated.result === 3, `untilGate returns the passing result, got ${gated.result}`)
+    assert(calls === 3, `untilGate stops calling produce once the gate passes, got ${calls} calls`)
+    assert(seen[0] === undefined, "untilGate's first produce gets no prior failure (undefined)")
+    assert(seen[1] === 1 && seen[2] === 2, `untilGate feeds the prior FAILED result back, saw ${JSON.stringify(seen)}`)
+
+    // STOPS AT max: gate never passes → exactly `max` attempts, passed=false, best-so-far returned.
+    let n = 0
+    const capped = await untilGate<number>(() => Promise.resolve(++n), () => false, 4)
+    assert(capped.passed === false, "untilGate reports passed=false when the gate never satisfies")
+    assert(n === 4, `untilGate stops at max attempts, got ${n}`)
+    assert(capped.result === 4, `untilGate returns the LAST (best-so-far) result, got ${capped.result}`)
+
+    // async gate is awaited; max clamps to >=1 (a single attempt always runs).
+    let m = 0
+    const single = await untilGate<number>(() => Promise.resolve(++m), () => Promise.resolve(false), 0)
+    assert(m === 1, `untilGate clamps max to >=1 (one attempt always runs), got ${m}`)
+    assert(single.passed === false && single.result === 1, "untilGate (clamped) returns the single attempt")
+  }
+
+  // 12) verifyHarden(): re-verifies after fix() until accepted or max rounds.
+  {
+    // value is a number; skeptics accept once it is >= 10. fix() bumps it by 5 each round.
+    // start 1 → verify (reject) → fix 6 → verify (reject) → fix 11 → verify (accept) at round 3.
+    const skeptic = (x: number): Promise<boolean> => Promise.resolve(x >= 10)
+    let fixCalls = 0
+    const sawVotes: Array<ReadonlyArray<boolean>> = []
+    const hardened = await verifyHarden<number>(
+      1,
+      [skeptic, skeptic],
+      (v, votes) => {
+        fixCalls++
+        sawVotes.push(votes)
+        return Promise.resolve(v + 5)
+      },
+      8,
+    )
+    assert(hardened.accepted === true, "verifyHarden accepts once skeptics pass")
+    assert(hardened.value === 11, `verifyHarden returns the repaired accepted value, got ${hardened.value}`)
+    assert(fixCalls === 2, `verifyHarden fixes only until accepted, got ${fixCalls} fix rounds`)
+    assert(sawVotes[0]?.length === 2 && sawVotes[0]?.every((v) => v === false) === true, "verifyHarden passes the skeptics' votes to fix()")
+
+    // STOPS AT max: never accepted → exactly `max` verifies, accepted=false, best-so-far value.
+    let fixes = 0
+    const stuck = await verifyHarden<number>(
+      0,
+      [() => Promise.resolve(false)],
+      (v) => {
+        fixes++
+        return Promise.resolve(v + 1)
+      },
+      2,
+    )
+    assert(stuck.accepted === false, "verifyHarden reports accepted=false when never accepted")
+    assert(fixes === 1, `verifyHarden runs at most max-1 fix rounds (max=2 → 1 fix), got ${fixes}`)
+    assert(stuck.value === 1, `verifyHarden returns the last repaired value, got ${stuck.value}`)
+
+    // max=1 is verify-only (no fix round).
+    let f2 = 0
+    const verifyOnly = await verifyHarden<number>(0, [() => Promise.resolve(false)], (v) => { f2++; return Promise.resolve(v) }, 1)
+    assert(f2 === 0 && verifyOnly.accepted === false, "verifyHarden max=1 is verify-only (no fix)")
+  }
+
+  // 13) verifiedStep(): untilGate then verifyHarden, BUDGET-BOUNDED (never infinite).
+  {
+    // Happy path: gate passes on first produce, skeptics accept → accepted, no budget stop.
+    const ok = await verifiedStep<string>({
+      produce: () => Promise.resolve("answer"),
+      gate: (r) => r.length > 0,
+      skeptics: [() => Promise.resolve(true), () => Promise.resolve(true)],
+      fix: (v) => Promise.resolve(v),
+    })
+    assert(ok.passedGate === true && ok.accepted === true, "verifiedStep accepts when gate passes + skeptics agree")
+    assert(ok.stoppedOnBudget === false, "verifiedStep does not stop on budget when under soft")
+    assert(ok.value === "answer", `verifiedStep returns the verified value, got ${ok.value}`)
+
+    // BUDGET STOP: a budget already over its soft ceiling short-circuits BEFORE the harden
+    // phase — best-so-far (the gated result) is returned, skeptics/fix never run, never
+    // infinite. We charge the budget over soft up front, then assert no skeptic was called.
+    const budget = allocate(10)
+    budget.charge({ totalTokens: 20 }) // 20 > soft 10 → overSoft() true
+    let skepticRan = false
+    const stopped = await verifiedStep<string>({
+      produce: () => Promise.resolve("draft"),
+      gate: () => true,
+      skeptics: [() => { skepticRan = true; return Promise.resolve(false) }],
+      fix: (v) => Promise.resolve(v),
+      budget,
+    })
+    assert(stopped.stoppedOnBudget === true, "verifiedStep stops on budget when over soft")
+    assert(stopped.accepted === false, "verifiedStep returns unaccepted best-so-far on budget stop")
+    assert(stopped.value === "draft", `verifiedStep returns the gated best-so-far, got ${stopped.value}`)
+    assert(skepticRan === false, "verifiedStep does NOT run skeptics once over the soft budget (never infinite)")
   }
 })()
 

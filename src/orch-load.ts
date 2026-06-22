@@ -24,7 +24,7 @@ import * as Effect from "effect/Effect"
 import type { AnySpan } from "effect/Tracer"
 import { ax, type AxAIService, AxMemory, type AxGen } from "@ax-llm/ax"
 import { limits, llm, MODEL, onEvent, readUsageOf } from "./runtime.ts"
-import { adversarialVerify, judge, loopUntilDry, runNode, structuredPipeline, type AgentNode, type EmitSink, type PipelineStage } from "./orch-recipes.ts"
+import { adversarialVerify, judge, loopUntilDry, runNode, structuredPipeline, untilGate, verifiedStep, verifyHarden, type AgentNode, type EmitSink, type PipelineStage } from "./orch-recipes.ts"
 import {
   allocate,
   type Budget,
@@ -64,6 +64,10 @@ export type OrchPrims = {
   readonly adversarialVerify: typeof adversarialVerify
   // structuredPipeline — thread TYPED structured stage outputs through pipeline().
   readonly structuredPipeline: typeof structuredPipeline
+  // verified-step recipes: gate-loop, adversarial harden, and the composed verifiedStep.
+  readonly untilGate: typeof untilGate
+  readonly verifyHarden: typeof verifyHarden
+  readonly verifiedStep: typeof verifiedStep
 }
 
 // The run context handed to a loaded script's orchestrate(ctx, prims). Mirrors the
@@ -147,6 +151,9 @@ export const orchPrims = (): OrchPrims => ({
   loopUntilDry,
   adversarialVerify,
   structuredPipeline,
+  untilGate,
+  verifyHarden,
+  verifiedStep,
 })
 
 // Promise-native trusted-script core: resolve INSIDE the trusted root (path-escape

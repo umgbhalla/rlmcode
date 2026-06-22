@@ -235,6 +235,90 @@ export const adversarialVerify = async <T>(
   return { value, accepted: accept(votes), votes }
 }
 
+// untilGate — VERIFIED-STEP loop part 1: run produce(), evaluate gate(result); if the
+// gate fails, re-run produce() WITH the prior failure fed back (produce takes the prior
+// result|undefined so it can self-correct), and repeat until the gate passes or `max`
+// attempts are spent. Returns the LAST result + whether the gate ultimately passed, so a
+// caller can surface a best-so-far on failure rather than throwing. The gate is a
+// predicate or an async check (e.g. "tests pass" / "non-empty"); we await it either way.
+// Pure Promise plumbing — composes NOTHING but produce()/gate() the caller supplies (the
+// real node work lives inside produce). NOT a core prim. `max` clamps to >=1 (a single
+// attempt always runs). prev starts undefined (no prior failure on the first attempt).
+export const untilGate = async <T>(
+  produce: (prevFailure: T | undefined) => Promise<T>,
+  gate: (result: T) => boolean | Promise<boolean>,
+  max = 4,
+): Promise<{ result: T; passed: boolean }> => {
+  const limit = Number.isFinite(max) ? Math.max(1, Math.floor(max)) : 4
+  let result = await produce(undefined)
+  let passed = await gate(result)
+  for (let i = 1; i < limit && !passed; i++) {
+    // feed the FAILED result back so produce() can correct it on the retry.
+    result = await produce(result)
+    passed = await gate(result)
+  }
+  return { result, passed }
+}
+
+// verifyHarden — VERIFIED-STEP loop part 2: adversarialVerify(value, skeptics); while the
+// verdict is NOT accepted and we are under `max` rounds, call fix(value, votes) to repair
+// the value (the skeptics' votes inform the fix) and re-verify the repaired value. Returns
+// the last value + its acceptance + the last votes. `accept` is threaded to
+// adversarialVerify (default majority). Composes ONLY adversarialVerify (itself a recipe
+// over parallelLimit) + the caller's fix() — no core prim added. `max` clamps to >=1 (one
+// verify always runs; max=1 means verify-only, no fix round).
+export const verifyHarden = async <T>(
+  value: T,
+  skeptics: ReadonlyArray<(x: T) => Promise<boolean>>,
+  fix: (value: T, votes: ReadonlyArray<boolean>) => Promise<T>,
+  max = 2,
+  accept?: (votes: ReadonlyArray<boolean>) => boolean,
+): Promise<{ value: T; accepted: boolean; votes: ReadonlyArray<boolean> }> => {
+  const limit = Number.isFinite(max) ? Math.max(1, Math.floor(max)) : 2
+  let verdict = await adversarialVerify(async () => value, skeptics, accept)
+  for (let i = 1; i < limit && !verdict.accepted; i++) {
+    const repaired = await fix(verdict.value, verdict.votes)
+    verdict = await adversarialVerify(async () => repaired, skeptics, accept)
+  }
+  return verdict
+}
+
+// verifiedStep — THE verified-step recipe: untilGate(produce, gate) to get a result that
+// passes the cheap gate (tests/non-empty), THEN verifyHarden(result, skeptics, fix) to
+// adversarially harden it. BUDGET-BOUNDED: before each expensive phase we check the SOFT
+// budget (allocate()'s advisory ceiling) — once we are over soft we STOP looping and return
+// the BEST-SO-FAR rather than spending more. This is the never-infinite guarantee: the loop
+// counts in untilGate/verifyHarden are the hard caps; the budget is the soft early-out. The
+// budget is ADVISORY (charging happens inside the nodes produce/skeptics/fix run); verifiedStep
+// only READS overSoft() to decide whether to keep going. Composed ENTIRELY from untilGate +
+// verifyHarden (which sit on adversarialVerify → parallelLimit) — NO 6th core prim.
+export const verifiedStep = async <T>(spec: {
+  produce: (prevFailure: T | undefined) => Promise<T>
+  gate: (result: T) => boolean | Promise<boolean>
+  skeptics: ReadonlyArray<(x: T) => Promise<boolean>>
+  fix: (value: T, votes: ReadonlyArray<boolean>) => Promise<T>
+  budget?: Budget
+  gateMax?: number
+  hardenMax?: number
+  accept?: (votes: ReadonlyArray<boolean>) => boolean
+}): Promise<{ value: T; passedGate: boolean; accepted: boolean; votes: ReadonlyArray<boolean>; stoppedOnBudget: boolean }> => {
+  const { produce, gate, skeptics, fix, budget, gateMax = 4, hardenMax = 2, accept } = spec
+  const overSoft = () => budget !== undefined && budget.overSoft()
+  // Phase 1: gate loop (at least one produce always runs — the step must yield SOMETHING).
+  const gated = await untilGate(produce, gate, gateMax)
+  // Budget early-out BEFORE the expensive harden phase: if we are already over the soft
+  // ceiling, return best-so-far (the gated result) WITHOUT spending skeptic/fix tokens.
+  if (overSoft()) {
+    return { value: gated.result, passedGate: gated.passed, accepted: false, votes: [], stoppedOnBudget: true }
+  }
+  // Phase 2: harden. If over soft AFTER the first verify, verifyHarden's own budget check
+  // (the hardenMax cap) already bounds it; we additionally short-circuit the fix rounds by
+  // passing hardenMax=1 when over soft so no further fix tokens are spent.
+  const hardenRounds = overSoft() ? 1 : hardenMax
+  const verdict = await verifyHarden(gated.result, skeptics, fix, hardenRounds, accept)
+  return { value: verdict.value, passedGate: gated.passed, accepted: verdict.accepted, votes: verdict.votes, stoppedOnBudget: overSoft() }
+}
+
 // structuredPipeline — FIRST-CLASS typed structured pipeline. Each stage is a node:
 // a gen typed by its OWN signature (e.g. `text:string -> facts:json` then
 // `facts:json -> summary:string`) plus its LeafOpts. The recipe threads the TYPED
