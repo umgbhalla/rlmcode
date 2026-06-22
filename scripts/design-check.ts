@@ -14,7 +14,10 @@ import { Analyzer, SymbolFlags } from "yuku-analyzer"
 
 export type Finding = { tag: "delete" | "native" | "cycle" | "shrink" | "yagni"; msg: string }
 
-const ENTRY = new Set(["src/chat.tsx"]) // exports here are reachability roots
+// Reachability roots: their exports are public API / entrypoints, not dead.
+// chat.tsx = app entry; orch.ts = the orchestration-core library surface (5
+// primitives consumed by userland recipes, not by src).
+const ENTRY = new Set(["src/chat.tsx", "src/orch.ts"])
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
 const NEST_BUDGET = 5 // block nesting depth per function
 const PARAM_BUDGET = 6 // parameters per function
