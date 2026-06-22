@@ -15,6 +15,7 @@ import { abortTurn, projectDocLoaded } from "./agent.ts"
 import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
+import { theme } from "./theme.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
 import { flatten, type Row as OrchRow } from "./tui/orch-tree.ts"
 
@@ -64,10 +65,10 @@ type Work = { frame: string; elapsed: number }
 // busy branch carries the LIVE spinner + elapsed so liveness survives even while typing a
 // follow-up (the composer placeholder is replaced by the draft the moment you type).
 const statusBar = (busy: boolean, armed: boolean, note: string | null, work: Work): { right: string; tone: string } => {
-  if (armed) return { right: "esc again to interrupt", tone: "#f38ba8" }
-  if (note) return { right: note, tone: "#a6e3a1" } // transient (copied / paste collapsed) wins so it's never swallowed mid-turn
-  if (busy) return { right: `${work.frame} thinking… ${work.elapsed}s · esc interrupt`, tone: "#ffd166" }
-  return { right: IDLE_HINT, tone: "#7f849c" }
+  if (armed) return { right: "esc again to interrupt", tone: theme.error }
+  if (note) return { right: note, tone: theme.ok } // transient (copied / paste collapsed) wins so it's never swallowed mid-turn
+  if (busy) return { right: `${work.frame} thinking… ${work.elapsed}s · esc interrupt`, tone: theme.busy }
+  return { right: IDLE_HINT, tone: theme.muted }
 }
 
 function toTurns(messages: readonly Msg[]): Turn[] {
@@ -149,15 +150,15 @@ function useWorking(busy: boolean): { frame: string; elapsed: number } {
 }
 
 const statusColor = (status: ToolMsg["status"]) =>
-  status === "error" ? "#f38ba8" : status === "ok" ? "#a6e3a1" : "#7f849c"
-const previewColor = (tone: PreviewLine["tone"]) => (tone === "add" ? "#a6e3a1" : tone === "del" ? "#f38ba8" : "#6c7086")
+  status === "error" ? theme.error : status === "ok" ? theme.ok : theme.muted
+const previewColor = (tone: PreviewLine["tone"]) => (tone === "add" ? theme.ok : tone === "del" ? theme.error : theme.dim)
 const previewSign = (tone: PreviewLine["tone"]) => (tone === "add" ? "+" : tone === "del" ? "-" : "│")
 
 // Keyboard-focus gutter: a leading "❯ " ONLY when this row is the Tab-ring focus (never
 // on mere hover), so keyboard focus is visually distinct from a mouse-over. Two cells
 // wide so focused/unfocused rows stay column-aligned.
 const FocusGutter = ({ focused }: { focused: boolean }) =>
-  focused ? <span fg="#f9e2af">{"❯ "}</span> : <span fg="#585b70">{"  "}</span>
+  focused ? <span fg={theme.focus}>{"❯ "}</span> : <span fg={theme.faint}>{"  "}</span>
 
 // Clickable header row: brightens on hover when the row has a drill-down body. A running
 // tool shows the live spinner frame + elapsed seconds (a 60s bash is no longer byte-
@@ -179,10 +180,10 @@ function ToolHeader({ m, expanded, hasBody, focused, frame, onToggle }: { m: Too
       onMouseOut={(() => setHover(false)) as any}
     >
       <FocusGutter focused={focused} />
-      <span fg={hot ? "#ffffff" : color}>{`${mark} `}</span>
-      <span fg={hot ? "#ffffff" : "#cdd6f4"}>{toolLabel(m.name, m.args)}</span>
-      <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${summary}`}</span>
-      {hasBody ? <span fg={hot ? "#cdd6f4" : "#7f849c"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
+      <span fg={hot ? theme.white : color}>{`${mark} `}</span>
+      <span fg={hot ? theme.white : theme.text}>{toolLabel(m.name, m.args)}</span>
+      <span fg={hot ? theme.subtext : theme.faint}>{`  ${summary}`}</span>
+      {hasBody ? <span fg={hot ? theme.text : theme.muted}>{expanded ? "  ▾" : "  ▸"}</span> : null}
     </text>
   )
 }
@@ -213,7 +214,7 @@ function ToolView({ m, expanded, focused, cols, frame, onToggle }: { m: ToolMsg;
   // failure is unmissable. Two concrete boxes — a conditional-undefined `border` prop trips
   // exactOptionalPropertyTypes, and `as const` makes the array readonly (BorderSides[] is mutable).
   return isError ? (
-    <box flexDirection="column" border={["left"]} borderColor="#f38ba8" style={{ marginTop: open ? 1 : 0, paddingLeft: 1 }}>
+    <box flexDirection="column" border={["left"]} borderColor={theme.error} style={{ marginTop: open ? 1 : 0, paddingLeft: 1 }}>
       {body}
     </box>
   ) : (
@@ -251,13 +252,13 @@ function TurnView({
   const failed = t.final !== null && t.final.startsWith("⚠")
   return (
     <box flexDirection="column" style={{ marginTop: first ? 0 : 1 }}>
-      <box border={["left"]} borderColor="#45475a" style={{ paddingLeft: 1, width: "100%" }}>
-        <text fg="#66aaff">{t.user}</text>
+      <box border={["left"]} borderColor={theme.border} style={{ paddingLeft: 1, width: "100%" }}>
+        <text fg={theme.accent}>{t.user}</text>
       </box>
       {t.steps.length > 0 && (
         <box flexDirection="column" style={{ paddingLeft: INDENT }}>
           <text
-            fg={hoverSteps || stepsFocused ? "#cdd6f4" : "#7f849c"}
+            fg={hoverSteps || stepsFocused ? theme.text : theme.muted}
             selectable={false}
             onMouseDown={onToggleTurn as any}
             onMouseOver={(() => setHoverSteps(true)) as any}
@@ -270,7 +271,7 @@ function TurnView({
           {expanded && (
             <box flexDirection="column" style={{ paddingLeft: INDENT }}>
               {groupSteps(t.steps).map((it, i) => {
-                if (it.kind === "group") return <text key={`g${i}`} fg="#6c7086">{`⊙ ${groupSummary(it.tools)}`}</text>
+                if (it.kind === "group") return <text key={`g${i}`} fg={theme.dim}>{`⊙ ${groupSummary(it.tools)}`}</text>
                 const s = it.m
                 if (s.kind === "tool")
                   return (
@@ -284,7 +285,7 @@ function TurnView({
                       onToggle={() => onToggleTool(s.id)}
                     />
                   )
-                return <text key={i} fg="#9399b2">{`· ${oneLine(s.text)}`}</text>
+                return <text key={i} fg={theme.subtext}>{`· ${oneLine(s.text)}`}</text>
               })}
             </box>
           )}
@@ -303,7 +304,7 @@ function ThinkingView({ t }: { t: Turn }) {
   if (t.thinking === undefined || t.thinking.length === 0) return null
   return (
     <box flexDirection="column" style={{ marginTop: 1, paddingLeft: INDENT }}>
-      <text fg="#585b70" attributes={TextAttributes.ITALIC}>{t.thinking}</text>
+      <text fg={theme.faint} attributes={TextAttributes.ITALIC}>{t.thinking}</text>
     </box>
   )
 }
@@ -316,14 +317,14 @@ function ReplyView({ t, failed }: { t: Turn; failed: boolean }) {
   return (
     <box flexDirection="column" style={{ marginTop: 1 }}>
       <box flexDirection="row" style={{ width: "100%" }}>
-        <text fg={failed ? "#f38ba8" : "#a6e3a1"}>{"⏺ "}</text>
+        <text fg={failed ? theme.error : theme.ok}>{"⏺ "}</text>
         <box style={{ flexGrow: 1, flexShrink: 1 }}>
-          {failed ? <text fg="#f38ba8">{t.final}</text> : t.streaming ? <text fg="#cdd6f4">{`${t.final}█`}</text> : <markdown content={t.final} syntaxStyle={mdStyle} />}
+          {failed ? <text fg={theme.error}>{t.final}</text> : t.streaming ? <text fg={theme.text}>{`${t.final}█`}</text> : <markdown content={t.final} syntaxStyle={mdStyle} />}
         </box>
       </box>
       {t.meta && (
         <box style={{ paddingLeft: INDENT }}>
-          <text fg={t.meta.budget ? "#ffd166" : "#7f849c"}>{fmtMeta(t.meta)}</text>
+          <text fg={t.meta.budget ? theme.busy : theme.muted}>{fmtMeta(t.meta)}</text>
         </box>
       )}
     </box>
@@ -346,7 +347,7 @@ const ORCH_MAX_SHOWN = Number(process.env.AX2_ORCH_MAX_SHOWN ?? 8)
 // unsettled / untracked node.
 function NodeTokens({ tokens, hot }: { tokens: number | undefined; hot: boolean }) {
   if (typeof tokens !== "number" || tokens <= 0) return null
-  return <span fg={hot ? "#7f849c" : "#585b70"}>{`  ${fmtTokens(tokens)}`}</span>
+  return <span fg={hot ? theme.muted : theme.faint}>{`  ${fmtTokens(tokens)}`}</span>
 }
 
 // Shared props for NodeRow + its owned-tool body.
@@ -383,14 +384,14 @@ function NodeHeader({ row, hot, focused, frame, setHover, onToggle }: {
       onMouseOut={(() => setHover(false)) as any}
     >
       <FocusGutter focused={focused} />
-      {prefix ? <span fg={hot ? "#7f849c" : "#6c7086"}>{prefix}</span> : null}
-      <span fg={hot ? "#ffffff" : color}>{`${mark} `}</span>
-      <span fg={hot ? "#ffffff" : "#cdd6f4"}>{label}</span>
-      {summary ? <span fg={hot ? "#9399b2" : "#7f849c"}>{`  ${oneLine(summary)}`}</span> : null}
+      {prefix ? <span fg={hot ? theme.muted : theme.dim}>{prefix}</span> : null}
+      <span fg={hot ? theme.white : color}>{`${mark} `}</span>
+      <span fg={hot ? theme.white : theme.text}>{label}</span>
+      {summary ? <span fg={hot ? theme.subtext : theme.muted}>{`  ${oneLine(summary)}`}</span> : null}
       <NodeTokens tokens={tokens} hot={hot} />
       {/* collapsed-only: show the owned-tool count so a node's work is visible without expanding */}
-      {!expanded && toolsLabel ? <span fg={hot ? "#9399b2" : "#7f849c"}>{`  ${toolsLabel}`}</span> : null}
-      {hasDetail ? <span fg={hot ? "#cdd6f4" : "#7f849c"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
+      {!expanded && toolsLabel ? <span fg={hot ? theme.subtext : theme.muted}>{`  ${toolsLabel}`}</span> : null}
+      {hasDetail ? <span fg={hot ? theme.text : theme.muted}>{expanded ? "  ▾" : "  ▸"}</span> : null}
     </text>
   )
 }
@@ -412,7 +413,7 @@ function NodeRow(p: NodeRowProps) {
           {row.tools.map((m) => (
             <box key={m.id} flexDirection="row">
               {/* align owned tools under their node: the 2-cell focus gutter + body stem + connector */}
-              <text fg="#6c7086" selectable={false}>{`  ${row.bodyPrefix}   `}</text>
+              <text fg={theme.dim} selectable={false}>{`  ${row.bodyPrefix}   `}</text>
               <box style={{ flexGrow: 1, flexShrink: 1 }}>
                 <ToolView m={m} expanded={p.expTools.has(m.id)} focused={p.focusedKey === `tool:${m.id}`} cols={p.cols} frame={p.frame} onToggle={() => p.onToggleTool(m.id)} />
               </box>
@@ -427,22 +428,22 @@ function NodeRow(p: NodeRowProps) {
 function List({ sessions, cursor, busySessions, frame, armedDelete }: { sessions: readonly SessionView[]; cursor: number; busySessions: ReadonlySet<string>; frame: string; armedDelete: string | null }) {
   return (
     <box flexDirection="column" padding={1}>
-      <text fg="#7f849c">SESSIONS · n new · ↑↓ move · enter open · d close · q quit</text>
+      <text fg={theme.muted}>SESSIONS · n new · ↑↓ move · enter open · d close · q quit</text>
       {sessions.length === 0 ? (
-        <text fg="#7f849c">no sessions. press n to start.</text>
+        <text fg={theme.muted}>no sessions. press n to start.</text>
       ) : (
         sessions.map((s, i) => {
           const working = busySessions.has(s.id)
           const arming = armedDelete === s.id
           return (
-            <text key={s.id} fg={i === cursor ? "#ffd166" : "#cdd6f4"}>
+            <text key={s.id} fg={i === cursor ? theme.busy : theme.text}>
               {i === cursor ? "▸ " : "  "}
               {/* per-session liveness: a live spinner if this session has a turn in flight */}
-              <span fg={working ? "#ffd166" : "#585b70"}>{working ? `${frame} ` : "  "}</span>
+              <span fg={working ? theme.busy : theme.faint}>{working ? `${frame} ` : "  "}</span>
               {s.title}
               {"  "}
-              <span fg="#7f849c">{`${s.messages.length} msg`}</span>
-              {arming ? <span fg="#f38ba8">{"  press d again to close"}</span> : null}
+              <span fg={theme.muted}>{`${s.messages.length} msg`}</span>
+              {arming ? <span fg={theme.error}>{"  press d again to close"}</span> : null}
             </text>
           )
         })
@@ -844,7 +845,7 @@ function App() {
         ))}
         {showOrch && orch && (
           <box flexDirection="column" style={{ marginTop: 1, paddingLeft: 1 }}>
-            <text fg="#7f849c">orchestration</text>
+            <text fg={theme.muted}>orchestration</text>
             {/* VELOCITY UNICODE TREE: one flat <text> per flattened Row, connectors
                 precomputed by flatten() — no nested padding boxes. */}
             <box flexDirection="column" style={{ paddingLeft: INDENT }}>
@@ -861,7 +862,7 @@ function App() {
                 />
               ))}
               {/* Σ footer: live run total — tokens · nodes · errors (COST-METER total preserved). */}
-              <text fg="#6c7086">{orchSigma(orch)}</text>
+              <text fg={theme.dim}>{orchSigma(orch)}</text>
             </box>
           </box>
         )}
@@ -873,7 +874,7 @@ function App() {
       <box style={{ paddingLeft: 1, paddingRight: 1, paddingTop: 1, width: "100%", flexShrink: 0 }}>
         <box
           border={["left"]}
-          borderColor={armed ? "#f38ba8" : busy ? "#ffd166" : "#66aaff"}
+          borderColor={armed ? theme.error : busy ? theme.busy : theme.accent}
           style={{ paddingLeft: 1, flexShrink: 0, width: "100%" }}
         >
           <textarea
@@ -886,15 +887,15 @@ function App() {
             onSubmit={submit as any}
             onPaste={onPaste as any}
             focused
-            cursorColor="#66aaff"
-            focusedTextColor="#cdd6f4"
+            cursorColor={theme.accent}
+            focusedTextColor={theme.text}
             placeholder={armed ? "⚠ esc again to interrupt" : busy ? `${work.frame} thinking… ${work.elapsed}s · esc to interrupt` : "message kimi"}
-            placeholderColor={armed ? "#f38ba8" : busy ? "#ffd166" : "#7f849c"}
+            placeholderColor={armed ? theme.error : busy ? theme.busy : theme.muted}
           />
         </box>
       </box>
       <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1, paddingBottom: 1, flexShrink: 0 }}>
-        <text fg="#7f849c">{statusLeft}</text>
+        <text fg={theme.muted}>{statusLeft}</text>
         <text fg={status.tone}>{status.right}</text>
       </box>
     </box>
