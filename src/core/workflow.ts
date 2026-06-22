@@ -18,10 +18,10 @@
 // traceContext), so node emits nest under the live chat.turn span in the SAME OrchTree.
 import { type AxAIService, type AxFunction } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { estimatedCostOf, llm, onEvent } from "./runtime.ts"
+import { estimatedCostOf, llm, makeOnEvent } from "./runtime.ts"
 import { choiceFromArgs } from "./models.ts"
-import { allocate, BudgetExhaustedError } from "./orch.ts"
-import { setNodeSpanTracer } from "./orch-spans.ts"
+import { type ActivitySink, allocate, BudgetExhaustedError } from "./orch.ts"
+import { getTurnContext, setNodeSpanTracer } from "./orch-spans.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 import { buildWorkflowPrims, type WorkflowPrims } from "./workflow-prims.ts"
 
@@ -80,7 +80,7 @@ const workflowTool: AxFunction = {
   },
   func: async (
     args: { script?: string; model?: string; effort?: string },
-    extra?: Readonly<{ sessionId?: string; ai?: AxAIService; abortSignal?: AbortSignal }>,
+    extra?: Readonly<{ sessionId?: string; ai?: AxAIService; abortSignal?: AbortSignal; emit?: ActivitySink }>,
   ) => {
     const script = String(args?.script ?? "").trim()
     if (script.length === 0) return "error: workflow requires a non-empty `script`"
@@ -90,14 +90,27 @@ const workflowTool: AxFunction = {
     const rootId = `workflow:${sessionId}:${Date.now()}`
     const choice = choiceFromArgs({ model: args?.model, effort: args?.effort })
     const budget = allocate(WF_TOKEN_BUDGET, WF_TOKEN_HARD)
+    // PER-TURN activity sink: threaded through the forward `extra` (turn() sets opts.emit =
+    // runTurn's per-turn closure). Absent ⇒ a no-op (a standalone live-harness call with no turn
+    // boundary) — the run still works, it just emits no live tree rows. onEvent wraps it.
+    const emit = extra?.emit ?? (() => {})
+    const onEvent = makeOnEvent(emit)
     // Wire the node-span minter under this root (the live-harness path has no turn()).
     setNodeSpanTracer(otelTrace.getTracer(SERVICE_NAME, SERVICE_VERSION))
-    onEvent({ type: "start", nodeId: rootId, phase: "workflow" })
+    // PARENT CONTEXT: ax hands a tool func no traceContext (only a traceId string), and the
+    // streaming for-await drain has already lost the ALS active() context by the time this
+    // handler runs — so otelContext.active() here is the ROOT (→ fragmented traces). turn()
+    // stashed its traceContext by sessionId; recover it so the whole run (root + node + RLM
+    // spans) nests under the live chat.turn. Fallback to active() for the live-harness path.
+    const parentCtx = getTurnContext(sessionId) ?? otelContext.active()
     try {
-      const prims = buildWorkflowPrims(ai, rootId, budget, signal, choice)
-      // The handler runs Promise-native INSIDE the active OTel context so the script's node
-      // emits nest under the live chat.turn span (one trace per session).
-      const result = await otelContext.with(otelContext.active(), () => runScript(script, prims))
+      // Run the ENTIRE body inside parentCtx so startNodeSpan's active-span fallback, the prims'
+      // captured traceContext, AND the rlm() prim's own active() all resolve to chat.turn.
+      const result = await otelContext.with(parentCtx, () => {
+        onEvent({ type: "start", nodeId: rootId, phase: "workflow" })
+        const prims = buildWorkflowPrims(ai, rootId, budget, signal, choice, emit)
+        return runScript(script, prims)
+      })
       const reply = typeof result === "string" ? result : result === undefined ? "(workflow returned no value)" : (() => { try { return JSON.stringify(result) } catch { return String(result) } })()
       const spent = await budget.spent()
       onEvent({ type: "done", nodeId: rootId, result: clip(reply, 256) })

@@ -44,6 +44,24 @@ export const setNodeSpanTracer = (tracer: Tracer | undefined): void => {
   state.tracer = tracer
 }
 
+// The live chat.turn OTel Context, keyed by sessionId. WHY this exists: ax does NOT forward
+// the turn's traceContext into a tool func's `extra` (dsp/functions.ts passes only
+// {sessionId, traceId, ai, step, abortSignal} — a traceId STRING, not the Context), AND the
+// turn drains ax via `for await` on a STREAMING generator, across whose yields
+// AsyncLocalStorage drops the active context. So a tool handler (workflow / RLM) that read
+// otelContext.active() got the ROOT context and fragmented its node spans into a NEW trace.
+// turn() stashes its traceContext here by sessionId; the workflow handler reads it (via the
+// extra.sessionId ax DOES pass) and runs the script under it, so node + RLM spans nest under
+// the live chat.turn — one trace per session. ponytail: module Map keyed by sessionId —
+// turns are serialized per session (busyAtom) so no cross-turn race; set per turn, cleared on
+// turn end. Upgrade: drop this if ax forwards traceContext into a tool func's extra.
+const turnCtx = new Map<string, OtelContext>()
+export const setTurnContext = (sessionId: string, ctx: OtelContext): void => {
+  turnCtx.set(sessionId, ctx)
+}
+export const getTurnContext = (sessionId: string | undefined): OtelContext | undefined =>
+  sessionId !== undefined ? turnCtx.get(sessionId) : undefined
+
 const clip = (v: unknown, max = 256): string => {
   const s = typeof v === "string" ? v : (() => { try { return JSON.stringify(v) ?? String(v) } catch { return String(v) } })()
   return s.length > max ? `${s.slice(0, max)}…` : s

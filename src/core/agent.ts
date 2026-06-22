@@ -3,10 +3,10 @@
 // emits canonical gen_ai.* child spans (token usage, finish reasons, message
 // events). Effect's own Telemetry.addGenAIAnnotations stamps the semconv
 // attributes on our span. Metrics + correlated logs come along automatically.
-import { ax, type AxAIService, type AxFunction, type AxGen, type AxLoggerFunction, AxMemory } from "@ax-llm/ax"
+import { ax, type AxAIService, type AxFunction, type AxGen, AxMemory } from "@ax-llm/ax"
 import { existsSync, readFileSync } from "node:fs"
-import { emitActivity, liveLogger } from "./activity.ts"
-import { allocate, BudgetExhaustedError, type BudgetUsage } from "./orch.ts"
+import { makeLiveLogger } from "./activity.ts"
+import { allocate, type ActivitySink, BudgetExhaustedError, type BudgetUsage } from "./orch.ts"
 import { finalizeOnMaxSteps } from "./orch-recipes.ts"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
@@ -17,9 +17,9 @@ import type { AnySpan } from "effect/Tracer"
 import * as Telemetry from "effect/unstable/ai/Telemetry"
 import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
-import { setNodeSpanTracer } from "./orch-spans.ts"
-import { BASE_PROMPT, limits, llm, MODEL, onEvent, rateLimiter } from "./runtime.ts"
-import { makeMockAI, MOCK_MODEL } from "./mock-ai.ts"
+import { setNodeSpanTracer, setTurnContext } from "./orch-spans.ts"
+import { BASE_PROMPT, limits, llm, makeOnEvent, MODEL, rateLimiter } from "./runtime.ts"
+import { makeMockAI, MOCK_MODEL, setMockEmit } from "./mock-ai.ts"
 import { MOCK_ORCH_TOOL } from "./mock.ts"
 import { WORKFLOW_TOOLS } from "./workflow.ts"
 
@@ -201,14 +201,12 @@ export type AxAgentConfig = {
   readonly maxSteps?: number | undefined
   readonly tokenBudget?: number | undefined
   readonly tools?: AxFunction[] | undefined
-  readonly logger?: AxLoggerFunction | undefined
 }
 
 export const createAgent = (config: AxAgentConfig) => {
   const { ai: service, model } = config
   const maxSteps = config.maxSteps ?? limits.maxSteps
   const tokenBudget = config.tokenBudget ?? limits.tokenBudget
-  const logger = config.logger ?? liveLogger
 
   // The chat gen — built ONCE per createAgent call (closure-scoped, not module-scoped).
   // The full system prompt (BASE_PROMPT + RLM_WORKFLOW_OVERLAY + projectDoc) always matches
@@ -226,10 +224,11 @@ export const createAgent = (config: AxAgentConfig) => {
   // exactly these on the final permitted step (GRACEFUL max-steps ceiling).
   const chatToolNames = chatTools.map((f) => f.name)
 
-  // Bind debug + logger on the injected service (rateLimiter too, for the CF default).
-  // fetch is NO LONGER bound here — it is a per-turn forward option (makeCaptureFetch).
-  // setOptions reassigns every field; all three ride in this single call.
-  service.setOptions({ debug: true, logger, rateLimiter })
+  // Bind debug + rateLimiter on the injected service. The LOGGER is NO LONGER bound here — it is
+  // a PER-TURN forward option (makeLiveLogger(emit), threaded by turn() from runTurn's per-turn
+  // emit), which kills the last module-load global (the old service-level liveLogger binding).
+  // fetch is also a per-turn forward option (makeCaptureFetch). setOptions reassigns every field.
+  service.setOptions({ debug: true, rateLimiter })
 
   // One in-flight AbortController per session (overwritten each turn), scoped to THIS
   // agent so two agents never collide on a sessionId. abortTurn() lets the UI cancel a
@@ -248,7 +247,7 @@ export const createAgent = (config: AxAgentConfig) => {
    * gen_ai semconv) parents the ax gen_ai child; the whole thing parents the
    * session root span -> one trace per session.
    */
-  const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
+  const turn = (mem: AxMemory, parent: AnySpan, sessionId: string, emit: ActivitySink) =>
     Effect.fn("chat.turn", {
       kind: "client",
       // Parent to the session root (ExternalSpan) via span options -> all turns of
@@ -274,6 +273,16 @@ export const createAgent = (config: AxAgentConfig) => {
         // nested under chat.turn — the trace mirrors the live tree. Turns are serialized
         // (busyAtom), so this module-global set is race-free across turns.
         setNodeSpanTracer(tracer)
+        // TEST-ONLY (off in prod): point the mock AI's group-variant tool-CALL feed at THIS
+        // turn's emit. The mock service bypasses ax's response logging, so its read/glob/grep
+        // cluster's call rows would never reach the live feed otherwise; setMockEmit re-binds the
+        // sink per turn (serialized turns, so no cross-feed). Unset AX2_MOCK ⇒ never called.
+        if (process.env.AX2_MOCK === "1") setMockEmit(emit)
+        // Stash THIS turn's OTel context by sessionId so a tool handler (workflow/RLM) can
+        // recover it: ax does not forward traceContext into a tool func's extra, and the
+        // streaming for-await drain loses the ALS active() context — without this the workflow
+        // tool's node + RLM spans fragment into a NEW trace. Overwritten each turn (serialized).
+        setTurnContext(sessionId, traceContext)
 
         // Per-turn finish-reason context + its fetch wrapper (concurrency-safe — replaces
         // the old module-global latch). The wrapper is threaded into THIS turn's forward
@@ -311,6 +320,10 @@ export const createAgent = (config: AxAgentConfig) => {
       // the tools, so ax is FORCED to emit a final TEXT reply IN-LOOP — no throw, no string-match.
       // onTruncate flips the flag below; the session AxMemory persists, so a follow-up turn
       // resumes from where this one stopped.
+      // PER-TURN node-event sink: build onEvent over THIS turn's activity emit (the closure
+      // runTurn threaded in), so the max-steps marker + any orch NodeEvent fired this turn lands
+      // in THIS turn's queue — no module global. Also handed to tool handlers via forward `extra`.
+      const onEvent = makeOnEvent(emit)
       let budgetExhausted = false
       const stepHooks = finalizeOnMaxSteps(chatToolNames, onEvent, `turn:${sessionId}`, () => {
         budgetExhausted = true
@@ -326,17 +339,32 @@ export const createAgent = (config: AxAgentConfig) => {
               // forward(stream:true) collapses to ONE ChatResponseStreamingDoneResult (a single
               // dump, nothing live) — only streamingForward yields per-chunk deltas. ax emits the
               // reasoning first (delta.thought) then the answer (delta.reply), both INCREMENTAL, so
-              // we append each to the activity bus → atoms grows the in-flight message → the dim-
-              // italic thinking + the reply render token-by-token. Tools still render via liveLogger
-              // (FunctionResults). stepHooks (graceful max-steps) + abortSignal ride the same opts.
-              const opts = { mem, sessionId, tracer, traceContext, maxSteps, stream: true, abortSignal: aborter.signal, stepHooks, fetch: makeCaptureFetch(turnCtx) }
+              // we append each to the per-turn emit → atoms grows the in-flight message → the dim-
+              // italic thinking + the reply render token-by-token. Tools render via the per-turn
+              // logger (makeLiveLogger(emit), set in `opts.logger` below — replaces the old service-
+              // level liveLogger binding). `emit` also rides the opts so a tool handler (workflow)
+              // builds its onEvent from the SAME per-turn sink. stepHooks + abortSignal ride along.
+              const opts = {
+                mem,
+                sessionId,
+                tracer,
+                traceContext,
+                maxSteps,
+                stream: true,
+                abortSignal: aborter.signal,
+                stepHooks,
+                fetch: makeCaptureFetch(turnCtx),
+                logger: makeLiveLogger(emit),
+                debug: true,
+                emit,
+              }
               let reply = ""
               for await (const d of chat.streamingForward(service, { message: msg }, opts as Parameters<typeof chat.streamingForward>[2])) {
                 const delta = (d as { delta?: { reply?: string; thought?: string } }).delta ?? {}
-                if (delta.thought) emitActivity({ kind: "thinkingDelta", text: delta.thought })
+                if (delta.thought) emit({ kind: "thinkingDelta", text: delta.thought })
                 if (delta.reply) {
                   reply += delta.reply
-                  emitActivity({ kind: "replyDelta", text: delta.reply })
+                  emit({ kind: "replyDelta", text: delta.reply })
                 }
               }
               // ADVISORY budget charge (runNode used to do this; the streaming drain bypasses it).
