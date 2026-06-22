@@ -26,7 +26,7 @@ export type LeafOpts = {
 // A node lifecycle event over the EXISTING activity bus + OTel span annotation —
 // do NOT invent a second event system. Consumed by emit() (a thin hook).
 export type NodeEvent =
-  | { readonly type: "start"; readonly nodeId: string; readonly parentId?: string; readonly phase: string }
+  | { readonly type: "start"; readonly nodeId: string; readonly parentId?: string | undefined; readonly phase: string }
   | { readonly type: "delta"; readonly nodeId: string; readonly chunk: string }
   | { readonly type: "done"; readonly nodeId: string; readonly result: unknown }
   | { readonly type: "error"; readonly nodeId: string; readonly cause: unknown }
@@ -36,7 +36,7 @@ export type EmitOpts = { readonly spanId?: string }
 // The usage reader shape from agent.ts (readUsage/sumUsage): a leaf's token usage
 // as a structural triple. charge() derives a token count from this (totalTokens, or
 // promptTokens+completionTokens as a fallback) and adds it to the internal tally.
-export type BudgetUsage = { promptTokens?: number; completionTokens?: number; totalTokens?: number }
+export type BudgetUsage = { promptTokens?: number | undefined; completionTokens?: number | undefined; totalTokens?: number | undefined }
 
 // ADVISORY token gate (soft budget). Holds an internal used-token tally; charge()
 // adds a leaf's usage AFTER it returns and NEVER throws for crossing the soft line —

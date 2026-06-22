@@ -16,7 +16,7 @@ import { sessionsRT } from "./sessions.ts"
 const MODEL = "@cf/moonshotai/kimi-k2.7-code"
 
 // Provenance for a completed reply, rendered as one muted line under the turn.
-export type TurnMeta = { readonly model: string; readonly ms: number; readonly tokens?: number; readonly finishReason?: string; readonly budget: boolean }
+export type TurnMeta = { readonly model: string; readonly ms: number; readonly tokens?: number | undefined; readonly finishReason?: string | undefined; readonly budget: boolean }
 
 export type Msg =
   | { readonly kind: "you"; readonly text: string }
@@ -34,11 +34,11 @@ export type Msg =
 // error cause (clipped upstream). roots preserves first-seen order of top-level nodes.
 export type OrchNode = {
   readonly id: string
-  readonly parentId?: string
+  readonly parentId?: string | undefined
   readonly label: string
   readonly phase: string
   readonly status: "running" | "done" | "error"
-  readonly result?: string
+  readonly result?: string | undefined
 }
 export type OrchTree = { readonly nodes: Readonly<Record<string, OrchNode>>; readonly roots: readonly string[] }
 export type SessionView = { readonly id: string; readonly title: string; readonly messages: readonly Msg[]; readonly orch?: OrchTree }
@@ -118,11 +118,11 @@ const installSink = (
           if (a.event === "start") {
             const node: OrchNode = {
               id: a.nodeId,
-              parentId,
+              ...(parentId !== undefined ? { parentId } : {}),
               label: a.detail ?? a.nodeId,
               phase: a.detail ?? "",
               status: prev?.status ?? "running",
-              result: prev?.result,
+              ...(prev?.result !== undefined ? { result: prev.result } : {}),
             }
             const isRoot = parentId === undefined
             return {
@@ -132,12 +132,14 @@ const installSink = (
           }
           // delta/done/error update an existing node in place; ignore unknown ids.
           if (prev === undefined) return t
+          const parentPatch = parentId !== undefined ? { parentId } : {}
+          const resultPatch = a.detail !== undefined ? { result: a.detail } : {}
           const next: OrchNode =
             a.event === "done"
-              ? { ...prev, parentId, status: "done", result: a.detail }
+              ? { ...prev, ...parentPatch, status: "done", ...resultPatch }
               : a.event === "error"
-                ? { ...prev, parentId, status: "error", result: a.detail }
-                : { ...prev, parentId } // delta: streaming chunk, no status change (tree shows phase only)
+                ? { ...prev, ...parentPatch, status: "error", ...resultPatch }
+                : { ...prev, ...parentPatch } // delta: streaming chunk, no status change (tree shows phase only)
           return { ...t, nodes: { ...t.nodes, [a.nodeId]: next } }
         })
         break
