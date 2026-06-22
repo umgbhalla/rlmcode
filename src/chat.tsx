@@ -85,13 +85,13 @@ const previewColor = (tone: PreviewLine["tone"]) => (tone === "add" ? "#a6e3a1" 
 const previewSign = (tone: PreviewLine["tone"]) => (tone === "add" ? "+" : tone === "del" ? "-" : "│")
 
 // Clickable header row: brightens on hover when the row has a drill-down body.
-function ToolHeader({ m, expanded, hasBody, onToggle }: { m: ToolMsg; expanded: boolean; hasBody: boolean; onToggle: () => void }) {
+function ToolHeader({ m, expanded, hasBody, focused, onToggle }: { m: ToolMsg; expanded: boolean; hasBody: boolean; focused: boolean; onToggle: () => void }) {
   const [hover, setHover] = useState(false)
   const running = m.status === "running"
   const color = statusColor(m.status)
   const mark = running ? "◌" : m.status === "error" ? "✗" : toolIcon(m.name)
   const summary = running ? "running…" : toolSummary(m.name, m.result, m.status === "error")
-  const hot = hasBody && hover
+  const hot = hasBody && (hover || focused) // hover OR keyboard-focused -> brighten
   return (
     <text
       fg={color}
@@ -108,7 +108,7 @@ function ToolHeader({ m, expanded, hasBody, onToggle }: { m: ToolMsg; expanded: 
   )
 }
 
-function ToolView({ m, expanded, cols, onToggle }: { m: ToolMsg; expanded: boolean; cols: number; onToggle: () => void }) {
+function ToolView({ m, expanded, focused, cols, onToggle }: { m: ToolMsg; expanded: boolean; focused: boolean; cols: number; onToggle: () => void }) {
   const isError = m.status === "error"
   const hasBody = m.status !== "running" && toolHasBody(m.name, m.result, isError)
   const open = expanded && hasBody
@@ -116,7 +116,7 @@ function ToolView({ m, expanded, cols, onToggle }: { m: ToolMsg; expanded: boole
   const preview = open && !diff ? toolPreview(m.name, m.args, m.result, isError, Math.max(20, cols - 10)) : []
   return (
     <box flexDirection="column" style={{ marginTop: open ? 1 : 0 }}>
-      <ToolHeader m={m} expanded={expanded} hasBody={hasBody} onToggle={onToggle} />
+      <ToolHeader m={m} expanded={expanded} hasBody={hasBody} focused={focused} onToggle={onToggle} />
       {diff ? (
         <box style={{ paddingLeft: INDENT, paddingTop: 1 }}>
           <diff diff={diff.diff} view={cols > 120 ? "split" : "unified"} filetype={diff.filetype} showLineNumbers syntaxStyle={mdStyle} />
@@ -137,6 +137,7 @@ function TurnView({
   first,
   expanded,
   expTools,
+  focusedKey,
   cols,
   onToggleTurn,
   onToggleTool,
@@ -145,11 +146,13 @@ function TurnView({
   first: boolean
   expanded: boolean
   expTools: Set<string>
+  focusedKey: string | undefined
   cols: number
   onToggleTurn: () => void
   onToggleTool: (id: string) => void
 }) {
   const [hoverSteps, setHoverSteps] = useState(false)
+  const stepsFocused = focusedKey === `turn:${t.idx}`
   return (
     <box flexDirection="column" style={{ marginTop: first ? 0 : 1 }}>
       <box border={["left"]} borderColor="#45475a" style={{ paddingLeft: 1, width: "100%" }}>
@@ -158,7 +161,7 @@ function TurnView({
       {t.steps.length > 0 && (
         <box flexDirection="column" style={{ paddingLeft: INDENT }}>
           <text
-            fg={hoverSteps ? "#cdd6f4" : "#7f849c"}
+            fg={hoverSteps || stepsFocused ? "#cdd6f4" : "#7f849c"}
             selectable={false}
             onMouseDown={onToggleTurn as any}
             onMouseOver={(() => setHoverSteps(true)) as any}
@@ -171,7 +174,14 @@ function TurnView({
             <box flexDirection="column" style={{ paddingLeft: INDENT }}>
               {t.steps.map((s, i) =>
                 s.kind === "tool" ? (
-                  <ToolView key={s.id} m={s} expanded={expTools.has(s.id)} cols={cols} onToggle={() => onToggleTool(s.id)} />
+                  <ToolView
+                    key={s.id}
+                    m={s}
+                    expanded={expTools.has(s.id)}
+                    focused={focusedKey === `tool:${s.id}`}
+                    cols={cols}
+                    onToggle={() => onToggleTool(s.id)}
+                  />
                 ) : (
                   <text key={i} fg="#9399b2">{`· ${oneLine(s.text)}`}</text>
                 ),
@@ -235,6 +245,7 @@ function App() {
 
   const [expTurns, setExpTurns] = useState<Set<number>>(new Set())
   const [expTools, setExpTools] = useState<Set<string>>(new Set())
+  const [focus, setFocus] = useState(0) // keyboard focus cursor over expandable rows (Tab cycles)
   // prompt history cursor + the live draft stashed when we start recalling
   const [histIdx, setHistIdx] = useState<number | null>(null)
   const draftRef = useRef("")
@@ -249,6 +260,7 @@ function App() {
     setExpTurns(new Set())
     setExpTools(new Set())
     setHistIdx(null)
+    setFocus(0)
   }, [state.activeId])
 
   // focus-gated attention: bell on turn finishing while the terminal is blurred
@@ -285,6 +297,21 @@ function App() {
   const inChat = state.view === "chat" && active !== null
   const turns = active ? toTurns(active.messages) : []
   const isExpanded = (t: Turn) => expTurns.has(t.idx) || t.final === null // in-progress auto-expands
+
+  // Expandable rows in transcript order = Tab focus ring (turn-steps header, then
+  // its tool rows when that turn is expanded). Enter toggles the focused one.
+  const focusables: string[] = []
+  for (const t of turns) {
+    if (t.steps.length > 0) focusables.push(`turn:${t.idx}`)
+    if (isExpanded(t)) for (const s of t.steps) if (s.kind === "tool") focusables.push(`tool:${s.id}`)
+  }
+  const focusedKey = focusables.length ? focusables[((focus % focusables.length) + focusables.length) % focusables.length] : undefined
+  const toggleFocused = () => {
+    if (!focusedKey) return
+    const [kind, val] = [focusedKey.slice(0, focusedKey.indexOf(":")), focusedKey.slice(focusedKey.indexOf(":") + 1)]
+    if (kind === "turn") toggleTurn(Number(val))
+    else toggleTool(val)
+  }
 
   const toggleTurn = (idx: number) =>
     setExpTurns((s) => {
@@ -402,6 +429,13 @@ function App() {
       setInput("")
       return setApp((s) => ({ ...s, view: "list" }))
     }
+    if (k.name === "tab") {
+      if (focusables.length) setFocus((f) => f + (k.shift ? -1 : 1))
+      return
+    }
+    // Enter on an empty input toggles the focused row (the textarea's own
+    // onSubmit no-ops on empty), so keyboard expand works without a mouse.
+    if (k.name === "return" && text.trim() === "" && focusedKey) return toggleFocused()
     if (k.name === "pageup") return scrollPage(-1)
     if (k.name === "pagedown") return scrollPage(1)
     if (k.name === "home" && text.trim() === "") return scrollPage("top")
@@ -450,6 +484,7 @@ function App() {
             first={i === 0}
             expanded={isExpanded(t)}
             expTools={expTools}
+            focusedKey={focusedKey}
             cols={width || 80}
             onToggleTurn={() => toggleTurn(t.idx)}
             onToggleTool={(id) => toggleTool(id)}
