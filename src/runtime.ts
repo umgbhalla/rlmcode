@@ -6,8 +6,11 @@
 import { ai, type AxRateLimiterFunction } from "@ax-llm/ax"
 import * as Effect from "effect/Effect"
 import { type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
+import { KIMI, MODEL_DOC } from "./models.ts"
 
-export const MODEL = "@cf/moonshotai/kimi-k2.7-code"
+// MODEL — the DEFAULT session model id (Kimi K2.7), sourced from the model registry
+// (src/models.ts) so the default and the routing pool can never drift apart.
+export const MODEL = KIMI
 
 // SERVICE-LEVEL throttle: a min-interval (token-free) rate limiter attached to the CF-Kimi
 // service so even an unbounded `parallel` fan-out (or many concurrent turns) never fires
@@ -55,6 +58,8 @@ export const BASE_PROMPT = [
   "USE the tools to inspect/modify files and run commands BEFORE answering — don't guess.",
   "Verify with a tool when unsure. Keep replies concise and concrete; show the result that matters.",
   "Format replies in GitHub-flavored markdown (use `code`, lists, and ```fences``` where helpful).",
+  // MULTI-MODEL: tell the agent (and every node) the two-model pool + thinking-level knobs.
+  MODEL_DOC,
 ].join(" ")
 
 const MAX_STEPS = Number(process.env.AX2_MAX_STEPS ?? 50) // max tool-call iterations per turn

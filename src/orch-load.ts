@@ -40,6 +40,7 @@ import {
   pipeline,
 } from "./orch.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
+import { MODELS, type NodeModelChoice, nodeForwardOpts, resolveModel } from "./models.ts"
 
 // The trusted scripts root. Resolved once, absolute. ONLY modules under here load.
 export const ORCH_SCRIPTS_DIR = resolvePath(process.cwd(), ".ax/orch")
@@ -74,6 +75,11 @@ export type OrchPrims = {
   readonly journaledNode: typeof journaledNode
   readonly loadJournal: typeof loadJournal
   readonly saveJournal: typeof saveJournal
+  // MULTI-MODEL: resolveModel(name) → the chosen pool entry ('kimi'|'glm', default kimi).
+  // A script routes a node by passing { model: resolveModel('glm').id } to ctx.optsFor().
+  // MODELS is the full two-entry registry (for a script to enumerate/label the pool).
+  readonly resolveModel: typeof resolveModel
+  readonly MODELS: typeof MODELS
 }
 
 // The run context handed to a loaded script's orchestrate(ctx, prims). Mirrors the
@@ -93,7 +99,10 @@ export type OrchLoadCtx = {
   readonly model: string
   readonly budget: Budget
   readonly onEvent: EmitSink
-  readonly optsFor: () => LeafOpts
+  // MULTI-MODEL: optsFor takes an OPTIONAL per-node routing choice. A loaded script can
+  // route a stage/node to 'glm' (or a thinking level) by passing a choice; absent ⇒ the
+  // default session model (Kimi) at default effort — UNCHANGED for existing scripts.
+  readonly optsFor: (choice?: NodeModelChoice) => LeafOpts
   readonly usageOf: (gen: unknown) => BudgetUsage | undefined
 }
 
@@ -106,6 +115,9 @@ type OrchScriptModule = { orchestrate?: OrchScriptFn; default?: OrchScriptFn }
 
 // re-export the prim TYPES so a script can `import type` them for annotations.
 export type { AgentNode, Budget, BudgetExhaustedError, BudgetUsage, EmitOpts, EmitSink, Journal, JournaledNodeSpec, LeafOpts, NodeEvent, PipelineStage }
+// MULTI-MODEL: re-export the routing choice type so a loaded script can `import type`
+// it for its optsFor(choice) calls, and the model-name resolver for routing decisions.
+export type { NodeModelChoice }
 
 class OrchLoadError {
   readonly _tag = "OrchLoadError"
@@ -163,6 +175,8 @@ export const orchPrims = (): OrchPrims => ({
   journaledNode,
   loadJournal,
   saveJournal,
+  resolveModel,
+  MODELS,
 })
 
 // Promise-native trusted-script core: resolve INSIDE the trusted root (path-escape
@@ -224,7 +238,9 @@ export const loadAndRunOrch = (parent: AnySpan, sessionId: string, scriptRef: st
     const budget = allocate(limits.tokenBudget)
     const rootId = `orch:${sessionId}:${scriptRef}`
 
-    const optsFor = (): LeafOpts => ({
+    // MULTI-MODEL: optsFor takes an optional per-node routing choice (model + thinking
+    // level), resolved via nodeForwardOpts() and spread onto LeafOpts. Absent ⇒ default Kimi.
+    const optsFor = (choice?: NodeModelChoice): LeafOpts => ({
       mem: new AxMemory(),
       sessionId,
       tracer,
@@ -232,6 +248,7 @@ export const loadAndRunOrch = (parent: AnySpan, sessionId: string, scriptRef: st
       maxSteps: limits.maxSteps,
       stream: false,
       abortSignal: aborter.signal,
+      ...nodeForwardOpts(choice),
     })
 
     const ctx: OrchLoadCtx = {

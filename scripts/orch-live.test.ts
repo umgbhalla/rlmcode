@@ -62,6 +62,26 @@ export const runOrchestrateLive = async (
   return String(out ?? "")
 }
 
+// (H) MULTI-MODEL: drive the REAL orchestrate tool with an explicit { model, effort } so a
+// leaf is routed to a CHOSEN pool model (kimi|glm) at a CHOSEN thinking level. This proves
+// per-node model + thinking routing threads through the orchestrate tool → boundary →
+// optsFor(choice) → nodeForwardOpts → forward() on the real CF endpoint. A single-branch
+// parallel run = one real routed leaf (no judge/verify noise). Returns the verbatim string.
+export const runRoutedLive = async (
+  task: string,
+  model: "kimi" | "glm",
+  effort: "low" | "medium" | "high" | "xhigh" | "max" | undefined,
+  liveAi: AxAIService = buildLiveAi(),
+): Promise<string> => {
+  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
+  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
+  const out = await orchestrateTool.func(
+    { task, strategy: "parallel", branches: 1, model, ...(effort !== undefined ? { effort } : {}) },
+    { sessionId: `live-multimodel-${model}`, ai: liveAi, abortSignal: new AbortController().signal },
+  )
+  return String(out ?? "")
+}
+
 // (G) PLAN-EXECUTE (auto-decompose): drive orchestrate with strategy 'plan' and JUST a
 // decomposable `task` (NO subtasks) — a PLANNER node splits the task into distinct subtasks
 // ITSELF, then one sub-agent works each. The 'plan' reply is "PLAN (N subtasks):\n …\n\n
@@ -509,6 +529,47 @@ await (async () => {
   // The callback bridge must have fired (actorTurnCallback + onContextEvent) — this is
   // what renders the RLM's distiller/executor/responder loop nested under the turn span.
   assert(rlmOut.callbacks > 0, `RLM callbacks fired (actorTurnCallback/onContextEvent), got ${rlmOut.callbacks}`)
+
+  // (H) MULTI-MODEL gate: per-NODE model + thinking-level routing over the TWO-model pool
+  // (Kimi K2.7 + GLM 5.2), BOTH on the SAME CF endpoint with the existing creds. Proves:
+  //   (a) DEFAULT path unchanged — an explicit { model:'kimi' } leaf returns real output;
+  //   (b) a leaf routed to { model:'glm' } (GLM 5.2) returns real output (different model);
+  //   (c) an explicit thinking level ({ effort:'high' }) threads through to forward() on
+  //       BOTH models without breaking (real reply, not an empty/length-starved blob).
+  // A small concrete task with a deterministic right answer so a real reply is meaningful.
+  // The maxTokens floor (models.ts NODE_MAX_TOKENS) keeps each thinking model's reasoning
+  // from eating the whole completion budget (the verified empty-content gotcha).
+  const mmTask = "What is the capital of Japan? Reply with just the city name and one short confirming sentence."
+
+  const kimiReply = await runRoutedLive(mmTask, "kimi", undefined)
+  console.log("─".repeat(60))
+  console.log("LIVE MULTI-MODEL — KIMI (default, no effort):")
+  console.log(kimiReply)
+  console.log("─".repeat(60))
+  assert(isRealReply(kimiReply), `(a) kimi-routed leaf returns a real non-empty reply, got: ${JSON.stringify(kimiReply.slice(0, 200))}`)
+  assert(/tokyo/i.test(kimiReply), `(a) kimi reply contains the correct answer Tokyo, got: ${JSON.stringify(kimiReply.slice(0, 200))}`)
+
+  const glmReply = await runRoutedLive(mmTask, "glm", undefined)
+  console.log("─".repeat(60))
+  console.log("LIVE MULTI-MODEL — GLM 5.2 (routed, no effort):")
+  console.log(glmReply)
+  console.log("─".repeat(60))
+  assert(isRealReply(glmReply), `(b) glm-routed leaf returns a real non-empty reply (GLM 5.2 on the same endpoint), got: ${JSON.stringify(glmReply.slice(0, 200))}`)
+  assert(/tokyo/i.test(glmReply), `(b) glm reply contains the correct answer Tokyo, got: ${JSON.stringify(glmReply.slice(0, 200))}`)
+
+  const kimiHigh = await runRoutedLive(mmTask, "kimi", "high")
+  console.log("─".repeat(60))
+  console.log("LIVE MULTI-MODEL — KIMI + effort:'high' (thinking level threads through):")
+  console.log(kimiHigh)
+  console.log("─".repeat(60))
+  assert(isRealReply(kimiHigh), `(c) kimi + effort:'high' returns a real non-empty reply (thinking level passed to forward), got: ${JSON.stringify(kimiHigh.slice(0, 200))}`)
+
+  const glmHigh = await runRoutedLive(mmTask, "glm", "high")
+  console.log("─".repeat(60))
+  console.log("LIVE MULTI-MODEL — GLM 5.2 + effort:'high' (thinking level threads through):")
+  console.log(glmHigh)
+  console.log("─".repeat(60))
+  assert(isRealReply(glmHigh), `(c) glm + effort:'high' returns a real non-empty reply (thinking level passed to forward), got: ${JSON.stringify(glmHigh.slice(0, 200))}`)
 })()
 
 if (failed > 0) {

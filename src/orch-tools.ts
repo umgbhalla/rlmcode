@@ -35,6 +35,7 @@
 import { ax, AxMemory, type AxAIService, type AxFunction, type AxGen } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import { BASE_PROMPT, estimatedCostOf, limits, llm, onEvent, readUsageOf } from "./runtime.ts"
+import { choiceFromArgs, type NodeModelChoice, nodeForwardOpts } from "./models.ts"
 import { adversarialVerify, finalizeOnMaxSteps, judge, loopUntilDry, MAX_CONCURRENCY, parallelLimit, runNode } from "./orch-recipes.ts"
 import { allocate, type Budget, BudgetExhaustedError, type LeafOpts } from "./orch.ts"
 import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
@@ -102,7 +103,8 @@ const signalOf = (extra: { abortSignal?: AbortSignal } | undefined): AbortSignal
 const boundary = (sessionId: string, signal: AbortSignal, rootId: string) => {
   const tracer = otelTrace.getTracer(SERVICE_NAME, SERVICE_VERSION)
   const traceContext = otelContext.active()
-  const optsFor = (): LeafOpts => ({
+  // MULTI-MODEL: optsFor takes an OPTIONAL routing choice — nodeForwardOpts() spreads {model, modelConfig, thinkingTokenBudget} onto LeafOpts (absent ⇒ default Kimi).
+  const optsFor = (choice?: NodeModelChoice): LeafOpts => ({
     mem: new AxMemory(),
     sessionId,
     tracer,
@@ -110,6 +112,7 @@ const boundary = (sessionId: string, signal: AbortSignal, rootId: string) => {
     maxSteps: limits.maxSteps,
     stream: false,
     abortSignal: signal,
+    ...nodeForwardOpts(choice),
   })
   const budget = allocate(ORCH_TOKEN_BUDGET, ORCH_TOKEN_HARD)
   return { optsFor, budget, rootId }
@@ -155,10 +158,11 @@ type NodeWorkerOpts = {
   i: number
   task: string
   persona: string
-  optsFor: () => LeafOpts
+  optsFor: (choice?: NodeModelChoice) => LeafOpts
   budget: Budget
+  choice?: NodeModelChoice | undefined // MULTI-MODEL: routing choice; absent ⇒ default Kimi
 }
-const nodeWorker = ({ ai, rootId, i, task, persona, optsFor, budget }: NodeWorkerOpts): Promise<string> => {
+const nodeWorker = ({ ai, rootId, i, task, persona, optsFor, budget, choice }: NodeWorkerOpts): Promise<string> => {
   const nodeId = `${rootId}/branch-${i}`
   // runNode() emits the single start (with parentId+label) and the done/error — no
   // double-emit here, which previously overwrote the "branch N" label with "node".
@@ -173,7 +177,7 @@ const nodeWorker = ({ ai, rootId, i, task, persona, optsFor, budget }: NodeWorke
   // GRACEFUL MAX-STEPS for a node: strip the node's tools on its last permitted step so it
   // returns its BEST reply (from work already done) instead of throwing — a node that exhausts
   // steps yields real output, never an error/empty branch. The marker renders on this node.
-  const opts: LeafOpts = { ...optsFor(), stepHooks: finalizeOnMaxSteps(BASE_TOOL_NAMES, onEvent, nodeId) }
+  const opts: LeafOpts = { ...optsFor(choice), stepHooks: finalizeOnMaxSteps(BASE_TOOL_NAMES, onEvent, nodeId) }
   return runNode(
     { nodeId, parentId: rootId, phase: `branch ${i + 1}: ${clip(task, 48)}`, gen, opts, onEvent, budget, usageOf: (g) => readUsageOf(g) },
     ai,
@@ -204,9 +208,10 @@ type OrchestrationOpts = {
   // model is told to PREFER distinct subtasks; same-task is the cheap default only.
   subtasks: string[]
   branches: number
-  optsFor: () => LeafOpts
+  optsFor: (choice?: NodeModelChoice) => LeafOpts
   budget: Budget
   rootId: string
+  choice?: NodeModelChoice | undefined // MULTI-MODEL: per-run routing for WORKER nodes (absent ⇒ Kimi)
 }
 const runOrchestration = async ({
   ai,
@@ -217,6 +222,7 @@ const runOrchestration = async ({
   optsFor,
   budget,
   rootId,
+  choice,
 }: OrchestrationOpts): Promise<{ reply: string; branches: number; accepted?: boolean }> => {
   onEvent({ type: "start", nodeId: rootId, phase: `orchestrate:${strategy}` })
   try {
@@ -245,7 +251,7 @@ const runOrchestration = async ({
     const fanOut = (n: number): Promise<string[]> =>
       parallelLimit(
         Array.from({ length: n }, (_, i) =>
-          () => nodeWorker({ ai, rootId, i, task: subtaskFor(i), persona: PERSONAS[i % PERSONAS.length]!, optsFor, budget }),
+          () => nodeWorker({ ai, rootId, i, task: subtaskFor(i), persona: PERSONAS[i % PERSONAS.length]!, optsFor, budget, choice }),
         ),
         ORCH_CONCURRENCY,
       ).then((rs) => rs.map((r) => r ?? "").filter((r) => r.length > 0))
@@ -367,11 +373,13 @@ const orchestrateTool: AxFunction = {
         description: "how to combine the sub-agents (default 'parallel'). 'plan' AUTO-decomposes `task` into subtasks via a planner node, then fans out one sub-agent per subtask.",
       },
       branches: { type: "number", description: "number of parallel sub-agents (1-100, default 2; at most ~8 run at once, the rest queue); ignored when subtasks is given (the list length wins)" },
+      model: { type: "string", description: "MULTI-MODEL: which model the sub-agents run on — 'kimi' (Kimi K2.7, the default) or 'glm' (GLM 5.2). Both are thinking models on the same endpoint. Omit to use the default (kimi)." },
+      effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max"], description: "MULTI-MODEL: thinking level for the sub-agents (provider reasoning hint). Omit for the model default." },
     },
     required: ["task"],
   },
   func: async (
-    args: { task: string; subtasks?: string[]; strategy?: string; branches?: number },
+    args: { task: string; subtasks?: string[]; strategy?: string; branches?: number; model?: string; effort?: string },
     extra?: Readonly<{ sessionId?: string; ai?: AxAIService; abortSignal?: AbortSignal }>,
   ) => {
     const task = String(args?.task ?? "").trim()
@@ -399,9 +407,10 @@ const orchestrateTool: AxFunction = {
     const signal = signalOf(extra)
     const rootId = `orch-tool:${sessionId}:${Date.now()}`
     const { optsFor, budget } = boundary(sessionId, signal, rootId)
+    const choice = choiceFromArgs({ model: args?.model, effort: args?.effort }) // MULTI-MODEL: no model/effort ⇒ default Kimi
     try {
       const out = await otelContext.with(otelContext.active(), () =>
-        runOrchestration({ ai, strategy, task: overall, subtasks, branches, optsFor, budget, rootId }),
+        runOrchestration({ ai, strategy, task: overall, subtasks, branches, optsFor, budget, rootId, choice }),
       )
       // COST-METER: append a usage footer (… · N branches · Xk tok [· ~$cost]) so the
       // model — and whoever reads the tool result — sees what the fan-out actually cost.

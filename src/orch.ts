@@ -8,7 +8,7 @@
 // calls ax.forward() is `node` (below); the lifecycle-bracketed runner is runNode()
 // (orch-recipes.ts). leaf/agent/worker/task/job/unit/runner are FORBIDDEN as names for
 // the unit — they are all the SAME thing = a node. NodeEvent/NodeView already use it.
-import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxProgramForwardOptions, type AxMemory, type AxStepHooks } from "@ax-llm/ax"
+import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxModelConfig, type AxProgramForwardOptions, type AxMemory, type AxStepHooks } from "@ax-llm/ax"
 import { type Context as OtelContext, type Tracer, trace as otelTrace } from "@opentelemetry/api"
 import * as Effect from "effect/Effect"
 import { emitActivity, type Activity } from "./activity.ts"
@@ -39,6 +39,17 @@ export type LeafOpts = {
   // (AxProgramForwardOptions.stepHooks); node() threads it through the same cast. Omitted ⇒ ax's
   // default (throw on max-steps), so callers that want the graceful ceiling supply it explicitly.
   stepHooks?: AxStepHooks
+  // MULTI-MODEL routing (per-NODE model + thinking level). ALL optional — absent ⇒ the
+  // shared service's default model (Kimi K2.7) at default effort, i.e. UNCHANGED behaviour.
+  // `model` is the per-forward CF model id (ax swaps the model param of the SAME service —
+  // both pool models live on the same CF endpoint, no separate AxAIService). `modelConfig`
+  // carries the AxModelConfig fragment (effort hint + the maxTokens FLOOR that keeps a
+  // thinking model's reasoning from starving its content). `thinkingTokenBudget` is ax's
+  // string-level thinking control. ALL are real AxProgramForwardOptions fields; node() casts
+  // the bag through. Built by src/models.ts nodeForwardOpts() and spread onto LeafOpts.
+  model?: string | undefined
+  modelConfig?: AxModelConfig | undefined
+  thinkingTokenBudget?: "minimal" | "low" | "medium" | "high" | "highest" | "none" | undefined
 }
 
 // A node lifecycle event over the EXISTING activity bus + OTel span annotation —
