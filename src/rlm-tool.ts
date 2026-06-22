@@ -52,6 +52,15 @@ const RLM_TOKEN_HARD = Number(process.env.AX2_RLM_TOKEN_HARD ?? 20_000_000)
 
 const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
 
+// Steer BOTH actor stages (distiller + executor) away from CommonJS. The AxJSRuntime worker
+// is a least-privilege ESM sandbox (no require/import/Node modules — by design); an RLM mines
+// an in-memory context blob, so it never needs them. Kimi defaults to require() out of habit,
+// which throws "require is not defined" and loops the run to a timeout — this reinforces the
+// pure-JS contract the runtime already enforces. Variable-name-generic (executor sees
+// executorRequest/distilledContext, distiller sees the raw context global).
+const SANDBOX_RULE =
+  "The code runtime is a SANDBOXED ES-MODULE environment: NO require(), NO import, NO Node modules (no fs, path, process, child_process, http). NEVER call require or import — they are undefined and throw. The data you need is ALREADY present as runtime variables — read it directly, never load it from disk. Use ONLY plain JavaScript (String/Array/Object methods, regex, JSON, Math, console.log) plus the injected primitives (llmQuery, final, askClarification). Write ONE small observable step per turn — a single console.log to inspect, or final(...) to finish."
+
 const signalOf = (extra: { abortSignal?: AbortSignal } | undefined): AbortSignal =>
   extra?.abortSignal ?? new AbortController().signal
 
@@ -97,6 +106,14 @@ export const runRlm = async (
     runtime: new AxJSRuntime({ permissions: [AxJSRuntimePermission.TIMING] }),
     maxSteps: limits.maxSteps,
     contextPolicy: { preset: "checkpointed", budget: "balanced" },
+    // The actor (Kimi) defaults to CommonJS (`require(...)`), but the AxJSRuntime worker is a
+    // SANDBOXED ES-MODULE context with NO require/import/Node modules — require-style code
+    // throws "require is not defined" every actor turn and the run times out. Both actor
+    // stages write code (distiller mines the raw context global; executor works the
+    // distilledContext), so steer BOTH — variable-name-generic (the executor sees
+    // executorRequest/distilledContext, NOT the raw `context`).
+    contextOptions: { description: SANDBOX_RULE },
+    executorOptions: { description: SANDBOX_RULE },
     // actorTurnCallback fires once per executor turn (1-based). Bridge each turn into a
     // start→done|error pair labelled by stage (distiller/executor) so the live tree
     // shows the RLM's internal loop nested under the turn span.
