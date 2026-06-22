@@ -6,6 +6,7 @@
 import { ai, ax, type AxLoggerFunction, AxMemory } from "@ax-llm/ax"
 import { existsSync, readFileSync } from "node:fs"
 import { emitActivity } from "./activity.ts"
+import { leaf } from "./orch.ts"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import * as Cause from "effect/Cause"
@@ -248,7 +249,9 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
         Effect.tryPromise({
           try: () =>
             otelContext.with(traceContext, () =>
-              gen.forward(llm, { message: msg }, { mem, sessionId, tracer, traceContext, maxSteps: MAX_STEPS, stream: false, abortSignal: aborter.signal }),
+              // leaf() is the ONLY thing that calls ax.forward — behavior-identical
+              // wrapper threading the exact turn opts bag through.
+              leaf(gen, { mem, sessionId, tracer, traceContext, maxSteps: MAX_STEPS, stream: false, abortSignal: aborter.signal })(llm, { message: msg }),
             ),
           catch: (e) => new ChatError(e),
         })
