@@ -8,7 +8,7 @@
 //               · PgUp/PgDn/Home/End scroll · click a ▸/▾ to expand
 //               · Esc back (idle) / Esc-twice interrupt (busy) · select to copy
 import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/atom-react"
-import { createCliRenderer, decodePasteBytes, RenderableEvents, SyntaxStyle } from "@opentui/core"
+import { createCliRenderer, decodePasteBytes, RenderableEvents, SyntaxStyle, TextAttributes } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { abortTurn, projectDocLoaded } from "./agent.ts"
@@ -255,22 +255,14 @@ function TurnView({
   )
 }
 
-// THINKING (streaming): live block while reasoning, auto-FOLDS to a one-line summary the
-// instant the reply starts (chosen UX). Own component so its branch lives outside TurnView's
-// cyclomatic budget. Renders nothing when no reasoning streamed.
+// THINKING (reasoning_content): the model's reasoning, rendered LIVE as it streams and KEPT
+// after the reply settles — dim + italic, no fold, no icon, no header (user-specified). Own
+// component so its branch stays outside TurnView's cyclomatic budget. Nothing when no reasoning.
 function ThinkingView({ t }: { t: Turn }) {
   if (t.thinking === undefined || t.thinking.length === 0) return null
-  const live = (t.streaming ?? false) && (t.final === null || t.final === "")
   return (
     <box flexDirection="column" style={{ marginTop: 1, paddingLeft: INDENT }}>
-      {live ? (
-        <>
-          <text fg="#6c7086">{"▽ thinking…"}</text>
-          <text fg="#585b70">{oneLine(t.thinking, 200)}</text>
-        </>
-      ) : (
-        <text fg="#6c7086">{`▸ 💡 thought${t.meta ? ` · ${(t.meta.ms / 1000).toFixed(1)}s` : ""}`}</text>
-      )}
+      <text fg="#585b70" attributes={TextAttributes.ITALIC}>{t.thinking}</text>
     </box>
   )
 }
