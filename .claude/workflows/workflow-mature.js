@@ -84,15 +84,23 @@ Paste the authored scripts + outputs. Prove typed values are typed (not stringif
 
 PRINCIPLES: shortest mature diff; delete the hardcoded menus the script obsoletes; unavoidable any => 'ponytail:'. Commit each --no-verify with
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>. Do NOT git add -A. Re-confirm all line refs at Study (concurrent churn).
+
+FLAKE DISCIPLINE (CRITICAL — the live CF proof is NONDETERMINISTIC + rate-limited; do NOT thrash heal on flake):
+- HARD GATE = the DETERMINISTIC checks only: \`bun run check\` (tsc) + \`bun run lint\`. These never flake — a failure here is REAL, fix it.
+- The LIVE CF proof (real Kimi authoring/running a script) is a SEPARATE confidence signal, NOT a hard heal gate. It flakes for reasons that are NOT your code: CF 429 / rate_limited, contention latency (a parallel run saturating the one CF endpoint → 25-47s + timeouts), model nondeterminism (a buried-fact miss, a differently-worded answer), thinkingTokenBudget rejects. b3c6db0 already had to harden rlm() against exactly this.
+- So on a LIVE failure: RE-RUN it up to 3× FIRST. If any attempt passes ⇒ FLAKY, not failing ⇒ set liveVerified=true, set flaky=true, note it, PROCEED — do NOT heal, do NOT "fix" working code. Only a CONSISTENT failure across all 3 (same error, clearly a logic/wiring bug — NOT 429/timeout/nondeterminism) counts as RED and triggers heal.
+- CLASSIFY every live failure in liveOutput: transient (429/rate_limit/timeout/contention/nondeterministic-miss) vs real (wrong wiring, type error in the prim, the script genuinely can't run). Heal ONLY real.
+- Run live proofs ONE AT A TIME (never fan out concurrent CF live tests — the contention is self-inflicted and IS the flake). Keep the prompt SMALL + the script tiny so the proof is fast + cheap.
+- NEVER mark a feature green on a flake-passed-once-but-mostly-failing live test without saying so: if flaky=true, the report must headline it. A real RED after 3 honest retries ⇒ heal or report blocked, never paper over.
 `
 
 const FIND = { type: 'object', additionalProperties: false, required: ['area', 'facts', 'cites', 'depLanded'],
   properties: { area: { type: 'string' }, facts: { type: 'array', items: { type: 'string' } }, cites: { type: 'array', items: { type: 'string' } }, depLanded: { type: 'boolean' } } }
 const IMPL = {
   type: 'object', additionalProperties: false,
-  required: ['status', 'liveVerified', 'liveOutput', 'authoredScript', 'filesChanged', 'diff', 'checkOutput', 'committed', 'commitSha', 'newPonytails', 'notes'],
+  required: ['status', 'liveVerified', 'flaky', 'liveOutput', 'authoredScript', 'filesChanged', 'diff', 'checkOutput', 'committed', 'commitSha', 'newPonytails', 'notes'],
   properties: {
-    status: { type: 'string' }, liveVerified: { type: 'boolean' }, liveOutput: { type: 'string' }, authoredScript: { type: 'string' },
+    status: { type: 'string' }, liveVerified: { type: 'boolean' }, flaky: { type: 'boolean' }, liveOutput: { type: 'string' }, authoredScript: { type: 'string' },
     filesChanged: { type: 'array', items: { type: 'string' } }, diff: { type: 'string' }, checkOutput: { type: 'string' },
     committed: { type: 'boolean' }, commitSha: { type: 'string' }, newPonytails: { type: 'array', items: { type: 'string' } }, notes: { type: 'array', items: { type: 'string' } },
   },

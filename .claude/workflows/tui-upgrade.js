@@ -36,15 +36,24 @@ ITEMS (from the plan; cite chat.tsx/toolui.ts/atoms.ts lines at Study — they m
 - streaming (CORE — the big one): ax2 is stream:false → no thinking/streaming render (reasoning_content thrown away, reply lands at once). Switch the turn to streamingForward (stream:true), render reasoning_content as a live THINKING block + reply tokens as they arrive (opencode PacedMarkdown is the reference). This touches agent.ts turn() + the de-double logic + atoms/chat.tsx render. FRAME TEST: mock streaming deltas + reasoning → frame shows the thinking block then streamed tokens appearing incrementally. This is a real core refactor — do it carefully, keep non-streaming fallback if a provider lacks it.
 
 PRINCIPLES: pure-TUI items (focus/ime/grouping/diff/errors/theme) do NOT change orch.ts core or turn semantics. streaming DOES change core (turn()) — keep it isolated + behavior-safe. ONE-WORD vocab: node. Real opentui API. Unavoidable any => 'ponytail:'. Each feature: ${CHECK} + lint + ${TUIGATE} green (add the frame test, make it pass). Commit each --no-verify. Do NOT git add -A.
+
+STALE-CHECK: the harness report says streaming may ALREADY be wired (agent.ts turn() stream:true + streamingForward). RE-CONFIRM at Study; if streaming is already in, the 'streaming' feature SHRINKS to just the render assertions (thinking block + incremental tokens) — do NOT re-refactor what's done.
+
+FLAKE DISCIPLINE (CRITICAL — the test:tui PTY frame tests are TIMING-sensitive; do NOT thrash heal on flake):
+- HARD GATE = the DETERMINISTIC checks: \`bun run check\` (tsc) + \`bun run lint\` (incl the in-process scripts/tui/mock.test deterministic unit). A failure here is REAL — fix it.
+- The PTY frame tests (\`bun run test:tui\`, the 8 terminal-control tests) are a real-render confidence signal but can FLAKE for reasons that are NOT your code: frame-settle races (a waitFor polling before the cell-grid stabilizes), the spinner glyph cycling (⠋⠙⠹… — never byte-match it), an instant-mock landing a streamed reply inside one settle window, PTY startup jitter. The harness already uses frame-stable waitFor (never sleep-then-assert) — KEEP that; if you add a frame test, assert STABLE structure (connectors, gutter, the row text), NEVER a spinner frame or a byte-exact golden.
+- On a test:tui failure: RE-RUN it up to 3× FIRST. If any attempt passes ⇒ FLAKY, not failing ⇒ proceed, set flaky=true, note it — do NOT heal, do NOT loosen the assertion to make a real bug pass. Only a CONSISTENT failure across all 3 (the frame genuinely lacks the asserted structure) counts as RED → heal.
+- If a test is flaky because the ASSERTION is timing-fragile (matching a spinner / a mid-settle frame), FIX THE TEST to assert stable structure via waitFor — that is the correct fix, not a retry-forever. Distinguish: fragile-assertion (fix the test) vs real-missing-structure (fix the feature) vs transient-PTY-jitter (retry).
+- NEVER mark a feature frame-proven on a flake: frameProof must be a STABLE captured frame reproduced across the retries.
 `
 
 const FIND = { type: 'object', additionalProperties: false, required: ['area', 'facts', 'cites'],
   properties: { area: { type: 'string' }, facts: { type: 'array', items: { type: 'string' } }, cites: { type: 'array', items: { type: 'string' } } } }
 const IMPL = {
   type: 'object', additionalProperties: false,
-  required: ['status', 'filesChanged', 'diff', 'checkOutput', 'committed', 'commitSha', 'frameProof', 'newPonytails', 'notes'],
+  required: ['status', 'flaky', 'filesChanged', 'diff', 'checkOutput', 'committed', 'commitSha', 'frameProof', 'newPonytails', 'notes'],
   properties: {
-    status: { type: 'string' }, filesChanged: { type: 'array', items: { type: 'string' } }, diff: { type: 'string' }, checkOutput: { type: 'string' },
+    status: { type: 'string' }, flaky: { type: 'boolean' }, filesChanged: { type: 'array', items: { type: 'string' } }, diff: { type: 'string' }, checkOutput: { type: 'string' },
     committed: { type: 'boolean' }, commitSha: { type: 'string' },
     frameProof: { type: 'string', description: 'the captured frame from the NEW test:tui frame assertion proving the feature renders right — NOT compile-only' },
     newPonytails: { type: 'array', items: { type: 'string' } }, notes: { type: 'array', items: { type: 'string' } },
