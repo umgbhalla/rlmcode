@@ -7,7 +7,7 @@ import { ax, type AxLoggerFunction, AxMemory } from "@ax-llm/ax"
 import { existsSync, readFileSync } from "node:fs"
 import { emitActivity } from "./activity.ts"
 import { allocate, BudgetExhaustedError, type BudgetUsage } from "./orch.ts"
-import { runNode } from "./orch-recipes.ts"
+import { finalizeOnMaxSteps, runNode } from "./orch-recipes.ts"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import * as Cause from "effect/Cause"
@@ -28,9 +28,6 @@ const MAX_STEPS = limits.maxSteps // max tool-call iterations per turn — the H
 // MAX_STEPS (tool-call iterations, recovered by turn() below) is the real per-turn stop;
 // the token tally is a tracking/backstop signal. Only an explicit freeze() throws.
 const TOKEN_BUDGET = limits.tokenBudget
-
-const BUDGET_NUDGE =
-  "Your tool-call budget for this turn is used up. Do NOT call any more tools. Using everything you've gathered so far, give the user your best, concise answer now."
 
 const PROVIDER = "cloudflare.workers-ai"
 
@@ -93,29 +90,13 @@ export const projectDocLoaded = (["AGENTS.md", "CLAUDE.md"] as const).find((f) =
 // The MAIN chat gen gets BASE_TOOLS + ORCH_TOOLS — it alone may self-orchestrate.
 // Every orchestration sub-run NODE (orch-tools.ts) is built with BASE_TOOLS only, so a
 // node physically cannot re-orchestrate: the structural one-level recursion guard.
-const chat = ax("message:string -> reply:string", { functions: [...BASE_TOOLS, ...ORCH_TOOLS, ...RLM_TOOLS] })
+const CHAT_TOOLS = [...BASE_TOOLS, ...ORCH_TOOLS, ...RLM_TOOLS]
+const chat = ax("message:string -> reply:string", { functions: CHAT_TOOLS })
 chat.setDescription(`${BASE_PROMPT} ${ORCH_OVERLAY}${loadProjectDoc()}`)
 
-// No-tools generator used to recover when the tool budget is exhausted: it
-// answers from the conversation/tool history already in memory.
-const answerGen = ax("message:string -> reply:string")
-answerGen.setDescription(
-  "You have already gathered information using tools in this conversation. Do NOT request tools. Using the conversation and tool results so far, give the user your best, concise answer in GitHub-flavored markdown.",
-)
-
-// ponytail: brittle string-match — ax throws no typed/coded error for the step
-// limit. Ceiling: breaks if ax rewords the message. Upgrade: switch to a typed error code when ax adds one.
-// Walk the cause chain (ChatError -> AxGenerateError -> inner Error) so a deeper
-// wrap doesn't hide the signal.
-const isMaxSteps = (e: unknown): boolean => {
-  if (!(e instanceof ChatError)) return false
-  let cur: { message?: string; cause?: unknown } | undefined = e.cause as any
-  for (let i = 0; i < 5 && cur; i++) {
-    if (/max steps reached/i.test(String(cur.message ?? ""))) return true
-    cur = cur.cause as any
-  }
-  return false
-}
+// The main chat gen's registered tool names — handed to finalizeOnMaxSteps so the in-loop
+// step hook strips exactly these on the final permitted step (GRACEFUL max-steps ceiling).
+const CHAT_TOOL_NAMES = CHAT_TOOLS.map((f) => f.name)
 
 class ChatError {
   readonly _tag = "ChatError"
@@ -215,17 +196,6 @@ const readUsage = (gen: typeof chat): Usage | undefined => {
   return last?.tokens ?? last
 }
 
-// Sum usage across generators (chat + answerGen on the budget-recovery path) so
-// the token metric / gen_ai.usage.* cover the WHOLE turn, not just the first gen.
-const sumUsage = (...us: ReadonlyArray<Usage | undefined>): Usage | undefined => {
-  const present = us.filter((u): u is Usage => u !== undefined)
-  if (present.length === 0) return undefined
-  const add = (k: keyof Usage) => {
-    const vals = present.map((u) => u[k]).filter((n): n is number => typeof n === "number")
-    return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) : undefined
-  }
-  return { promptTokens: add("promptTokens"), completionTokens: add("completionTokens"), totalTokens: add("totalTokens") }
-}
 
 // ponytail: provider response id read off ax's getChatLog() (remoteId). ax doesn't
 // expose finish_reason publicly (it's on ax's own gen_ai child span already), so
@@ -280,11 +250,11 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       finishReasonState.last = undefined // reset the captureFetch latch for this turn
       const aborter = new AbortController()
       turnAborters.set(sessionId, aborter)
-      // One ADVISORY token budget for the whole turn (shared across the chat + answerGen
-      // nodes). runNode() charges it from each forward result's usage; crossing the SOFT
-      // ceiling only nudges (a delta in the tree) — it NEVER discards the turn. The hard
-      // per-turn stop is MAX_STEPS (recovered above). The tapCause below stays for an
-      // explicit freeze()/runaway, which is the only thing that throws BudgetExhaustedError.
+      // One ADVISORY token budget for the whole turn. runNode() charges it from the forward
+      // result's usage; crossing the SOFT ceiling only nudges (a delta in the tree) — it NEVER
+      // discards the turn. The hard per-turn stop is MAX_STEPS (now handled GRACEFULLY in-loop
+      // by stepHooks below, not by a throw). The tapCause below stays for an explicit
+      // freeze()/runaway, which is the only thing that throws BudgetExhaustedError.
       const budget = allocate(TOKEN_BUDGET)
       const usageOf = (gen: typeof chat): BudgetUsage | undefined => readUsage(gen)
 
@@ -292,11 +262,23 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
         Effect.annotateLogs({ "session.id": sessionId, "message.chars": message.length }),
       )
 
+      // GRACEFUL MAX-STEPS (claude_code ceiling): instead of letting ax throw
+      // "max steps reached" and recovering with a SEPARATE no-tools gen (the old
+      // brittle string-match + answerGen path), we hook ax's own tool loop. On the
+      // LAST permitted step finalizeOnMaxSteps strips the tools, so ax is FORCED to
+      // emit a final TEXT reply IN-LOOP — no throw, no string-match. onTruncate flips
+      // the flag below so the turn is marked truncated-then-finalized (the session
+      // AxMemory persists, so a follow-up turn resumes from where this one stopped).
+      let budgetExhausted = false
+      const stepHooks = finalizeOnMaxSteps(CHAT_TOOL_NAMES, onEvent, `turn:${sessionId}`, () => {
+        budgetExhausted = true
+      })
+
       // Make chat.turn the ACTIVE OTel context during forward so ax's tracer
       // (which reads context.active()) nests its gen_ai span under chat.turn.
       // stream:false -> no token streaming; we render step-by-step.
       // abortSignal -> ax cancels the in-flight forward when the UI interrupts.
-      const runForward = (gen: typeof chat, msg: string) =>
+      const runForward = (msg: string) =>
         Effect.tryPromise({
           try: () =>
             otelContext.with(traceContext, () =>
@@ -305,8 +287,17 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
               runNode(
                 {
                   nodeId: `turn:${sessionId}`,
-                  gen,
-                  opts: { mem, sessionId, tracer, traceContext, maxSteps: MAX_STEPS, stream: false, abortSignal: aborter.signal },
+                  gen: chat,
+                  opts: {
+                    mem,
+                    sessionId,
+                    tracer,
+                    traceContext,
+                    maxSteps: MAX_STEPS,
+                    stream: false,
+                    abortSignal: aborter.signal,
+                    stepHooks,
+                  },
                   onEvent,
                   budget,
                   usageOf,
@@ -318,28 +309,10 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
           catch: (e) => new ChatError(e),
         })
 
-      // If the tool-call budget is hit, ax throws "max steps reached"; don't fail
-      // — recover with a NO-TOOLS generator that answers from the conversation/
-      // tool history already in memory. (Tried stripping tools mid-loop via a
-      // beforeStep hook to avoid the throw + its red gen_ai span, but kimi then
-      // emits raw <|tool_call_begin|> tokens as text — a fresh no-tools generator
-      // with an explicit "answer now" nudge gives clean prose. The red child span
-      // on the abandoned attempt is the documented cost; chat.budget_exhausted
-      // marks the turn so it's not mistaken for an unrecovered failure.)
-      let budgetExhausted = false
-      const res = yield* runForward(chat, message).pipe(
-        Effect.catchIf(isMaxSteps, () =>
-          Effect.gen(function* () {
-            budgetExhausted = true
-            yield* Effect.annotateCurrentSpan({ "chat.budget_exhausted": true, "chat.max_steps": MAX_STEPS })
-            yield* Effect.logWarning("tool budget reached -> asking model to answer").pipe(
-              Effect.annotateLogs({ "session.id": sessionId, "chat.max_steps": MAX_STEPS }),
-            )
-            return yield* runForward(answerGen, BUDGET_NUDGE)
-          }),
-        ),
-        // Token budget breach is a HARD failure (distinct from max-steps recovery):
-        // annotate the span with the typed error's spent/total, then re-fail.
+      const res = yield* runForward(message).pipe(
+        // Token budget breach is a HARD failure: annotate the span with the typed
+        // error's spent/total, then re-fail. (Max-steps no longer throws — it is
+        // handled gracefully in-loop above — so this only catches a real runaway.)
         (eff) =>
           Effect.tapCause(eff, (cause) => {
             const be = asBudgetExhausted(Cause.squash(cause))
@@ -353,6 +326,13 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
           }),
       )
 
+      if (budgetExhausted) {
+        yield* Effect.annotateCurrentSpan({ "chat.budget_exhausted": true, "chat.max_steps": MAX_STEPS })
+        yield* Effect.logWarning("max steps reached -> finalized in-loop with tools disabled").pipe(
+          Effect.annotateLogs({ "session.id": sessionId, "chat.max_steps": MAX_STEPS }),
+        )
+      }
+
       // Canonical gen_ai annotations via Effect's own helper (no hand-typed keys).
       // response.id = provider completion id (from ax's chat log) so a turn can be
       // cross-referenced with provider-side logs.
@@ -363,11 +343,13 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
         request: { model: MODEL },
         response: {
           model: MODEL,
-          id: readResponseId(budgetExhausted ? answerGen : chat),
+          id: readResponseId(chat),
           finishReasons: finishReasonState.last ? [finishReasonState.last] : undefined,
         },
       })
-      const usage = budgetExhausted ? sumUsage(readUsage(chat), readUsage(answerGen)) : readUsage(chat)
+      // Single gen now (the in-loop finalize answers on the SAME chat gen/mem), so usage is
+      // just chat's — no separate answerGen to sum. sumUsage retained for orchestration paths.
+      const usage = readUsage(chat)
       if (usage) {
         Telemetry.addGenAIAnnotations(span, {
           usage: { inputTokens: usage.promptTokens, outputTokens: usage.completionTokens },

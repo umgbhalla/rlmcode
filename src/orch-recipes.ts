@@ -6,7 +6,7 @@
 // UNIFIED VOCABULARY: the orchestration unit is a NODE. runNode() runs ONE node (the
 // core `node` prim) bracketed by its start→done|error lifecycle events. leaf/agent/
 // worker/task/job/unit/runner are forbidden as names for the unit.
-import type { AxAIService, AxGen, AxGenIn, AxGenOut } from "@ax-llm/ax"
+import type { AxAIService, AxGen, AxGenIn, AxGenOut, AxStepHooks } from "@ax-llm/ax"
 import { type Budget, type BudgetUsage, node, type LeafOpts, type NodeEvent, pipeline } from "./orch.ts"
 
 // Hard upper bound on in-flight thunks for parallelLimit — the absolute concurrency
@@ -58,6 +58,58 @@ export const parallelLimit = async <T>(
 // a no-op so a recipe can run standalone (tests) without a boundary.
 export type EmitSink = (event: NodeEvent) => void
 const noopSink: EmitSink = () => {}
+
+// GRACEFUL MAX-STEPS — a CEILING, not a cliff (claude_code model). ax runs the tool-calling
+// loop internally; when it would exceed maxSteps it otherwise throws "max steps reached" (a
+// brittle string the old code had to regex-match + recover from with a SEPARATE no-tools gen).
+// Instead we hook the loop: ax's stepHooks.beforeStep(ctx) fires at the START of every step with
+// ctx.stepIndex / ctx.maxSteps and ctx.removeFunctions(...names). On the LAST permitted step we
+// strip ALL tools, so ax sends the final request with NO functions (tool_choice effectively
+// 'none') — the model is FORCED to produce a final TEXT reply from the tool results already in
+// mem, IN-LOOP, with NO throw and NO separate recovery gen. The session AxMemory persists, so a
+// follow-up turn resumes; we emit a small marker (delta) so the UI knows the turn was
+// TRUNCATED-then-finalized, not finished.
+//
+// `toolNames` are the gen's registered function names (BASE_TOOLS [+ ORCH_TOOLS + RLM_TOOLS] for
+// the main turn; BASE_TOOLS for a node). onEvent + nodeId let the marker render on the live node.
+// Real ax types end-to-end (AxStepHooks / AxStepContext.removeFunctions) — no `any`.
+//
+// ponytail: the in-loop finalize is clean only when the model has done >=1 real tool step before
+// the cap (the realistic case: AX2_MAX_STEPS default 50, verified clean at low caps >=2). At the
+// DEGENERATE cap maxSteps=1 (the first step is also the last, so ZERO prior tool work) kimi, primed
+// by a tool-heavy system prompt, can emit raw `<|tool_call_begin|>` sentinel tokens as text instead
+// of prose — a non-empty but garbage reply. Ceiling: a maxSteps=1 turn over a tool-demanding task.
+// Upgrade: when the finalize reply still looks like raw tool-call tokens, run ONE no-tools nudge
+// forward ("you have tool results; answer now, do NOT call tools") on the SAME mem to coerce clean
+// prose — the old answerGen recovery, now a rare last-resort cleaner rather than the primary path.
+// onTruncate (optional) fires ONCE when the cap is hit and tools are stripped — the caller
+// (turn() in agent.ts) flips a flag so the turn can be annotated/marked as truncated-finalized.
+export const finalizeOnMaxSteps = (
+  toolNames: ReadonlyArray<string>,
+  onEvent: EmitSink = noopSink,
+  nodeId = "turn",
+  onTruncate: () => void = () => {},
+): AxStepHooks => {
+  let fired = false
+  return {
+    beforeStep: (ctx) => {
+      // The loop runs steps 0..maxSteps-1; the LAST permitted step is maxSteps-1. Strip tools
+      // there so this step's model call cannot ask for another tool and MUST answer. Guard for
+      // maxSteps<=1 (strip on step 0). Idempotent: removeFunctions on already-gone names is a no-op;
+      // the `fired` latch keeps the marker + onTruncate to a single fire even if beforeStep re-runs.
+      if (ctx.stepIndex >= ctx.maxSteps - 1 && toolNames.length > 0 && !fired) {
+        fired = true
+        ctx.removeFunctions(...toolNames)
+        onTruncate()
+        onEvent({
+          type: "delta",
+          nodeId,
+          chunk: "⚠ max steps reached — finalizing (tools disabled; continue in a new message)",
+        })
+      }
+    },
+  }
+}
 
 // runNode — run ONE node (the core `node` prim) as a lifecycle-bracketed unit:
 // start → done | error. The caller-supplied sink fires the lifecycle events; the recipe

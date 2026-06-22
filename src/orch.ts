@@ -8,7 +8,7 @@
 // calls ax.forward() is `node` (below); the lifecycle-bracketed runner is runNode()
 // (orch-recipes.ts). leaf/agent/worker/task/job/unit/runner are FORBIDDEN as names for
 // the unit — they are all the SAME thing = a node. NodeEvent/NodeView already use it.
-import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxProgramForwardOptions, type AxMemory } from "@ax-llm/ax"
+import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxProgramForwardOptions, type AxMemory, type AxStepHooks } from "@ax-llm/ax"
 import { type Context as OtelContext, type Tracer, trace as otelTrace } from "@opentelemetry/api"
 import * as Effect from "effect/Effect"
 import { emitActivity, type Activity } from "./activity.ts"
@@ -26,6 +26,19 @@ export type LeafOpts = {
   maxSteps: number
   stream: boolean
   abortSignal: AbortSignal
+  // GRACEFUL MAX-STEPS finalize knob (claude_code ceiling): on the LAST forward of a turn/
+  // node — the one that must produce a final text reply instead of looping more tools — we
+  // set this to 'none' so ax disables tool-calling (tool_choice:'none' on the CF/openai
+  // provider) and the model is FORCED to answer from the tool results already in mem. ax's
+  // AxProgramForwardOptions.functionCall accepts this verbatim; node() casts the bag through.
+  // Omitted/undefined on a normal forward (tools stay 'auto'). NOT an `any`: a real ax option.
+  functionCall?: "none" | "auto" | "required"
+  // GRACEFUL MAX-STEPS in-loop hook (claude_code ceiling). ax's stepHooks.beforeStep fires at the
+  // START of each step; finalizeOnMaxSteps (orch-recipes.ts) strips the tools on the LAST permitted
+  // step so the model is FORCED to answer (no throw, no string-match). A real ax forward option
+  // (AxProgramForwardOptions.stepHooks); node() threads it through the same cast. Omitted ⇒ ax's
+  // default (throw on max-steps), so callers that want the graceful ceiling supply it explicitly.
+  stepHooks?: AxStepHooks
 }
 
 // A node lifecycle event over the EXISTING activity bus + OTel span annotation —

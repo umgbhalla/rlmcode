@@ -35,7 +35,7 @@
 import { ax, AxMemory, type AxAIService, type AxFunction, type AxGen } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import { BASE_PROMPT, limits, llm, onEvent, readUsageOf } from "./runtime.ts"
-import { adversarialVerify, judge, loopUntilDry, MAX_CONCURRENCY, parallelLimit, runNode } from "./orch-recipes.ts"
+import { adversarialVerify, finalizeOnMaxSteps, judge, loopUntilDry, MAX_CONCURRENCY, parallelLimit, runNode } from "./orch-recipes.ts"
 import { allocate, type Budget, BudgetExhaustedError, type LeafOpts } from "./orch.ts"
 import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
@@ -130,6 +130,11 @@ const nodeGen = (persona: string): AxGen => {
   return g
 }
 
+// The node gen's tool names — handed to finalizeOnMaxSteps so a node that exhausts its step
+// budget is FORCED to emit its best reply in-loop (GRACEFUL ceiling) instead of throwing
+// "max steps reached" → an empty/failed branch. Same claude_code behavior as the main turn.
+const BASE_TOOL_NAMES = BASE_TOOLS.map((f) => f.name)
+
 // One bracketed worker node over `task`, charged to the shared budget. nodeId nests it
 // under rootId in the live tree.
 type NodeWorkerOpts = {
@@ -153,8 +158,12 @@ const nodeWorker = ({ ai, rootId, i, task, persona, optsFor, budget }: NodeWorke
   // generic "branch N" — so the live tree shows the division of labour, and a
   // decompose run reads as distinct work per node rather than N identical attempts.
   const gen = nodeGen(persona)
+  // GRACEFUL MAX-STEPS for a node: strip the node's tools on its last permitted step so it
+  // returns its BEST reply (from work already done) instead of throwing — a node that exhausts
+  // steps yields real output, never an error/empty branch. The marker renders on this node.
+  const opts: LeafOpts = { ...optsFor(), stepHooks: finalizeOnMaxSteps(BASE_TOOL_NAMES, onEvent, nodeId) }
   return runNode(
-    { nodeId, parentId: rootId, phase: `branch ${i + 1}: ${clip(task, 48)}`, gen, opts: optsFor(), onEvent, budget, usageOf: (g) => readUsageOf(g) },
+    { nodeId, parentId: rootId, phase: `branch ${i + 1}: ${clip(task, 48)}`, gen, opts, onEvent, budget, usageOf: (g) => readUsageOf(g) },
     ai,
     { message: task },
   ).then((o) => String((o as { reply?: string }).reply ?? ""))
