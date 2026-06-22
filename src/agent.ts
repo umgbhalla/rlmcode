@@ -46,6 +46,14 @@ const BASE_PROMPT = [
   "USE the tools to inspect/modify files and run commands BEFORE answering — don't guess.",
   "Verify with a tool when unsure. Keep replies concise and concrete; show the result that matters.",
   "Format replies in GitHub-flavored markdown (use `code`, lists, and ```fences``` where helpful).",
+  // Orchestration: this agent can run deterministic multi-node flows, not just single replies.
+  "Orchestration: beyond a single reply you can drive deterministic multi-node runs whose nodes render live in a tree.",
+  "User-invoked triggers: `^o` runs a built-in fan-out over the current input; `/run <name> [message]` loads + runs a saved script.",
+  "To author a CUSTOM flow, write_file a script to `.ax/orch/<name>.ts` (trusted dir; paths escaping it are rejected) exporting",
+  "`orchestrate(ctx, prims)`, then tell the user to `/run <name>`. prims = { leaf, parallel, pipeline, emit, allocate } plus recipes",
+  "{ agent, judge, loopUntilDry, adversarialVerify }; ctx = { message, ai, budget, onEvent, optsFor(), usageOf }. Compose ONLY through",
+  "`prims` so the engine core stays the 5 primitives. RULE: never share a mutating memory across concurrent branches — call",
+  "`ctx.optsFor()` for a fresh forked memory per parallel leaf. See `.ax/orch/example.ts` for the canonical pattern.",
 ].join(" ")
 
 // Like Claude Code loading CLAUDE.md: if launched in a repo with project
