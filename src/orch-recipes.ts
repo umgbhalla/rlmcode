@@ -7,7 +7,7 @@
 // core `node` prim) bracketed by its start→done|error lifecycle events. leaf/agent/
 // worker/task/job/unit/runner are forbidden as names for the unit.
 import type { AxAIService, AxGen, AxGenIn, AxGenOut, AxStepHooks } from "@ax-llm/ax"
-import { makeNodeLogger } from "./activity.ts"
+import { emitActivity, makeNodeLogger } from "./activity.ts"
 import { type Budget, type BudgetUsage, node, type NodeOpts, type NodeEvent, tokensOf } from "./orch.ts"
 import { LEAF_TIMEOUT_MS, resilientNode } from "./orch-resilience.ts"
 // Re-export the resilience surface so callers/tests keep a single recipe import site.
@@ -72,7 +72,10 @@ const noopSink: EmitSink = () => {}
 // even when the AI service has no service-level debug (forward opts win over service options).
 // A caller that already supplied a logger keeps it (never clobber an explicit override).
 const withNodeLogger = (opts: NodeOpts, nodeId: string): NodeOpts =>
-  opts.logger !== undefined ? opts : { ...opts, logger: makeNodeLogger(nodeId), debug: true }
+  // ponytail: per-node logger bound to the module-global emitActivity sink (step 1 compat).
+  // Upgrade: thread runTurn's per-turn emit into the recipes so a node feeds the per-turn queue
+  // (step 5 of the core/tui split deletes the global sink and reroutes this seam).
+  opts.logger !== undefined ? opts : { ...opts, logger: makeNodeLogger(emitActivity, nodeId), debug: true }
 
 // GRACEFUL MAX-STEPS — a CEILING, not a cliff (claude_code model). ax runs the tool-calling
 // loop internally; when it would exceed maxSteps it otherwise throws "max steps reached" (a

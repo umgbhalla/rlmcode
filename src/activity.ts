@@ -52,7 +52,12 @@ const argStr = (p: unknown) => (typeof p === "string" ? p : JSON.stringify(p ?? 
 // optional `nodeId` is STAMPED onto every tool/result activity this logger emits, so a
 // node's tools land under THAT node (atoms routes by nodeId). id correlates a call with
 // its result so the row updates in place.
-const emitFromLog = (m: { name?: string; value?: unknown }, nodeId?: string) => {
+//
+// PER-TURN emit: `emit` is the destination for every Activity this mapping produces — a
+// per-turn closure (run.ts threads runTurn's queue.push) so the live feed is scoped to ONE
+// turn, NOT a module global. The (calls.length>0 && content) gate below is the one that
+// keeps the FINAL reply prose from leaking as activity text — KEEP IT INTACT on this path.
+const emitFromLog = (emit: (a: Activity) => void, m: { name?: string; value?: unknown }, nodeId?: string) => {
   type Call = { id: string; function: { name: string; params?: string | object } }
   type StepResult = { content?: string; functionCalls?: ReadonlyArray<Call>; thought?: string }
   // The streamed reply + reasoning come from turn()'s streamingForward DRAIN (agent.ts) — the
@@ -61,8 +66,11 @@ const emitFromLog = (m: { name?: string; value?: unknown }, nodeId?: string) => 
   const emitStep = (results: ReadonlyArray<StepResult>) => {
     for (const r of results) {
       const calls = r.functionCalls ?? []
-      if (calls.length > 0 && r.content && r.content.trim()) emitActivity({ kind: "text", text: r.content.trim() })
-      for (const fc of calls) emitActivity({ kind: "tool", id: fc.id, name: fc.function.name, args: argStr(fc.function.params), nodeId })
+      // GATE (final-reply-once): only surface step narration when the step ALSO made tool
+      // calls — a content-only step is the model's FINAL reply, carried by the reply arm, so
+      // it must NEVER leak here as activity text. Do not loosen this condition.
+      if (calls.length > 0 && r.content && r.content.trim()) emit({ kind: "text", text: r.content.trim() })
+      for (const fc of calls) emit({ kind: "tool", id: fc.id, name: fc.function.name, args: argStr(fc.function.params), nodeId })
     }
   }
   switch (m.name) {
@@ -74,19 +82,31 @@ const emitFromLog = (m: { name?: string; value?: unknown }, nodeId?: string) => 
       break
     case "FunctionResults":
       for (const fr of m.value as ReadonlyArray<{ functionId: string; result: unknown; isError?: boolean }>)
-        emitActivity({ kind: "result", id: fr.functionId, result: String(fr.result).slice(0, 4000), isError: Boolean(fr.isError), nodeId })
+        emit({ kind: "result", id: fr.functionId, result: String(fr.result).slice(0, 4000), isError: Boolean(fr.isError), nodeId })
       break
     default:
       break
   }
 }
 
-// The MAIN-turn logger (no nodeId) — its tool/result activities go to the transcript.
-// Bound onto the shared llm service in agent.ts (the default for the main chat gen).
-export const liveLogger: AxLoggerFunction = (m) => emitFromLog(m)
+// PER-TURN liveLogger factory — the FIRST move off the module-global sink. Takes the turn's
+// `emit` closure and returns the MAIN-turn logger (no nodeId): its tool/result/narration
+// activities flow into THIS turn's queue. ax invokes it during forward() as steps complete.
+// makeNodeLogger (below) is already a per-id factory; this gives the main turn the SAME shape,
+// so run.ts can build BOTH from one per-turn emit and the module-load global sink can die.
+export const makeLiveLogger = (emit: (a: Activity) => void): AxLoggerFunction => (m) => emitFromLog(emit, m)
+
+// COMPAT (step 1 of the core/tui split): the module-global MAIN-turn logger, kept bound to the
+// global emitActivity sink so agent.ts's module-load default behaves byte-for-byte as before.
+// The real per-turn wiring (run.ts builds makeLiveLogger over its own queue) lands in step 3;
+// the global sink + this binding are deleted in step 5. ponytail: module-global sink binding.
+// Upgrade: per-turn makeLiveLogger(emit) inside runTurn (src/core/run.ts) — kills setActivitySink.
+export const liveLogger: AxLoggerFunction = makeLiveLogger(emitActivity)
 
 // PER-NODE logger factory: returns an AxLoggerFunction that STAMPS every tool/result it
 // emits with `nodeId`, so the node's own tools route to its OrchTree node (not the main
 // transcript). Passed in a node's forward() opts (NodeOpts.logger) — concurrency-correct:
 // each parallel node builds its OWN logger closing over its OWN id, so tools never interleave.
-export const makeNodeLogger = (nodeId: string): AxLoggerFunction => (m) => emitFromLog(m, nodeId)
+// Like makeLiveLogger it now takes a per-turn `emit` so a node feeds the SAME per-turn queue.
+export const makeNodeLogger = (emit: (a: Activity) => void, nodeId: string): AxLoggerFunction => (m) =>
+  emitFromLog(emit, m, nodeId)
