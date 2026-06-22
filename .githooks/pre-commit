@@ -9,17 +9,24 @@ bun run test || exit 1
 bun scripts/design-check.ts --staged || exit 1
 bun scripts/ponytail-debt.ts --staged || exit 1
 
-# Guard-preservation: src/tools.ts is the unsandboxed trust boundary (bash,
-# read/write/edit run real fs/shell). Block a commit that nets-out a guard
-# (try/catch/throw/path-check) without replacing it. Override: --no-verify.
-diff=$(git diff --cached -U0 -- src/tools.ts)
-if [ -n "$diff" ]; then
+# Guard-preservation: any file under src/ that contains trust-boundary guards
+# (try/catch/throw/path-check) must not net-remove them in a commit. This
+# generalizes the original src/tools.ts-only check to every module that already
+# carries these guards, while keeping src/tools.ts as the primary unsandboxed
+# boundary. Override: git commit --no-verify.
+for file in $(git diff --cached --name-only -- 'src/*.ts' 'src/*.tsx'); do
+  diff=$(git diff --cached -U0 -- "$file")
+  if [ -z "$diff" ]; then continue; fi
+  # Only check files that already contain at least one guard token.
+  if ! git show "HEAD:$file" 2>/dev/null | grep -qE '(try \{|catch|throw|\.startsWith\(|path\.(resolve|normalize))'; then
+    continue
+  fi
   pat='(try \{|catch|throw|\.startsWith\(|path\.(resolve|normalize))'
   removed=$(printf '%s\n' "$diff" | grep -cE "^-[^-]*$pat")
   added=$(printf '%s\n' "$diff" | grep -cE "^\+[^+]*$pat")
   if [ "$removed" -gt "$added" ]; then
-    echo "guard-check: src/tools.ts drops $((removed - added)) guard(s) (try/catch/throw/path-check)"
-    echo "  at the unsandboxed trust boundary. Intentional? git commit --no-verify"
+    echo "guard-check: $file drops $((removed - added)) guard(s) (try/catch/throw/path-check)"
+    echo "  at a trust boundary. Intentional? git commit --no-verify"
     exit 1
   fi
-fi
+done

@@ -57,9 +57,9 @@ grandfathered; new files must stay under the budget.
 
 ## Extended ponytail scan
 
-`bun run debt` scans `src/`, `scripts/`, and `.ax/orch/` for `ponytail:`
-markers. Every marker must include an `Upgrade:` line describing the exit
-strategy. Markers without one fail the lint gate.
+`bun run debt` scans `src/` and `scripts/` for `ponytail:` markers. Every
+marker must include an `Upgrade:` line describing the exit strategy. Markers
+without one fail the lint gate.
 
 ## Architectural shortcuts and boundaries
 
