@@ -49,9 +49,7 @@ export const agent = async <I extends AxGenIn, O extends AxGenOut>(
 
 // judge — N candidates → one leaf picks the best. The judge gen takes a structured
 // `candidates` input and returns the chosen result (its O is the chosen-candidate shape).
-// ponytail: skeleton recipe — exposed on the userland surface, not yet adopted by a
-// caller in src/. Ceiling: unexercised path (only agent() is wired into turn() today).
-// Upgrade: call from a best-of-N turn path in agent.ts and assert it in a test (orch-judge).
+// Adopted by orch-run.orchestrate() (the demo-wire best-of-N path).
 export const judge = async <C, I extends AxGenIn, O extends AxGenOut>(
   ai: AxAIService,
   candidates: ReadonlyArray<C>,
@@ -62,9 +60,8 @@ export const judge = async <C, I extends AxGenIn, O extends AxGenOut>(
 
 // loopUntilDry — run body repeatedly until isDry(prev,next) says it converged (or max
 // hit). Returns the last (accumulated) value. Body owns its own accumulation.
-// ponytail: skeleton recipe — userland surface, not yet adopted by a caller in src/.
-// Ceiling: unexercised path. Upgrade: drive an iterative-refine turn from agent.ts and
-// cover it with a test (orch-loop).
+// Adopted by orch-run.orchestrate() (re-runs the candidate fan-out until the
+// surviving-count converges).
 export const loopUntilDry = async <T>(
   body: () => Promise<T>,
   isDry: (prev: T, next: T) => boolean,
@@ -81,9 +78,7 @@ export const loopUntilDry = async <T>(
 
 // adversarialVerify — produce once, then fan the skeptics out via parallel() (failed
 // skeptic → null, dropped), and let `accept` tally the boolean votes.
-// ponytail: skeleton recipe — userland surface, not yet adopted by a caller in src/.
-// Ceiling: unexercised path. Upgrade: wire a verify-before-accept turn in agent.ts and
-// assert the vote tally in a test (orch-verify).
+// Adopted by orch-run.orchestrate() (skeptics vote on the judged answer).
 export const adversarialVerify = async <T>(
   produce: () => Promise<T>,
   skeptics: ReadonlyArray<(x: T) => Promise<boolean>>,

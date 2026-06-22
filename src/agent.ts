@@ -28,10 +28,12 @@ const TOKEN_BUDGET = Number(process.env.AX2_TOKEN_BUDGET ?? 2_000_000)
 const BUDGET_NUDGE =
   "Your tool-call budget for this turn is used up. Do NOT call any more tools. Using everything you've gathered so far, give the user your best, concise answer now."
 
-const MODEL = "@cf/moonshotai/kimi-k2.7-code"
+export const MODEL = "@cf/moonshotai/kimi-k2.7-code"
 const PROVIDER = "cloudflare.workers-ai"
 
-const llm = ai({
+// The shared AI service. Exported so the orchestration demo (orch-run.ts) drives
+// the SAME provider/logger/captureFetch wiring as turn() — one client, one trace.
+export const llm = ai({
   name: "openai",
   apiKey: process.env.CLOUDFLARE_API_TOKEN!,
   apiURL: `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/v1`,
@@ -209,7 +211,20 @@ const readResponseId = (gen: typeof chat): string | undefined => {
 // at the session boundary — the recipe stays Promise-native and never touches
 // Effect. agentNode() runs inside otelContext.with(traceContext), so getActiveSpan()
 // inside emit() resolves to the live chat.turn span (not a forked/empty context).
-const onEvent = (event: NodeEvent): void => Effect.runSync(emit(event))
+export const onEvent = (event: NodeEvent): void => Effect.runSync(emit(event))
+
+// Generic usage reader (readUsage is typed to `typeof chat`; this is the same
+// getUsage() probe over any AxGen the orchestration demo forwards). Exported so
+// orch-run.ts charges the shared Budget from each leaf's usage, exactly like turn().
+export const readUsageOf = (gen: unknown): BudgetUsage | undefined => {
+  const u = (gen as { getUsage?: () => unknown }).getUsage?.()
+  const last = Array.isArray(u) ? u[u.length - 1] : u
+  return (last as { tokens?: BudgetUsage })?.tokens ?? (last as BudgetUsage | undefined)
+}
+
+// Tool-call iteration ceiling + per-orchestration token ceiling, re-exported so the
+// orchestration demo (orch-run.ts) builds LeafOpts/Budget with the same limits as turn().
+export const limits = { maxSteps: MAX_STEPS, tokenBudget: TOKEN_BUDGET } as const
 
 export type TurnResult = { reply: string; tokens?: number; finishReason?: string; budget: boolean }
 

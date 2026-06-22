@@ -8,6 +8,7 @@ import * as Tracer from "effect/Tracer"
 import * as Atom from "effect/unstable/reactivity/Atom"
 import { setActivitySink } from "./activity.ts"
 import { turn } from "./agent.ts"
+import { orchestrate } from "./orch-run.ts"
 import { appRuntime } from "./otel.ts"
 import { sessionsRT } from "./sessions.ts"
 
@@ -86,6 +87,62 @@ export const newSessionAtom = appRuntime.fn((_: void, get) =>
   }),
 )
 
+// Wire the activity bus to the live transcript for one in-flight turn/orchestration:
+// narration/tool/result rows patch messages; node events patch the orch tree. Shared
+// by sendAtom (single turn) and orchestrateAtom (multi-node demo) — identical sink.
+const installSink = (
+  patch: (fn: (m: readonly Msg[]) => readonly Msg[]) => void,
+  orchPatch: (fn: (t: OrchTree) => OrchTree) => void,
+) =>
+  setActivitySink((a) => {
+    switch (a.kind) {
+      case "text":
+        patch((m) => [...m, { kind: "agent", text: a.text }])
+        break
+      case "tool":
+        patch((m) => [...m, { kind: "tool", id: a.id, name: a.name, args: a.args, status: "running", result: "" }])
+        break
+      case "result":
+        patch((m) =>
+          m.map((x) => (x.kind === "tool" && x.id === a.id ? { ...x, status: a.isError ? "error" : "ok", result: a.result } : x)),
+        )
+        break
+      case "node":
+        orchPatch((t) => {
+          const prev = t.nodes[a.nodeId]
+          // parentId is carried on start; on delta/done/error it's undefined, so
+          // ALWAYS keep the previously-known parentId — a child that resolves
+          // before its parent's start event never drops its edge.
+          const parentId = a.parentId ?? prev?.parentId
+          if (a.event === "start") {
+            const node: OrchNode = {
+              id: a.nodeId,
+              parentId,
+              label: a.detail ?? a.nodeId,
+              phase: a.detail ?? "",
+              status: prev?.status ?? "running",
+              result: prev?.result,
+            }
+            const isRoot = parentId === undefined
+            return {
+              nodes: { ...t.nodes, [a.nodeId]: node },
+              roots: isRoot && !t.roots.includes(a.nodeId) ? [...t.roots, a.nodeId] : t.roots,
+            }
+          }
+          // delta/done/error update an existing node in place; ignore unknown ids.
+          if (prev === undefined) return t
+          const next: OrchNode =
+            a.event === "done"
+              ? { ...prev, parentId, status: "done", result: a.detail }
+              : a.event === "error"
+                ? { ...prev, parentId, status: "error", result: a.detail }
+                : { ...prev, parentId } // delta: streaming chunk, no status change (tree shows phase only)
+          return { ...t, nodes: { ...t.nodes, [a.nodeId]: next } }
+        })
+        break
+    }
+  })
+
 /** Send a message in the active session: append user -> traced turn -> append reply. */
 export const sendAtom = appRuntime.fn((message: string, get) =>
   Effect.gen(function* () {
@@ -117,54 +174,7 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
 
     // Step-by-step activity from ax's native logger: agent narration, tool
     // calls (in-flight), and results (which update the matching row in place).
-    setActivitySink((a) => {
-      switch (a.kind) {
-        case "text":
-          patch((m) => [...m, { kind: "agent", text: a.text }])
-          break
-        case "tool":
-          patch((m) => [...m, { kind: "tool", id: a.id, name: a.name, args: a.args, status: "running", result: "" }])
-          break
-        case "result":
-          patch((m) =>
-            m.map((x) => (x.kind === "tool" && x.id === a.id ? { ...x, status: a.isError ? "error" : "ok", result: a.result } : x)),
-          )
-          break
-        case "node":
-          orchPatch((t) => {
-            const prev = t.nodes[a.nodeId]
-            // parentId is carried on start; on delta/done/error it's undefined, so
-            // ALWAYS keep the previously-known parentId — a child that resolves
-            // before its parent's start event never drops its edge.
-            const parentId = a.parentId ?? prev?.parentId
-            if (a.event === "start") {
-              const node: OrchNode = {
-                id: a.nodeId,
-                parentId,
-                label: a.detail ?? a.nodeId,
-                phase: a.detail ?? "",
-                status: prev?.status ?? "running",
-                result: prev?.result,
-              }
-              const isRoot = parentId === undefined
-              return {
-                nodes: { ...t.nodes, [a.nodeId]: node },
-                roots: isRoot && !t.roots.includes(a.nodeId) ? [...t.roots, a.nodeId] : t.roots,
-              }
-            }
-            // delta/done/error update an existing node in place; ignore unknown ids.
-            if (prev === undefined) return t
-            const next: OrchNode =
-              a.event === "done"
-                ? { ...prev, parentId, status: "done", result: a.detail }
-                : a.event === "error"
-                  ? { ...prev, parentId, status: "error", result: a.detail }
-                  : { ...prev, parentId } // delta: streaming chunk, no status change (tree shows phase only)
-            return { ...t, nodes: { ...t.nodes, [a.nodeId]: next } }
-          })
-          break
-      }
-    })
+    installSink(patch, orchPatch)
 
     const startedAt = Date.now()
     const res = yield* turn(rt.mem, rt.parent, id)(text).pipe(
@@ -189,6 +199,63 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
       tokens: res.tokens,
       finishReason: res.finishReason,
       budget: res.budget,
+    }
+    patch((m) => [...m, { kind: "agent", text: res.reply, meta }])
+  }),
+)
+
+/**
+ * Run the demo orchestration (orch-run.orchestrate) for the input in the active
+ * session: append user -> REAL multi-node fan-out/judge/verify (NodeEvents render
+ * the live tree) -> append the judged best answer. Uses the SAME session root span
+ * (one trace per session) and installs the SAME activity sink as sendAtom — but
+ * dispatches orchestrate() instead of the single turn(). Each parallel branch forks
+ * its own AxMemory inside orchestrate(); the session mem (rt.mem) is left untouched.
+ */
+export const orchestrateAtom = appRuntime.fn((message: string, get) =>
+  Effect.gen(function* () {
+    const text = message.trim()
+    const s = get(appAtom)
+    if (text.length === 0 || s.activeId === null) return
+    const id = s.activeId
+    const rt = sessionsRT.get(id)
+    if (rt === undefined) return
+
+    const patch = (fn: (m: readonly Msg[]) => readonly Msg[]) => {
+      const cur = get(appAtom)
+      get.set(appAtom, {
+        ...cur,
+        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, messages: fn(x.messages) } : x)),
+      })
+    }
+    const orchPatch = (fn: (t: OrchTree) => OrchTree) => {
+      const cur = get(appAtom)
+      get.set(appAtom, {
+        ...cur,
+        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, orch: fn(x.orch ?? { nodes: {}, roots: [] }) } : x)),
+      })
+    }
+
+    patch((m) => [...m, { kind: "you", text }])
+    get.set(busyAtom, true)
+    installSink(patch, orchPatch)
+
+    const startedAt = Date.now()
+    const res = yield* orchestrate(rt.parent, id, text)().pipe(
+      Effect.catchCause((c) => {
+        const e = Cause.squash(c) as { cause?: { message?: string }; message?: string }
+        const raw = e?.cause?.message ?? e?.message ?? String(e)
+        return Effect.succeed({ reply: `⚠ ${raw.split("\n")[0]!.slice(0, 240)}`, candidates: 0, accepted: false, votes: 0 })
+      }),
+    )
+
+    setActivitySink(null)
+    get.set(busyAtom, false)
+    const verdict = res.votes > 0 ? (res.accepted ? "accepted" : "rejected") : ""
+    const meta: TurnMeta = {
+      model: `${MODEL} · orchestrate(${res.candidates} cand${verdict ? `, ${verdict}` : ""})`,
+      ms: Date.now() - startedAt,
+      budget: false,
     }
     patch((m) => [...m, { kind: "agent", text: res.reply, meta }])
   }),

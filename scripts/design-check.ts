@@ -16,9 +16,9 @@ export type Finding = { tag: "delete" | "native" | "cycle" | "shrink" | "yagni";
 
 // Reachability roots: their exports are public API / entrypoints, not dead.
 // chat.tsx = app entry; orch.ts = orchestration-core library surface; orch-recipes.ts
-// = userland recipe surface. agent() is already consumed by turn() (agent.ts); the
-// remaining recipes (judge/loopUntilDry/adversarialVerify) are skeleton recipes
-// (ponytail-marked) exposed for userland adoption, so the file stays a root.
+// = userland recipe surface (agent() by turn(); judge/loopUntilDry/adversarialVerify
+// by orch-run.orchestrate()) — kept a root so the recipe library surface isn't pruned
+// to only its current callers.
 const ENTRY = new Set(["src/chat.tsx", "src/orch.ts", "src/orch-recipes.ts"])
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
 const NEST_BUDGET = 5 // block nesting depth per function
