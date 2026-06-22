@@ -16,7 +16,7 @@
 import { AxAgentClarificationError, ai, type AxAIService, type AxFunction } from "@ax-llm/ax"
 import { type Activity, setActivitySink } from "../src/activity.ts"
 import { RLM_WORKFLOW_TOOLS } from "../src/rlm-workflow.ts"
-import { RLM_TOOLS, runRlm } from "../src/rlm-tool.ts"
+import { runRlm } from "../src/rlm-node.ts"
 import { limits, MODEL, rateLimiter } from "../src/runtime.ts"
 
 // Build the CF-Kimi AxAIService EXACTLY like src/runtime.ts's `llm` (openai-shaped
@@ -453,7 +453,11 @@ await (async () => {
   // only know by mining the runtime-held blob (it is NOT in the query). The RLM must
   // load it into the code runtime, find it, and ANSWER with the fact. We also assert the
   // actor/context callbacks FIRED (the bridge that renders the RLM nested in the tree).
-  assert(RLM_TOOLS.some((t) => t.name === "run_rlm"), "run_rlm tool is registered in RLM_TOOLS")
+  {
+    const wf = RLM_WORKFLOW_TOOLS.find((t) => t.name === "rlm_workflow")
+    const enumVals = (wf?.parameters as { properties?: { strategy?: { enum?: string[] } } } | undefined)?.properties?.strategy?.enum ?? []
+    assert(enumVals.includes("rlm"), "rlm_workflow exposes strategy 'rlm' (RLM is a node-kind, not a standalone tool)")
+  }
 
   // The buried fact is a BENIGN identifier (a mascot codename), not a credential —
   // asking for a "secret access code" tripped the model's safety refusal and it would
