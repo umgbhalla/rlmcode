@@ -740,7 +740,9 @@ function App() {
 
   // ONE status line at the bottom: left = context (model · session), right =
   // live state or key hints. No top bar, no scattered metadata.
-  const statusLeft = `kimi · ${active.title}${projectDoc ? ` · ${projectDoc}` : ""}`
+  // active.id is the session.id stamped on every OTel span/log for this session — surface it
+  // in the status bar so a trace in motel is one grep away (session.id="<this>").
+  const statusLeft = `kimi · ${active.title} · ${active.id}${projectDoc ? ` · ${projectDoc}` : ""}`
   const status = statusBar(busy, armed, note, work)
 
   return (
