@@ -10,9 +10,9 @@
 import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/atom-react"
 import { createCliRenderer, decodePasteBytes, SyntaxStyle } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { abortTurn, projectDocLoaded } from "./agent.ts"
-import { appAtom, busyAtom, type Msg, newSessionAtom, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
+import { appAtom, busyAtom, type Msg, newSessionAtom, type OrchNode, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
@@ -226,6 +226,61 @@ function TurnView({
   )
 }
 
+// Orchestration node tree (orch.emit). Recursive: one row per node, indented by
+// depth, with a status glyph (running/done/error). Collapsible — running nodes
+// auto-expand so you watch the fan-out live; settled subtrees collapse on click.
+const nodeGlyph = (s: OrchNode["status"]) => (s === "running" ? "◌" : s === "error" ? "✗" : "✓")
+const nodeColor = (s: OrchNode["status"]) => (s === "error" ? "#f38ba8" : s === "done" ? "#a6e3a1" : "#7f849c")
+
+function NodeView({
+  id,
+  nodes,
+  childrenOf,
+  depth,
+  expNodes,
+  onToggle,
+}: {
+  id: string
+  nodes: Readonly<Record<string, OrchNode>>
+  childrenOf: Readonly<Record<string, readonly string[]>>
+  depth: number
+  expNodes: Set<string>
+  onToggle: (id: string) => void
+}) {
+  const [hover, setHover] = useState(false)
+  const n = nodes[id]
+  if (n === undefined) return null
+  const kids = childrenOf[id] ?? []
+  const hasKids = kids.length > 0
+  const expanded = n.status === "running" || expNodes.has(id) // running auto-expands
+  const color = nodeColor(n.status)
+  const summary = n.status === "running" ? n.phase || "running…" : (n.result ?? n.phase)
+  const hot = hasKids && hover
+  return (
+    <box flexDirection="column" style={{ paddingLeft: depth === 0 ? 0 : INDENT }}>
+      <text
+        fg={color}
+        selectable={false}
+        onMouseDown={(hasKids ? (() => onToggle(id)) : undefined) as any}
+        onMouseOver={(hasKids ? (() => setHover(true)) : undefined) as any}
+        onMouseOut={(() => setHover(false)) as any}
+      >
+        <span fg={hot ? "#ffffff" : color}>{`${nodeGlyph(n.status)} `}</span>
+        <span fg={hot ? "#ffffff" : "#cdd6f4"}>{n.label}</span>
+        {summary ? <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${oneLine(summary)}`}</span> : null}
+        {hasKids ? <span fg={hot ? "#cdd6f4" : "#585b70"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
+      </text>
+      {expanded && hasKids && (
+        <box flexDirection="column">
+          {kids.map((k) => (
+            <NodeView key={k} id={k} nodes={nodes} childrenOf={childrenOf} depth={depth + 1} expNodes={expNodes} onToggle={onToggle} />
+          ))}
+        </box>
+      )}
+    </box>
+  )
+}
+
 function List({ sessions, cursor }: { sessions: readonly SessionView[]; cursor: number }) {
   return (
     <box flexDirection="column" padding={1}>
@@ -246,6 +301,31 @@ function List({ sessions, cursor }: { sessions: readonly SessionView[]; cursor: 
   )
 }
 
+// parent->children index for NodeView recursion; child order follows first-seen
+// insertion in nodes. Only edges whose parent exists are kept.
+const childrenIndex = (orch: OrchTree | undefined): Record<string, string[]> => {
+  const idx: Record<string, string[]> = {}
+  if (!orch) return idx
+  for (const id of Object.keys(orch.nodes)) {
+    const p = orch.nodes[id]!.parentId
+    if (p !== undefined && orch.nodes[p] !== undefined) (idx[p] ??= []).push(id)
+  }
+  return idx
+}
+
+// Per-id expansion toggle set (orch nodes). Encapsulates the Set + reset-on-session.
+const useNodeExpansion = (resetKey: unknown) => {
+  const [expNodes, setExpNodes] = useState<Set<string>>(new Set())
+  useEffect(() => setExpNodes(new Set()), [resetKey])
+  const toggleNode = (id: string) =>
+    setExpNodes((s) => {
+      const n = new Set(s)
+      n.has(id) ? n.delete(id) : n.add(id)
+      return n
+    })
+  return { expNodes, toggleNode }
+}
+
 function App() {
   const state = useAtomValue(appAtom)
   const busy = useAtomValue(busyAtom)
@@ -261,6 +341,7 @@ function App() {
 
   const [expTurns, setExpTurns] = useState<Set<number>>(new Set())
   const [expTools, setExpTools] = useState<Set<string>>(new Set())
+  const { expNodes, toggleNode } = useNodeExpansion(state.activeId)
   const [focus, setFocus] = useState(0) // keyboard focus cursor over expandable rows (Tab cycles)
   // prompt history cursor + the live draft stashed when we start recalling
   const [histIdx, setHistIdx] = useState<number | null>(null)
@@ -312,6 +393,10 @@ function App() {
   const active = state.sessions.find((s) => s.id === state.activeId) ?? null
   const inChat = state.view === "chat" && active !== null
   const turns = active ? toTurns(active.messages) : []
+  // Orchestration tree (only present once orch.emit has fired). childrenIndex builds
+  // the parent->children index NodeView recurses over (memoized on the node map).
+  const orch = active?.orch
+  const childrenOf = useMemo(() => childrenIndex(orch), [orch])
   const isExpanded = (t: Turn) => expTurns.has(t.idx) || t.final === null // in-progress auto-expands
 
   // Expandable rows in transcript order = Tab focus ring (turn-steps header, then
@@ -341,7 +426,6 @@ function App() {
       n.has(id) ? n.delete(id) : n.add(id)
       return n
     })
-
   const setInput = (v: string) => {
     taRef.current?.setText(v)
     setText(v)
@@ -498,6 +582,24 @@ function App() {
             onToggleTool={(id) => toggleTool(id)}
           />
         ))}
+        {orch && orch.roots.length > 0 && (
+          <box flexDirection="column" style={{ marginTop: 1, paddingLeft: 1 }}>
+            <text fg="#585b70">orchestration</text>
+            <box flexDirection="column" style={{ paddingLeft: INDENT }}>
+              {orch.roots.map((rid) => (
+                <NodeView
+                  key={rid}
+                  id={rid}
+                  nodes={orch.nodes}
+                  childrenOf={childrenOf}
+                  depth={0}
+                  expNodes={expNodes}
+                  onToggle={toggleNode}
+                />
+              ))}
+            </box>
+          </box>
+        )}
       </scrollbox>
       <box style={{ paddingLeft: 1, paddingRight: 1, paddingTop: 1, width: "100%" }}>
         <box

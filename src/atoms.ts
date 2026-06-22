@@ -27,7 +27,19 @@ export type Msg =
       readonly status: "running" | "ok" | "error"
       readonly result: string
     }
-export type SessionView = { readonly id: string; readonly title: string; readonly messages: readonly Msg[] }
+// A live orchestration node (orch.emit NodeEvents, projected from the activity bus).
+// status: running until a done/error event lands; result holds the done payload or
+// error cause (clipped upstream). roots preserves first-seen order of top-level nodes.
+export type OrchNode = {
+  readonly id: string
+  readonly parentId?: string
+  readonly label: string
+  readonly phase: string
+  readonly status: "running" | "done" | "error"
+  readonly result?: string
+}
+export type OrchTree = { readonly nodes: Readonly<Record<string, OrchNode>>; readonly roots: readonly string[] }
+export type SessionView = { readonly id: string; readonly title: string; readonly messages: readonly Msg[]; readonly orch?: OrchTree }
 type View = "list" | "chat"
 export type AppState = {
   readonly view: View
@@ -92,6 +104,14 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
       })
     }
 
+    const orchPatch = (fn: (t: OrchTree) => OrchTree) => {
+      const cur = get(appAtom)
+      get.set(appAtom, {
+        ...cur,
+        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, orch: fn(x.orch ?? { nodes: {}, roots: [] }) } : x)),
+      })
+    }
+
     patch((m) => [...m, { kind: "you", text }])
     get.set(busyAtom, true)
 
@@ -111,9 +131,37 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
           )
           break
         case "node":
-          // ponytail: orchestration node lifecycle is span-only for now; no TUI row.
-          // Ceiling: orch nodes are invisible in the transcript. Upgrade: render a
-          // collapsible node tree (parentId->nodeId) in chat.tsx (orch-tree).
+          orchPatch((t) => {
+            const prev = t.nodes[a.nodeId]
+            // parentId is carried on start; on delta/done/error it's undefined, so
+            // ALWAYS keep the previously-known parentId — a child that resolves
+            // before its parent's start event never drops its edge.
+            const parentId = a.parentId ?? prev?.parentId
+            if (a.event === "start") {
+              const node: OrchNode = {
+                id: a.nodeId,
+                parentId,
+                label: a.detail ?? a.nodeId,
+                phase: a.detail ?? "",
+                status: prev?.status ?? "running",
+                result: prev?.result,
+              }
+              const isRoot = parentId === undefined
+              return {
+                nodes: { ...t.nodes, [a.nodeId]: node },
+                roots: isRoot && !t.roots.includes(a.nodeId) ? [...t.roots, a.nodeId] : t.roots,
+              }
+            }
+            // delta/done/error update an existing node in place; ignore unknown ids.
+            if (prev === undefined) return t
+            const next: OrchNode =
+              a.event === "done"
+                ? { ...prev, parentId, status: "done", result: a.detail }
+                : a.event === "error"
+                  ? { ...prev, parentId, status: "error", result: a.detail }
+                  : { ...prev, parentId } // delta: streaming chunk, no status change (tree shows phase only)
+            return { ...t, nodes: { ...t.nodes, [a.nodeId]: next } }
+          })
           break
       }
     })

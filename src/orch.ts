@@ -112,14 +112,18 @@ export async function* pipeline<T>(
 export const emit = (event: NodeEvent, _opts?: EmitOpts): Effect.Effect<void> =>
   Effect.sync(() => {
     // 1) activity bus — orchestration node lifecycle row (atoms sink handles it).
+    // parentId travels on EVERY node Activity (not just start). delta/done/error
+    // NodeEvents don't carry it, so it's undefined there — atoms preserves the
+    // already-known parentId on update, so a child resolving before its parent's
+    // start event never loses its edge.
     const activity: Activity =
       event.type === "delta"
-        ? { kind: "node", nodeId: event.nodeId, event: "delta", detail: event.chunk }
+        ? { kind: "node", nodeId: event.nodeId, event: "delta", parentId: undefined, detail: event.chunk }
         : event.type === "done"
-          ? { kind: "node", nodeId: event.nodeId, event: "done", detail: clip(event.result) }
+          ? { kind: "node", nodeId: event.nodeId, event: "done", parentId: undefined, detail: clip(event.result) }
           : event.type === "error"
-            ? { kind: "node", nodeId: event.nodeId, event: "error", detail: clip(event.cause) }
-            : { kind: "node", nodeId: event.nodeId, event: "start", detail: event.phase }
+            ? { kind: "node", nodeId: event.nodeId, event: "error", parentId: undefined, detail: clip(event.cause) }
+            : { kind: "node", nodeId: event.nodeId, event: "start", parentId: event.parentId, detail: event.phase }
     emitActivity(activity)
 
     // 2) active OTel span — addEvent + structured attributes. getActiveSpan() returns
