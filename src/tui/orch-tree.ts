@@ -94,7 +94,41 @@ const prefixOf = (ancestors: readonly boolean[], isLast: boolean): string => ste
  * is "expanded" when running (live auto-expand) or present in `expNodes`; a node with
  * no detail (no kids AND no owned tools) is trivially expanded (collapse is moot).
  */
-export const flatten = (orch: OrchTree, expNodes: ReadonlySet<string>): Row[] => {
+// A synthetic "… +N earlier" sibling row standing in for the older fan-out branches we
+// collapsed under a velocity cap. Renders like any sibling (so the connectors stay sane)
+// but carries no detail and is never expandable.
+const moreRow = (id: string, prefix: string, hidden: number): Row => ({
+  id,
+  prefix,
+  bodyPrefix: "",
+  glyph: "┄",
+  color: "#585b70",
+  label: `+${hidden} earlier`,
+  summary: "",
+  tokens: undefined,
+  tools: [],
+  toolsLabel: "",
+  hasKids: false,
+  hasDetail: false,
+  expanded: true,
+})
+
+// VELOCITY CAP: on a wide fan-out (rlm_workflow can spawn up to 100 branches) the tree
+// walls the screen. `maxChildren` caps how many of a node's children render — we ALWAYS
+// keep the running ones (that's the live work) plus the most-recent settled, up to the cap,
+// and collapse the older settled into one "… +N earlier" row. Default Infinity ⇒ no cap
+// (the golden test + small trees are unchanged); chat.tsx passes the real window so only the
+// last ~N runs-at-a-time show. Order is preserved (marker sits where the hidden ones were).
+const capChildren = (children: readonly string[], orch: OrchTree, cap: number): { shown: string[]; hidden: number } => {
+  if (children.length <= cap) return { shown: [...children], hidden: 0 }
+  const keep = new Set<string>()
+  for (const c of children) if (orch.nodes[c]?.status === "running") keep.add(c)
+  for (let i = children.length - 1; i >= 0 && keep.size < cap; i--) keep.add(children[i]!)
+  const shown = children.filter((c) => keep.has(c)) // filter preserves first-seen order
+  return { shown, hidden: children.length - shown.length }
+}
+
+export const flatten = (orch: OrchTree, expNodes: ReadonlySet<string>, maxChildren = Number.POSITIVE_INFINITY): Row[] => {
   const kids = childrenIndex(orch)
   const rows: Row[] = []
 
@@ -128,7 +162,17 @@ export const flatten = (orch: OrchTree, expNodes: ReadonlySet<string>): Row[] =>
       expanded,
     })
     if (!expanded) return // collapsed: hide the subtree
-    children.forEach((cid, i) => walk(cid, childAncestors, i === children.length - 1, false))
+    // VELOCITY CAP: keep running + most-recent settled children up to maxChildren; collapse
+    // the older ones into a single "… +N earlier" marker that sits FIRST so the live/recent
+    // runs stay at the bottom (where the eye lands). The marker + shown form the sibling set,
+    // so the last-child connector flags are computed over them, not the full child list.
+    const { shown, hidden } = capChildren(children, orch, maxChildren)
+    const siblings: Array<string | null> = hidden > 0 ? [null, ...shown] : shown
+    siblings.forEach((cid, i) => {
+      const isLastSib = i === siblings.length - 1
+      if (cid === null) rows.push(moreRow(`${id}/__more`, prefixOf(childAncestors, isLastSib), hidden))
+      else walk(cid, childAncestors, isLastSib, false)
+    })
   }
 
   orch.roots.forEach((rid) => walk(rid, [], false, true))

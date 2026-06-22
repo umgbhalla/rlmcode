@@ -6,6 +6,7 @@
 import { ai, type AxRateLimiterFunction } from "@ax-llm/ax"
 import * as Effect from "effect/Effect"
 import { type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
+import { makeMockAI } from "./mock-ai.ts"
 import { KIMI, MODEL_DOC } from "./models.ts"
 
 // MODEL — the DEFAULT session model id (Kimi K2.7), sourced from the model registry
@@ -76,12 +77,18 @@ const TOKEN_BUDGET = Number(process.env.AX2_TOKEN_BUDGET ?? 2_000_000)
 // in place). The finish-reason capture fetch is NO LONGER set here — it is now a
 // PER-TURN forward option (a per-turn capture wrapper threaded into each turn's
 // forward opts), so the latch is per-turn (concurrency-safe), not a service mutation.
-export const llm = ai({
-  name: "openai",
-  apiKey: process.env.CLOUDFLARE_API_TOKEN!,
-  apiURL: `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/v1`,
-  config: { model: MODEL as any },
-})
+// NARROW TEST-ONLY SEAM (off in prod): AX2_MOCK=1 swaps the eagerly-constructed CF
+// service for the canned mock AI (mock-ai.ts — zero network). Without this, `ai({…})`
+// throws "OpenAI API key not set" at module load when the CF env is absent, so a headless
+// harness (no .env) can't even boot chat.tsx. Unset ⇒ the unchanged CF construction.
+export const llm = process.env.AX2_MOCK === "1"
+  ? (makeMockAI() as unknown as ReturnType<typeof ai>)
+  : ai({
+      name: "openai",
+      apiKey: process.env.CLOUDFLARE_API_TOKEN!,
+      apiURL: `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/v1`,
+      config: { model: MODEL as any },
+    })
 
 // Node-lifecycle sink handed to the runNode() recipe. emit() is Effect<void> (an
 // Effect.sync body: bus push + active-OTel-span addEvent). We run it synchronously

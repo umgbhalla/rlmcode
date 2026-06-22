@@ -20,8 +20,22 @@ const MOCK_REPLY = "Found **3 matches** in `src/`. Done."
 const MOCK_TOOL = {
   id: "call_mock_1",
   type: "function" as const,
-  function: { name: "bash", params: JSON.stringify({ cmd: "echo mock" }) },
+  function: { name: "bash", params: JSON.stringify({ command: "echo mock" }) },
 }
+
+// ORCH variant: when the user message asks to orchestrate, the mock instead calls the
+// test-only `mock_orch` tool (registered under the AX2_MOCK seam in agent.ts). That tool
+// replays the canned NodeEvent feed (mock.ts) through the REAL activity bus, so the REAL
+// atoms node-routing + REAL flatten() draw the velocity tree in the live UI — no network,
+// no real orchestration. Keyed off the prompt so the same scriptedChat covers both the
+// plain tool-loop and the orch-tree frame test deterministically.
+const MOCK_ORCH_TOOL = {
+  id: "call_mock_orch",
+  type: "function" as const,
+  function: { name: "mock_orch", params: JSON.stringify({}) },
+}
+const wantsOrch = (req: Readonly<AxChatRequest<unknown>>): boolean =>
+  req.chatPrompt.some((m) => m.role === "user" && typeof m.content === "string" && /orchestrate/i.test(m.content))
 
 // Fixed usage triple (prompt/completion/total + reasoning) so token meta + cost-meter
 // read deterministic numbers. reasoningTokens drives the THINKING attribution path.
@@ -33,9 +47,10 @@ const MOCK_TOKENS = { promptTokens: 100, completionTokens: 40, totalTokens: 140,
 // shape, not a module counter — deterministic and re-entrant (a fresh memory restarts it).
 const scriptedChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResponse> => {
   const hasToolResult = req.chatPrompt.some((m) => m.role === "function")
+  const tool = wantsOrch(req) ? MOCK_ORCH_TOOL : MOCK_TOOL
   const result = hasToolResult
     ? { index: 0, content: MOCK_REPLY, thought: MOCK_THOUGHT, finishReason: "stop" as const }
-    : { index: 0, content: "", thought: MOCK_THOUGHT, functionCalls: [MOCK_TOOL], finishReason: "function_call" as const }
+    : { index: 0, content: "", thought: MOCK_THOUGHT, functionCalls: [tool], finishReason: "function_call" as const }
   return Promise.resolve({
     remoteId: "mock-resp-1",
     results: [result],

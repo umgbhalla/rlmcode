@@ -20,6 +20,7 @@ import { BASE_TOOLS } from "./tools.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { BASE_PROMPT, limits, llm, MODEL, onEvent, rateLimiter } from "./runtime.ts"
 import { makeMockAI, MOCK_MODEL } from "./mock-ai.ts"
+import { MOCK_ORCH_TOOL } from "./mock.ts"
 import { RLM_WORKFLOW_TOOLS } from "./rlm-workflow.ts"
 
 // Step/token ceilings default to today's app values (limits, from runtime.ts): maxSteps is
@@ -492,7 +493,7 @@ export type AxAgentSDK = ReturnType<typeof createAgent>
 // imports nothing from this module, so the seam introduces no init cycle.
 export const defaultAgent: AxAgentSDK =
   process.env.AX2_MOCK === "1"
-    ? createAgent({ ai: makeMockAI(), model: MOCK_MODEL })
+    ? createAgent({ ai: makeMockAI(), model: MOCK_MODEL, tools: [...BASE_TOOLS, MOCK_ORCH_TOOL] })
     : createAgent({ ai: llm, model: MODEL })
 export const turn = defaultAgent.turn
 export const abortTurn = defaultAgent.abortTurn

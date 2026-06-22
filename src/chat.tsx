@@ -262,6 +262,11 @@ function TurnView({
   )
 }
 
+// VELOCITY CAP — max fan-out children shown per node at once (running + most-recent
+// settled); older ones collapse into one "… +N earlier" row. ~ORCH_CONCURRENCY worth, so
+// the tree shows roughly what's in flight + just-finished, not a 100-branch wall.
+const ORCH_MAX_SHOWN = Number(process.env.AX2_ORCH_MAX_SHOWN ?? 8)
+
 // Orchestration node tree (orch.emit) as a VELOCITY UNICODE TREE: pure flatten()
 // (src/tui/orch-tree.ts) walks roots→children and precomputes each node's ├─/└─/│
 // connector prefix; here we render one <text> per Row plus that node's OWNED tool
@@ -514,7 +519,10 @@ function App() {
   // pure redundancy (repeats the reply + triples the token count). Gate BOTH the render and
   // the focus ring on this so hidden node rows never join the Tab cycle.
   const showOrch = computeShowOrch(orch)
-  const orchRows = useMemo(() => (showOrch && orch ? flatten(orch, expNodes) : []), [showOrch, orch, expNodes])
+  // VELOCITY CAP: a fan-out can spawn up to 100 branches; show only the last ORCH_MAX_SHOWN
+  // runs-at-a-time per node (running + most-recent settled), the rest collapse into one
+  // "… +N earlier" row. ~ORCH_CONCURRENCY worth — what's actually in flight + just-finished.
+  const orchRows = useMemo(() => (showOrch && orch ? flatten(orch, expNodes, ORCH_MAX_SHOWN) : []), [showOrch, orch, expNodes])
   const isExpanded = (t: Turn) => expTurns.has(t.idx) || t.final === null // in-progress auto-expands
 
   // STICKY SELF-RESTORING FOCUS (focus-sticky): opentui focus is a SINGLE imperative

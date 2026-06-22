@@ -116,6 +116,27 @@ eq(
 )
 eq(reexpanded.find((r) => r.id === "api")!.prefix, "│  └─ ", "re-expanded last child keeps └─")
 
+// --- VELOCITY CAP: a wide fan-out (5 children) shows only the last N + a collapse marker ---
+const wideNodes: Record<string, OrchNode> = {
+  root: N({ id: "root", label: "root", status: "running" }),
+  c1: N({ id: "c1", parentId: "root" }),
+  c2: N({ id: "c2", parentId: "root" }),
+  c3: N({ id: "c3", parentId: "root" }),
+  c4: N({ id: "c4", parentId: "root" }),
+  c5: N({ id: "c5", parentId: "root" }),
+}
+const wide: OrchTree = { nodes: wideNodes, roots: ["root"], totalTokens: 0 }
+// no cap (default Infinity) → every child renders, in order.
+eq(flatten(wide, new Set()).map((r) => r.id).join(","), "root,c1,c2,c3,c4,c5", "no cap shows all children")
+// cap=2 → the 3 oldest settled collapse into one marker; the last 2 stay (most recent at bottom).
+const capped = flatten(wide, new Set(), 2)
+eq(capped.map((r) => r.id).join(","), "root,root/__more,c4,c5", "velocity cap keeps last 2, collapses the rest")
+eq(capped.find((r) => r.id === "root/__more")!.label, "+3 earlier", "marker counts the hidden children")
+eq(capped.find((r) => r.id === "c5")!.prefix, "└─ ", "last shown child keeps └─ after the marker")
+// a RUNNING child is always kept even when it's the oldest (live work never hidden).
+const wideRun: OrchTree = { ...wide, nodes: { ...wideNodes, c1: { ...wideNodes.c1!, status: "running" } } }
+eq(flatten(wideRun, new Set(), 2).map((r) => r.id).join(","), "root,root/__more,c1,c5", "running child kept despite being oldest; cap fills with most-recent settled")
+
 if (failed > 0) {
   console.error(`orch-tree-render.test: ${failed} failure(s).`)
   process.exit(1)
