@@ -41,13 +41,13 @@ const minIntervalRateLimiter = (rps: number): AxRateLimiterFunction => {
 export const rateLimiter: AxRateLimiterFunction = minIntervalRateLimiter(MAX_RPS)
 
 // The capable base system prompt shared by the MAIN agent (agent.ts re-exports it)
-// and every orchestration LEAF (orch-tools.ts leafGen). Lives HERE — the neutral
-// cycle-breaker module that imports neither agent.ts nor orch-tools.ts — so a leaf can
+// and every orchestration NODE (orch-tools.ts nodeGen). Lives HERE — the neutral
+// cycle-breaker module that imports neither agent.ts nor orch-tools.ts — so a node can
 // be as capable as the main agent MINUS orchestration without re-introducing the
 // agent ⇄ orch-tools static init cycle (orch-tools.ts importing BASE_PROMPT from
 // agent.ts deadlocked agent.ts's top-level `const chat = ax(...)` on ORCH_TOOLS). The
 // orchestration overlay (the orchestrate/run_orch_script paragraphs) is appended ONLY
-// to the main chat gen in agent.ts (ORCH_OVERLAY) — a leaf never sees it, since a leaf
+// to the main chat gen in agent.ts (ORCH_OVERLAY) — a node never sees it, since a node
 // carries BASE_TOOLS only and must not be told it can orchestrate.
 export const BASE_PROMPT = [
   "You are a capable coding agent running inside a terminal, in the user's project directory.",
@@ -58,7 +58,7 @@ export const BASE_PROMPT = [
 ].join(" ")
 
 const MAX_STEPS = Number(process.env.AX2_MAX_STEPS ?? 50) // max tool-call iterations per turn
-// Hard per-turn TOKEN ceiling, enforced by orch's Budget (charged after each leaf
+// Hard per-turn TOKEN ceiling, enforced by orch's Budget (charged after each node
 // from the forward result's usage). Distinct from MAX_STEPS (tool-call iterations,
 // still recovered by turn() in agent.ts): this is a real token gate that throws
 // BudgetExhaustedError when a turn's cumulative usage crosses it.
@@ -75,15 +75,15 @@ export const llm = ai({
   config: { model: MODEL as any },
 })
 
-// Node-lifecycle sink handed to the agent() recipe. emit() is Effect<void> (an
+// Node-lifecycle sink handed to the runNode() recipe. emit() is Effect<void> (an
 // Effect.sync body: bus push + active-OTel-span addEvent). We run it synchronously
 // at the session boundary — the recipe stays Promise-native and never touches
-// Effect. agentNode() runs inside otelContext.with(traceContext), so getActiveSpan()
+// Effect. runNode() runs inside otelContext.with(traceContext), so getActiveSpan()
 // inside emit() resolves to the live chat.turn span (not a forked/empty context).
 export const onEvent = (event: NodeEvent): void => Effect.runSync(emit(event))
 
 // Generic usage reader: a getUsage() probe over any AxGen the orchestration drivers
-// forward. Exported so a sub-run charges the shared Budget from each leaf's usage,
+// forward. Exported so a sub-run charges the shared Budget from each node's usage,
 // exactly like turn().
 export const readUsageOf = (gen: unknown): BudgetUsage | undefined => {
   const u = (gen as { getUsage?: () => unknown }).getUsage?.()

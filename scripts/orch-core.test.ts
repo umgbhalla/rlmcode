@@ -2,12 +2,12 @@
 // Headless orch test (ponytail: non-trivial logic leaves a check). Plain asserts,
 // no framework — same assert-fixture style as design-check.test / ponytail-debt.test.
 //
-// Drives the 5 CORE prims (leaf / parallel / pipeline / emit / allocate) + two
-// recipes (agent, adversarialVerify) with a FAKE AxGen — NO LLM, NO network — and
+// Drives the 5 CORE prims (node / parallel / pipeline / emit / allocate) + two
+// recipes (runNode, adversarialVerify) with a FAKE AxGen — NO LLM, NO network — and
 // asserts the NodeEvent stream and result shapes. This is the first exercise of the
 // orchestration engine off-LLM: it pins the verify-before-accept flow's contract.
 import type { AxAIService, AxGen } from "@ax-llm/ax"
-import { adversarialVerify, agent, type EmitSink, MAX_CONCURRENCY, parallelLimit, structuredPipeline } from "../src/orch-recipes.ts"
+import { adversarialVerify, type EmitSink, MAX_CONCURRENCY, parallelLimit, runNode, structuredPipeline } from "../src/orch-recipes.ts"
 import { allocate, BudgetExhaustedError, type LeafOpts, type NodeEvent, parallel, pipeline } from "../src/orch.ts"
 
 let failed = 0
@@ -18,7 +18,7 @@ const assert = (cond: boolean, msg: string) => {
   }
 }
 
-// A FAKE AxGen: leaf() only ever calls gen.forward(ai, input, opts), so a structural
+// A FAKE AxGen: node() only ever calls gen.forward(ai, input, opts), so a structural
 // stub with forward() is a faithful stand-in. usageTokens lets a node charge a budget
 // without a real getUsage() probe. Cast through unknown — the test owns this shape.
 // ponytail: structural fake over the full AxGen surface. Upgrade: a typed test double
@@ -27,7 +27,7 @@ const fakeGen = <O>(reply: O, opts: { fail?: boolean; usageTokens?: number } = {
   let lastUsage: { totalTokens: number } | undefined
   return {
     forward: async (_ai: unknown, _input: unknown, _o: unknown): Promise<O> => {
-      if (opts.fail) throw new Error("fake leaf failure")
+      if (opts.fail) throw new Error("fake node failure")
       if (opts.usageTokens !== undefined) lastUsage = { totalTokens: opts.usageTokens }
       return reply
     },
@@ -47,38 +47,38 @@ const recorder = () => {
 }
 
 await (async () => {
-  // 1) leaf via the agent() recipe — happy path: start → done, returns the reply.
+  // 1) node via the runNode() recipe — happy path: start → done, returns the reply.
   {
     const { events, sink } = recorder()
-    const out = await agent(
+    const out = await runNode(
       { nodeId: "n1", gen: fakeGen({ reply: "hi" }), opts, onEvent: sink, phase: "answer" },
       fakeAi,
       { message: "q" },
     )
-    assert(out.reply === "hi", `agent reply, got ${JSON.stringify(out)}`)
-    assert(events.length === 2, `agent emits 2 events, got ${events.length}`)
-    assert(events[0]?.type === "start" && events[0].nodeId === "n1", "agent first event is start/n1")
-    assert(events[1]?.type === "done", "agent second event is done")
+    assert(out.reply === "hi", `runNode reply, got ${JSON.stringify(out)}`)
+    assert(events.length === 2, `runNode emits 2 events, got ${events.length}`)
+    assert(events[0]?.type === "start" && events[0].nodeId === "n1", "runNode first event is start/n1")
+    assert(events[1]?.type === "done", "runNode second event is done")
   }
 
-  // 2) agent() failure path: start → error, then rethrows.
+  // 2) runNode() failure path: start → error, then rethrows.
   {
     const { events, sink } = recorder()
     let threw = false
     try {
-      await agent({ nodeId: "boom", gen: fakeGen({ reply: "x" }, { fail: true }), opts, onEvent: sink }, fakeAi, {})
+      await runNode({ nodeId: "boom", gen: fakeGen({ reply: "x" }, { fail: true }), opts, onEvent: sink }, fakeAi, {})
     } catch {
       threw = true
     }
-    assert(threw, "agent rethrows leaf failure")
-    assert(events[0]?.type === "start" && events[1]?.type === "error", "agent emits start then error")
+    assert(threw, "runNode rethrows node failure")
+    assert(events[0]?.type === "start" && events[1]?.type === "error", "runNode emits start then error")
   }
 
-  // 3) agent() charges the budget from the leaf's usage after forward returns.
+  // 3) runNode() charges the budget from the node's usage after forward returns.
   {
     const { sink } = recorder()
     const budget = allocate(100)
-    await agent(
+    await runNode(
       { nodeId: "b", gen: fakeGen({ reply: "ok" }, { usageTokens: 30 }), opts, onEvent: sink, budget, usageOf: (g) => (g as { getUsage(): Array<{ tokens: { totalTokens: number } }> }).getUsage().at(-1)?.tokens },
       fakeAi,
       {},
@@ -88,7 +88,7 @@ await (async () => {
   }
 
   // 4) allocate() is ADVISORY (soft budget): crossing the SOFT ceiling NEVER throws — it
-  // only flips overSoft() (a completed leaf is never discarded). Only crossing the HARD
+  // only flips overSoft() (a completed node is never discarded). Only crossing the HARD
   // ceiling, or an explicit freeze(), throws BudgetExhaustedError.
   {
     // soft=10 (no hard) → pure advisory: charge past soft does NOT throw, overSoft() flips.

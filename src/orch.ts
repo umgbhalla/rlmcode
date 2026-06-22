@@ -1,8 +1,13 @@
 // Orchestration core: a faithful PORT of the Workflow engine onto @ax-llm/ax.
 // EXACTLY 5 orthogonal primitives, nothing else is engine. Promise-native at this
 // level — Effect stays at the session boundary (turn() in agent.ts) and in otel.ts,
-// NOT inside the combinators. agent()/judge/loopUntilDry/workflow() are userland
+// NOT inside the combinators. runNode()/judge/loopUntilDry/workflow() are userland
 // recipes (each <15 lines in these 5 prims), DELIBERATELY not reified here.
+//
+// UNIFIED VOCABULARY — ONE WORD: the orchestration unit is a NODE. The core prim that
+// calls ax.forward() is `node` (below); the lifecycle-bracketed runner is runNode()
+// (orch-recipes.ts). leaf/agent/worker/task/job/unit/runner are FORBIDDEN as names for
+// the unit — they are all the SAME thing = a node. NodeEvent/NodeView already use it.
 import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxProgramForwardOptions, type AxMemory } from "@ax-llm/ax"
 import { type Context as OtelContext, type Tracer, trace as otelTrace } from "@opentelemetry/api"
 import * as Effect from "effect/Effect"
@@ -11,8 +16,8 @@ import { emitActivity, type Activity } from "./activity.ts"
 // The real forward() opts bag threaded by turn() (agent.ts). This is a STRUCTURAL
 // SUPERSET of AxProgramForwardOptions, NOT an alias: sessionId/tracer/traceContext
 // are custom turn-level extensions that forward() tolerates today but does not
-// declare. Keeping LeafOpts an honest description of the real bag — leaf() casts to
-// Readonly<AxProgramForwardOptions<string>> at the forward() boundary (see leaf).
+// declare. Keeping LeafOpts an honest description of the real bag — node() casts to
+// Readonly<AxProgramForwardOptions<string>> at the forward() boundary (see node).
 export type LeafOpts = {
   mem: AxMemory
   sessionId: string
@@ -76,12 +81,12 @@ export class BudgetExhaustedError extends Error {
 const tokensOf = (u: BudgetUsage | undefined): number =>
   u === undefined ? 0 : typeof u.totalTokens === "number" ? u.totalTokens : (u.promptTokens ?? 0) + (u.completionTokens ?? 0)
 
-// 1. leaf — the ONLY thing that calls ax. Curried so opts bind once, then (ai,input)
+// 1. node — the ONLY thing that calls ax. Curried so opts bind once, then (ai,input)
 // runs the forward. opts is cast to Readonly<AxProgramForwardOptions> at the boundary:
 // LeafOpts is a known structural superset (carries sessionId/tracer/traceContext that
 // AxProgramForwardOptions omits); the <string> arg matches forward()'s model-key param.
 // This is sound — not `any`, no ponytail needed.
-export const leaf =
+export const node =
   <I extends AxGenIn, O extends AxGenOut>(gen: AxGen<I, O>, opts: LeafOpts) =>
   (ai: AxAIService, input: I): Promise<O> =>
     gen.forward(ai, input, opts as Readonly<AxProgramForwardOptions<string>>)

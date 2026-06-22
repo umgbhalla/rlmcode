@@ -19,7 +19,7 @@ export type Finding = { tag: "broken" | "delete" | "native" | "cycle" | "shrink"
 
 // Reachability roots: their exports are public API / entrypoints, not dead.
 // chat.tsx = app entry; orch.ts = orchestration-core library surface; orch-recipes.ts
-// = userland recipe surface (agent() by turn(); judge/loopUntilDry/adversarialVerify
+// = userland recipe surface (runNode() by turn(); judge/loopUntilDry/adversarialVerify
 // by orch-run.orchestrate()) — kept a root so the recipe library surface isn't pruned
 // to only its current callers.
 const ENTRY = new Set(["src/chat.tsx", "src/orch.ts", "src/orch-recipes.ts"])

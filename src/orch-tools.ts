@@ -5,9 +5,9 @@
 // file adds NO 6th core primitive; it only composes what is already there.
 //
 // THE SAFETY MODEL (an LLM that can spawn fan-outs that spawn fan-outs = runaway cost):
-//   1. STRUCTURAL one-level recursion guard: every sub-run WORKER LEAF gen (the nodes that
-//      actually loop file/shell tools — see leafGen/worker) is built with BASE_TOOLS only
-//      (file tools), NEVER BASE_TOOLS+ORCH_TOOLS. So a worker leaf physically cannot call
+//   1. STRUCTURAL one-level recursion guard: every sub-run worker NODE gen (the nodes that
+//      actually loop file/shell tools — see nodeGen/nodeWorker) is built with BASE_TOOLS only
+//      (file tools), NEVER BASE_TOOLS+ORCH_TOOLS. So a worker node physically cannot call
 //      orchestrate/run_orch_script again. Structural, not a depth counter (counters race
 //      under parallel()). The judge (line ~157) and skeptic (line ~182) gens are EXEMPT:
 //      they are pure reasoning nodes — they pick/vote over already-produced candidate text
@@ -15,10 +15,10 @@
 //      Giving them ZERO tools is strictly stronger than the BASE_TOOLS-only guard, so the
 //      one-level recursion contract holds a fortiori for them.
 //   2. BUDGET ceiling (ADVISORY/soft): each self-orchestration runs under its OWN
-//      allocate(SOFT, HARD). The SOFT line (AX2_ORCH_TOKEN_BUDGET) only NUDGES — a leaf
+//      allocate(SOFT, HARD). The SOFT line (AX2_ORCH_TOKEN_BUDGET) only NUDGES — a node
 //      that did real work is ALWAYS returned, never discarded for crossing it. Only the
 //      HARD ceiling (AX2_ORCH_TOKEN_HARD, a very high runaway backstop) throws
-//      BudgetExhaustedError → a PARTIAL result string. maxSteps is the per-leaf hard stop.
+//      BudgetExhaustedError → a PARTIAL result string. maxSteps is the per-node hard stop.
 //   3. BRANCH cap: orchestrate clamps the model's requested branch count to 1..MAX_BRANCHES
 //      (100). The branches are NOT all fired at once — fanOut runs them via parallelLimit(n)
 //      at <= ORCH_CONCURRENCY in flight (the rest QUEUE), so a 100-branch request runs
@@ -35,7 +35,7 @@
 import { ax, AxMemory, type AxAIService, type AxFunction, type AxGen } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import { BASE_PROMPT, limits, llm, onEvent, readUsageOf } from "./runtime.ts"
-import { adversarialVerify, agent, judge, loopUntilDry, MAX_CONCURRENCY, parallelLimit } from "./orch-recipes.ts"
+import { adversarialVerify, judge, loopUntilDry, MAX_CONCURRENCY, parallelLimit, runNode } from "./orch-recipes.ts"
 import { allocate, type Budget, BudgetExhaustedError, type LeafOpts } from "./orch.ts"
 import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
@@ -43,18 +43,18 @@ import { BASE_TOOLS } from "./tools.ts"
 
 // Per-self-orchestration SOFT token ceiling, SHARED across the sub-run's branches. This
 // is the ADVISORY nudge line — crossing it logs/nudges but NEVER discards a completed
-// leaf (the root-cause fix: the old hard model threw BudgetExhaustedError after a leaf
-// finished and the empty-string discard nuked its real work). A real exploration leaf
+// node (the root-cause fix: the old hard model threw BudgetExhaustedError after a node
+// finished and the empty-string discard nuked its real work). A real exploration node
 // spends 70k–400k tokens, so ~2M is a sane "this run is getting big" marker.
 const ORCH_TOKEN_BUDGET = Number(process.env.AX2_ORCH_TOKEN_BUDGET ?? 2_000_000)
 
 // HARD runaway backstop — the ONLY ceiling that aborts (BudgetExhaustedError). Very high
-// (~20M) so it never trips a single genuine leaf/fan-out; it only catches a true runaway
-// loop. maxSteps (limits.maxSteps, ax-enforced per leaf forward) is the real per-leaf stop.
+// (~20M) so it never trips a single genuine node/fan-out; it only catches a true runaway
+// loop. maxSteps (limits.maxSteps, ax-enforced per node forward) is the real per-node stop.
 const ORCH_TOKEN_HARD = Number(process.env.AX2_ORCH_TOKEN_HARD ?? 20_000_000)
 
 // ponytail: ONE shared soft+hard ceiling across concurrent branches — a greedy branch can
-// starve the others' headroom. Upgrade: per-branch budgets (allocate per worker) so fan-out
+// starve the others' headroom. Upgrade: per-branch budgets (allocate per node) so fan-out
 // is fair.
 
 // BRANCH cap — hard upper bound on parallel leaves, regardless of what the model asks.
@@ -103,20 +103,20 @@ const boundary = (sessionId: string, signal: AbortSignal, rootId: string) => {
   return { optsFor, budget, rootId }
 }
 
-// A sub-run leaf gen — a REAL sub-agent: the SAME capable system prompt as the main
-// agent (BASE_PROMPT from runtime.ts) so a leaf is as capable as the main agent MINUS
+// A sub-run node gen — a REAL sub-agent: the SAME capable system prompt as the main
+// agent (BASE_PROMPT from runtime.ts) so a node is as capable as the main agent MINUS
 // orchestration, with the caller's `persona` appended as an OVERLAY (not the whole
-// prompt — the old thin one-line persona crippled leaves). It carries BASE_TOOLS ONLY
-// (NOT ORCH_TOOLS / no ORCH_OVERLAY) — the structural one-level recursion guard: a leaf
+// prompt — the old thin one-line persona crippled nodes). It carries BASE_TOOLS ONLY
+// (NOT ORCH_TOOLS / no ORCH_OVERLAY) — the structural one-level recursion guard: a node
 // physically cannot re-orchestrate. A fresh AxGen per call (never shared across
-// concurrent branches) so each leaf's getUsage() is its own, keeping budget charging
+// concurrent branches) so each node's getUsage() is its own, keeping budget charging
 // crisp. BASE_PROMPT is imported from runtime.ts (the neutral cycle-breaker module),
-// NOT agent.ts — so a leaf gets the main agent's capable prompt without re-introducing
+// NOT agent.ts — so a node gets the main agent's capable prompt without re-introducing
 // the agent ⇄ orch-tools static init cycle.
-// Terse tool-scoping overlay for a leaf — mirrors claude_code's Explore agent prompt
-// (a short bulleted list of the leaf's tools + usage priorities). Appended AFTER the
-// persona so a leaf knows exactly what it has and how to use it, without bloating the
-// prompt. A leaf is one level deep: it canNOT orchestrate (BASE_TOOLS only, structural).
+// Terse tool-scoping overlay for a node — mirrors claude_code's Explore agent prompt
+// (a short bulleted list of the node's tools + usage priorities). Appended AFTER the
+// persona so a node knows exactly what it has and how to use it, without bloating the
+// prompt. A node is one level deep: it canNOT orchestrate (BASE_TOOLS only, structural).
 const LEAF_TOOL_SCOPE = [
   "Your tools: glob (find files by pattern), grep (search file contents), read_file (read a known path),",
   "write_file / edit_file (modify files), bash (run real commands), web_fetch (fetch a URL).",
@@ -124,15 +124,15 @@ const LEAF_TOOL_SCOPE = [
   "You are a single-level sub-agent: do the task end-to-end yourself — you canNOT orchestrate or spawn more sub-agents.",
 ].join(" ")
 
-const leafGen = (persona: string): AxGen => {
+const nodeGen = (persona: string): AxGen => {
   const g = ax("message:string -> reply:string", { functions: BASE_TOOLS })
   g.setDescription(`${BASE_PROMPT} ${persona} ${LEAF_TOOL_SCOPE}`)
   return g
 }
 
-// One bracketed worker leaf over `task`, charged to the shared budget. nodeId nests it
+// One bracketed worker node over `task`, charged to the shared budget. nodeId nests it
 // under rootId in the live tree.
-type WorkerOpts = {
+type NodeWorkerOpts = {
   ai: AxAIService
   rootId: string
   i: number
@@ -141,19 +141,19 @@ type WorkerOpts = {
   optsFor: () => LeafOpts
   budget: Budget
 }
-const worker = ({ ai, rootId, i, task, persona, optsFor, budget }: WorkerOpts): Promise<string> => {
+const nodeWorker = ({ ai, rootId, i, task, persona, optsFor, budget }: NodeWorkerOpts): Promise<string> => {
   const nodeId = `${rootId}/branch-${i}`
-  // agent() emits the single start (with parentId+label) and the done/error — no
-  // double-emit here, which previously overwrote the "branch N" label with "agent".
-  // The persona is an OVERLAY on BASE_PROMPT (leafGen prepends the full main-agent
-  // system prompt); the leaf is already told it has the file tools, so the overlay
+  // runNode() emits the single start (with parentId+label) and the done/error — no
+  // double-emit here, which previously overwrote the "branch N" label with "node".
+  // The persona is an OVERLAY on BASE_PROMPT (nodeGen prepends the full main-agent
+  // system prompt); the node is already told it has the file tools, so the overlay
   // is just a stance, not a re-statement of its capabilities.
   //
   // The branch LABEL (phase) reflects this branch's OWN subtask (clipped), not a
   // generic "branch N" — so the live tree shows the division of labour, and a
   // decompose run reads as distinct work per node rather than N identical attempts.
-  const gen = leafGen(persona)
-  return agent(
+  const gen = nodeGen(persona)
+  return runNode(
     { nodeId, parentId: rootId, phase: `branch ${i + 1}: ${clip(task, 48)}`, gen, opts: optsFor(), onEvent, budget, usageOf: (g) => readUsageOf(g) },
     ai,
     { message: task },
@@ -171,7 +171,7 @@ const numbered = (xs: readonly string[]) => xs.map((c, i) => `#${i + 1}:\n${c}`)
 
 // Compose one self-orchestration over `task` for the requested strategy. Promise-native:
 // fans out workers (BASE_TOOLS leaves, forked mem), then judges/verifies per strategy.
-// Every node emits through onEvent → the OrchTree. The budget is ADVISORY: a leaf over
+// Every node emits through onEvent → the OrchTree. The budget is ADVISORY: a node over
 // the soft line still returns its real work (a nudge delta marks it); only a HARD-ceiling
 // runaway bubbles as BudgetExhaustedError, caught by the handler for a partial return.
 type OrchestrationOpts = {
@@ -203,14 +203,14 @@ const runOrchestration = async ({
     // shared `task` (parallel-same fallback). subtaskFor keeps the judge/verify message
     // (the overall `task`) separate from per-branch work.
     const subtaskFor = (i: number): string => subtasks[i]?.trim() || task
-    // BOUNDED fan-out: build n worker thunks, run <= ORCH_CONCURRENCY at a time via
+    // BOUNDED fan-out: build n node thunks, run <= ORCH_CONCURRENCY at a time via
     // parallelLimit (the rest QUEUE) so a large branch count never hits CF all at once.
     // parallelLimit preserves input order and maps a failed slot to null; we coerce null
     // → "" and drop empties, exactly like the old Promise.all(.catch("")).filter path.
     const fanOut = (n: number): Promise<string[]> =>
       parallelLimit(
         Array.from({ length: n }, (_, i) =>
-          () => worker({ ai, rootId, i, task: subtaskFor(i), persona: PERSONAS[i % PERSONAS.length]!, optsFor, budget }),
+          () => nodeWorker({ ai, rootId, i, task: subtaskFor(i), persona: PERSONAS[i % PERSONAS.length]!, optsFor, budget }),
         ),
         ORCH_CONCURRENCY,
       ).then((rs) => rs.map((r) => r ?? "").filter((r) => r.length > 0))
@@ -224,7 +224,7 @@ const runOrchestration = async ({
       return { reply, branches: replies.length }
     }
 
-    // judge / best_of_n: fan out then one judge leaf picks the best verbatim. best_of_n
+    // judge / best_of_n: fan out then one judge node picks the best verbatim. best_of_n
     // re-runs the fan-out until the surviving count converges (loopUntilDry), then judges.
     if (strategy === "judge" || strategy === "best_of_n") {
       const survivors =
@@ -258,7 +258,7 @@ const runOrchestration = async ({
       }
     }
 
-    // verify: produce one answer (single worker), then skeptics (the remaining branches)
+    // verify: produce one answer (single node), then skeptics (the remaining branches)
     // vote accept/reject in parallel via adversarialVerify.
     const verifyId = `${rootId}/verify`
     onEvent({ type: "start", nodeId: verifyId, parentId: rootId, phase: "verify" })
@@ -278,7 +278,7 @@ const runOrchestration = async ({
           const sid = `${rootId}/skeptic-${i}`
           onEvent({ type: "start", nodeId: sid, parentId: rootId, phase: `skeptic ${i + 1}` })
           try {
-            const out = await agent(
+            const out = await runNode(
               { nodeId: sid, gen: skepticGen, opts: optsFor(), onEvent, budget, usageOf: (g) => readUsageOf(g) },
               ai,
               { message: task, answer },
@@ -363,7 +363,7 @@ const orchestrateTool: AxFunction = {
       return clip(out.reply)
     } catch (e) {
       // BUDGET ceiling (guard 2): the soft budget is ADVISORY (never throws — a completed
-      // leaf is always returned, see runOrchestration/agent). So this only fires for a
+      // node is always returned, see runOrchestration/runNode). So this only fires for a
       // genuine RUNAWAY (the HARD ceiling) or an explicit freeze() — return a PARTIAL string
       // rather than throwing the whole turn. spent()/total surface that the sub-run was capped.
       if (e instanceof BudgetExhaustedError) {
@@ -378,7 +378,7 @@ const orchestrateTool: AxFunction = {
 const runOrchScriptTool: AxFunction = {
   name: "run_orch_script",
   description:
-    "Load and run a saved orchestration script from .ax/orch/<name> (trusted dir; paths escaping it are rejected) against an optional message. The script composes the engine prims { leaf, parallel, pipeline, emit, allocate, gen } + recipes { agent, judge, loopUntilDry, adversarialVerify, structuredPipeline }. structuredPipeline threads TYPED structured stage outputs (gen with its own signature like 'text:string -> facts:json') stage→stage — use it for multi-step transforms where each step's structured object feeds the next (see .ax/orch/structured-pipe.ts). Author one with write_file to .ax/orch/<name>.ts exporting orchestrate(ctx, prims), then run it here. Returns the script's result.",
+    "Load and run a saved orchestration script from .ax/orch/<name> (trusted dir; paths escaping it are rejected) against an optional message. The script composes the engine prims { node, parallel, pipeline, emit, allocate, gen } + recipes { runNode, judge, loopUntilDry, adversarialVerify, structuredPipeline }. The unit is a NODE: node(gen, opts) is the core prim that calls ax; runNode(spec, ai, input) runs ONE node bracketed by its lifecycle events. structuredPipeline threads TYPED structured stage outputs (gen with its own signature like 'text:string -> facts:json') stage→stage — use it for multi-step transforms where each step's structured object feeds the next (see .ax/orch/structured-pipe.ts). Author one with write_file to .ax/orch/<name>.ts exporting orchestrate(ctx, prims), then run it here. Returns the script's result.",
   parameters: {
     type: "object",
     properties: {
@@ -416,8 +416,8 @@ const runOrchScriptTool: AxFunction = {
       const out = await otelContext.with(otelContext.active(), () => runLoadedScript(name, ctx))
       return clip(out.reply)
     } catch (e) {
-      // ADVISORY budget: only a HARD-ceiling runaway (or freeze) throws — a completed leaf
-      // is always returned. So this is the runaway backstop, not a per-leaf guillotine.
+      // ADVISORY budget: only a HARD-ceiling runaway (or freeze) throws — a completed node
+      // is always returned. So this is the runaway backstop, not a per-node guillotine.
       if (e instanceof BudgetExhaustedError) {
         return `partial: the script hit its HARD runaway token ceiling (${e.spent}/${e.total}) and was stopped. ${e.reason}.`
       }
@@ -427,7 +427,7 @@ const runOrchScriptTool: AxFunction = {
 }
 
 // The two agent-callable orchestration tools. Added to the MAIN chat gen ONLY
-// (agent.ts) — never to a sub-run leaf gen (which carries BASE_TOOLS), so the structural
+// (agent.ts) — never to a sub-run node gen (which carries BASE_TOOLS), so the structural
 // one-level recursion guard holds.
 //
 // ponytail: in-process trust. run_orch_script dynamic-import()s a .ax/orch/ module and

@@ -1,9 +1,13 @@
 // Orchestration RECIPES — USERLAND, not core. Each is composed ONLY from the 5 core
-// primitives (leaf, parallel, pipeline, emit, allocate) + the NodeEvent bus. None of
+// primitives (node, parallel, pipeline, emit, allocate) + the NodeEvent bus. None of
 // these are reified into orch.ts: the engine stays exactly 5 prims. Promise-native,
 // like the combinators they call; Effect stays at the session boundary.
+//
+// UNIFIED VOCABULARY: the orchestration unit is a NODE. runNode() runs ONE node (the
+// core `node` prim) bracketed by its start→done|error lifecycle events. leaf/agent/
+// worker/task/job/unit/runner are forbidden as names for the unit.
 import type { AxAIService, AxGen, AxGenIn, AxGenOut } from "@ax-llm/ax"
-import { type Budget, type BudgetUsage, leaf, type LeafOpts, type NodeEvent, pipeline } from "./orch.ts"
+import { type Budget, type BudgetUsage, node, type LeafOpts, type NodeEvent, pipeline } from "./orch.ts"
 
 // Hard upper bound on in-flight thunks for parallelLimit — the absolute concurrency
 // ceiling regardless of what a caller (or the model) asks for. A big fan-out (e.g. 100
@@ -17,7 +21,7 @@ export const MAX_CONCURRENCY = 100
 // slot to null — the SAME contract as the core `parallel` prim, just bounded. NOT a 6th
 // core primitive (orch.ts stays exactly 5): a userland helper over Promise plumbing. `n`
 // is clamped to 1..MAX_CONCURRENCY (a non-finite/<=0 n falls back to the default 8). A
-// fixed pool of `n` workers each pulls the next unclaimed index until the queue drains,
+// fixed pool of `n` pumps each pulls the next unclaimed index until the queue drains,
 // so order is preserved by writing into results[idx] (not by completion order).
 export const parallelLimit = async <T>(
   thunks: ReadonlyArray<() => Promise<T>>,
@@ -25,11 +29,13 @@ export const parallelLimit = async <T>(
 ): Promise<Array<T | null>> => {
   const limit = Number.isFinite(n) ? Math.min(MAX_CONCURRENCY, Math.max(1, Math.floor(n))) : 8
   const results = new Array<T | null>(thunks.length).fill(null)
-  // Shared cursor: each worker claims the next unclaimed index and advances it. A holder
+  // Shared cursor: each pump claims the next unclaimed index and advances it. A holder
   // object (not a bare `let next`) so the analyzer reads cursor.i on both the claim AND
   // the advance — a bare post-increment `next++` reads as a dead final write to it.
   const cursor = { i: 0 }
-  const worker = async (): Promise<void> => {
+  // A fixed pool of `limit` PUMPS (Promise-plumbing consumers, NOT orchestration nodes —
+  // they only pull thunk indices). Each pumps the queue until it drains.
+  const pump = async (): Promise<void> => {
     for (;;) {
       const idx = cursor.i
       cursor.i = idx + 1
@@ -41,7 +47,7 @@ export const parallelLimit = async <T>(
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(limit, thunks.length) }, () => worker()))
+  await Promise.all(Array.from({ length: Math.min(limit, thunks.length) }, () => pump()))
   return results
 }
 
@@ -53,15 +59,16 @@ export const parallelLimit = async <T>(
 export type EmitSink = (event: NodeEvent) => void
 const noopSink: EmitSink = () => {}
 
-// agent — run one leaf as a lifecycle-bracketed node: start → done | error. The
-// caller-supplied sink fires the lifecycle events; the recipe itself never
-// touches Effect (it is pure Promise plumbing over leaf() + the 3 events).
-// budget/usageOf are optional: when both are supplied, the recipe charges the
-// budget from the forward result's usage (read off the gen via usageOf) AFTER the
-// leaf returns — leaf()'s core (ai,input)=>Promise<O> signature is untouched. The
-// budget is ADVISORY (soft): charge() NEVER discards a completed leaf for crossing the
-// soft ceiling — it just flips overSoft(), which we surface as a delta nudge. Only a
-// genuine runaway (the HARD ceiling) or an explicit freeze() throws BudgetExhaustedError.
+// runNode — run ONE node (the core `node` prim) as a lifecycle-bracketed unit:
+// start → done | error. The caller-supplied sink fires the lifecycle events; the recipe
+// itself never touches Effect (it is pure Promise plumbing over node() + the 3 events).
+// budget/usageOf are optional: when both are supplied, the recipe charges the budget from
+// the forward result's usage (read off the gen via usageOf) AFTER the node returns —
+// node()'s core (ai,input)=>Promise<O> signature is untouched. The budget is ADVISORY
+// (soft): charge() NEVER discards a completed node for crossing the soft ceiling — it
+// just flips overSoft(), which we surface as a delta nudge. Only a genuine runaway (the
+// HARD ceiling) or an explicit freeze() throws BudgetExhaustedError. AgentNode is the
+// node-spec shape (the unit is a node; the type name is retained for stability).
 export type AgentNode<I extends AxGenIn, O extends AxGenOut> = {
   nodeId: string
   parentId?: string | undefined
@@ -72,19 +79,19 @@ export type AgentNode<I extends AxGenIn, O extends AxGenOut> = {
   budget?: Budget
   usageOf?: (gen: AxGen<I, O>) => BudgetUsage | undefined
 }
-export const agent = async <I extends AxGenIn, O extends AxGenOut>(
-  node: AgentNode<I, O>,
+export const runNode = async <I extends AxGenIn, O extends AxGenOut>(
+  spec: AgentNode<I, O>,
   ai: AxAIService,
   input: I,
 ): Promise<O> => {
-  const { nodeId, parentId, gen, opts, onEvent = noopSink, phase = "agent", budget, usageOf } = node
+  const { nodeId, parentId, gen, opts, onEvent = noopSink, phase = "node", budget, usageOf } = spec
   onEvent({ type: "start", nodeId, parentId, phase })
   try {
-    const result = await leaf(gen, opts)(ai, input)
-    // ADVISORY charge: track this leaf's spend AFTER it returned its real work. charge()
-    // never throws for the soft line, so the leaf result below is ALWAYS returned. When
+    const result = await node(gen, opts)(ai, input)
+    // ADVISORY charge: track this node's spend AFTER it returned its real work. charge()
+    // never throws for the soft line, so the node result below is ALWAYS returned. When
     // spend crosses the soft ceiling we emit a delta nudge (visible in the tree/span) but
-    // do NOT discard the leaf — a runaway is bounded by the hard ceiling + maxSteps.
+    // do NOT discard the node — a runaway is bounded by the hard ceiling + maxSteps.
     if (budget !== undefined) {
       budget.charge(usageOf?.(gen))
       if (budget.overSoft()) onEvent({ type: "delta", nodeId, chunk: "⚠ over soft token budget (advisory — continuing)" })
@@ -97,7 +104,7 @@ export const agent = async <I extends AxGenIn, O extends AxGenOut>(
   }
 }
 
-// judge — N candidates → one leaf picks the best. The judge gen takes a structured
+// judge — N candidates → one node picks the best. The judge gen takes a structured
 // `candidates` input and returns the chosen result (its O is the chosen-candidate shape).
 // Adopted by orch-run.orchestrate() (the demo-wire best-of-N path).
 export const judge = async <C, I extends AxGenIn, O extends AxGenOut>(
@@ -106,7 +113,7 @@ export const judge = async <C, I extends AxGenIn, O extends AxGenOut>(
   judgeGen: AxGen<I, O>,
   judgeOpts: LeafOpts,
   toInput: (candidates: ReadonlyArray<C>) => I,
-): Promise<O> => leaf(judgeGen, judgeOpts)(ai, toInput(candidates))
+): Promise<O> => node(judgeGen, judgeOpts)(ai, toInput(candidates))
 
 // loopUntilDry — run body repeatedly until isDry(prev,next) says it converged (or max
 // hit). Returns the last (accumulated) value. Body owns its own accumulation.
@@ -153,12 +160,12 @@ export const adversarialVerify = async <T>(
 // is structured end-to-end. ax's forward() parses/validates/retries each stage's JSON
 // against its signature, so a stage yields a real typed object, not a string blob.
 //
-// Built ENTIRELY from the existing prims: each stage wraps leaf(gen, opts) in a
+// Built ENTIRELY from the existing prims: each stage wraps node(gen, opts) in a
 // pipeline() stage fn, bracketed with start/done|error NodeEvents (so every stage
 // renders as a node in the OrchTree) and ADVISORY-charged to the budget (same contract
-// as agent(): a completed stage is never discarded — only a HARD-ceiling runaway or
+// as runNode(): a completed stage is never discarded — only a HARD-ceiling runaway or
 // freeze() throws). NOT a 6th core prim: orch.ts stays exactly 5 — this is a userland
-// recipe over leaf + pipeline + emit + allocate. Unlike fan-out it is pure serial
+// recipe over node + pipeline + emit + allocate. Unlike fan-out it is pure serial
 // threading, so it needs NO concurrency cap.
 //
 // A stage's I/O is `any` at the boundary because pipeline() is heterogeneous (stage k's
@@ -183,13 +190,13 @@ export const structuredPipeline = async (
   rootId = "pipeline",
 ): Promise<AxGenOut> => {
   if (stages.length === 0) throw new Error("structuredPipeline needs at least one stage")
-  // Each stage becomes a pipeline() stage fn: bracket the node, run its leaf, charge the
+  // Each stage becomes a pipeline() stage fn: bracket the node, run it, charge the
   // (advisory) budget AFTER it returns its real typed work, and pass the typed object on.
   const stageFns = stages.map((stage, i) => async (prev: AxGenOut): Promise<AxGenOut> => {
     const { gen, opts, nodeId = `${rootId}/stage-${i}`, phase = `stage ${i + 1}`, budget, usageOf } = stage
     onEvent({ type: "start", nodeId, parentId: rootId, phase })
     try {
-      const out = await leaf(gen, opts)(ai, prev as AxGenIn)
+      const out = await node(gen, opts)(ai, prev as AxGenIn)
       if (budget !== undefined) {
         budget.charge(usageOf?.(gen))
         if (budget.overSoft()) onEvent({ type: "delta", nodeId, chunk: "⚠ over soft token budget (advisory — continuing)" })

@@ -7,7 +7,7 @@ import { ax, type AxLoggerFunction, AxMemory } from "@ax-llm/ax"
 import { existsSync, readFileSync } from "node:fs"
 import { emitActivity } from "./activity.ts"
 import { allocate, BudgetExhaustedError, type BudgetUsage } from "./orch.ts"
-import { agent as agentNode } from "./orch-recipes.ts"
+import { runNode } from "./orch-recipes.ts"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import * as Cause from "effect/Cause"
@@ -23,7 +23,7 @@ import { RLM_TOOLS } from "./rlm-tool.ts"
 
 const MAX_STEPS = limits.maxSteps // max tool-call iterations per turn — the HARD per-turn stop
 // Per-turn SOFT TOKEN ceiling (advisory), tracked by orch's Budget (charged after each
-// leaf from the forward result's usage). allocate() with no hard arg is pure-advisory:
+// node from the forward result's usage). allocate() with no hard arg is pure-advisory:
 // charge() NEVER throws for crossing it — a turn that did real work is never discarded.
 // MAX_STEPS (tool-call iterations, recovered by turn() below) is the real per-turn stop;
 // the token tally is a tracking/backstop signal. Only an explicit freeze() throws.
@@ -35,15 +35,15 @@ const BUDGET_NUDGE =
 const PROVIDER = "cloudflare.workers-ai"
 
 // BASE_PROMPT (the capable base system prompt) lives in runtime.ts — the neutral
-// cycle-breaker module — so orchestration LEAF gens (orch-tools.ts) can import it
+// cycle-breaker module — so orchestration NODE gens (orch-tools.ts) can import it
 // without re-introducing the agent ⇄ orch-tools static init cycle. Re-exported here
-// so callers that think of it as "the main agent's prompt" find it on agent.ts. A leaf
-// is built from BASE_PROMPT + a persona overlay (NOT this ORCH_OVERLAY): a leaf is the
+// so callers that think of it as "the main agent's prompt" find it on agent.ts. A node
+// is built from BASE_PROMPT + a persona overlay (NOT this ORCH_OVERLAY): a node is the
 // main agent minus orchestration.
 export { BASE_PROMPT }
 
 // The orchestration paragraphs — appended to the MAIN chat gen ONLY (it alone carries
-// ORCH_TOOLS). A leaf gen is built from BASE_PROMPT (above) WITHOUT this overlay: it has
+// ORCH_TOOLS). A node gen is built from BASE_PROMPT (above) WITHOUT this overlay: it has
 // no orchestration tools, so telling it about orchestrate/run_orch_script would be a lie.
 const ORCH_OVERLAY = [
   // Orchestration: this agent can run deterministic multi-node flows, not just single replies.
@@ -54,17 +54,17 @@ const ORCH_OVERLAY = [
   "`task` alone when you genuinely want N REDUNDANT attempts at the SAME task (e.g. with 'best_of_n'). strategy 'parallel' returns all, 'judge' picks the best of N,",
   "'verify' answers once then skeptics vote accept/reject, 'best_of_n' re-runs until stable then judges. `run_orch_script(name, message)`",
   "loads + runs a saved `.ax/orch/<name>` script — USE it after write_file-ing a custom `.ax/orch/<name>.ts` flow. BOUNDS (self-limit): sub-agent",
-  "leaves run with file tools only and canNOT themselves orchestrate (one level deep), a token budget caps each run, branches cap at 100 (at most ~8 run at once, the rest queue). Decompose at the top.",
+  "nodes run with file tools only and canNOT themselves orchestrate (one level deep), a token budget caps each run, branches cap at 100 (at most ~8 run at once, the rest queue). Decompose at the top.",
   "User-invoked triggers: `^o` runs a built-in fan-out over the current input; `/run <name> [message]` loads + runs a saved script.",
   "To author a CUSTOM flow, write_file a script to `.ax/orch/<name>.ts` (trusted dir; paths escaping it are rejected) exporting",
-  "`orchestrate(ctx, prims)`, then tell the user to `/run <name>`. prims = { leaf, parallel, pipeline, emit, allocate, gen } plus recipes",
-  "{ agent, judge, loopUntilDry, adversarialVerify, structuredPipeline }; ctx = { message, ai, budget, onEvent, optsFor(), usageOf }. A dynamic orch script needs",
-  "NO runtime imports — gen() is an ambient prim factory that builds leaves inline: gen(signature, description?) returns an AxGen for leaf().",
+  "`orchestrate(ctx, prims)`, then tell the user to `/run <name>`. prims = { node, parallel, pipeline, emit, allocate, gen } plus recipes",
+  "{ runNode, judge, loopUntilDry, adversarialVerify, structuredPipeline }; ctx = { message, ai, budget, onEvent, optsFor(), usageOf }. The unit is a NODE: node(gen, opts) calls ax; runNode(spec, ai, input) runs ONE node. A dynamic orch script needs",
+  "NO runtime imports — gen() is an ambient prim factory that builds nodes inline: gen(signature, description?) returns an AxGen for node().",
   "For a TYPED multi-step transform (each step's structured object feeds the next), use `structuredPipeline(stages, ai, input, onEvent, rootId)` where each",
   "stage is { gen, opts } and the gen's signature carries real types (e.g. gen('text:string -> facts:json') then gen('facts:json -> summary:string')) —",
   "stages thread STRUCTURED objects, not strings. See `.ax/orch/structured-pipe.ts`.",
   "Compose ONLY through prims, so the engine core stays the 5 primitives. RULE: never share a mutating memory across concurrent branches — call",
-  "`ctx.optsFor()` for a fresh forked memory per parallel leaf. See `.ax/orch/example.ts` for the canonical pattern.",
+  "`ctx.optsFor()` for a fresh forked memory per parallel node. See `.ax/orch/example.ts` for the canonical pattern.",
   // RLM: the right tool for a BIG context blob that won't fit the prompt window.
   "Explore a LARGE context blob with `run_rlm(context, query)`: a Recursive Language Model loads the blob into a code runtime (NOT the prompt) and a",
   "sub-LM writes JavaScript (slice/regex/sub-queries) to mine it, returning an answer + evidence. PREFER run_rlm over orchestrate when the context is",
@@ -91,8 +91,8 @@ const loadProjectDoc = (): string => {
 export const projectDocLoaded = (["AGENTS.md", "CLAUDE.md"] as const).find((f) => existsSync(f)) ?? null
 
 // The MAIN chat gen gets BASE_TOOLS + ORCH_TOOLS — it alone may self-orchestrate.
-// Every orchestration sub-run LEAF (orch-tools.ts) is built with BASE_TOOLS only, so a
-// leaf physically cannot re-orchestrate: the structural one-level recursion guard.
+// Every orchestration sub-run NODE (orch-tools.ts) is built with BASE_TOOLS only, so a
+// node physically cannot re-orchestrate: the structural one-level recursion guard.
 const chat = ax("message:string -> reply:string", { functions: [...BASE_TOOLS, ...ORCH_TOOLS, ...RLM_TOOLS] })
 chat.setDescription(`${BASE_PROMPT} ${ORCH_OVERLAY}${loadProjectDoc()}`)
 
@@ -281,7 +281,7 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       const aborter = new AbortController()
       turnAborters.set(sessionId, aborter)
       // One ADVISORY token budget for the whole turn (shared across the chat + answerGen
-      // leaves). agent() charges it from each forward result's usage; crossing the SOFT
+      // nodes). runNode() charges it from each forward result's usage; crossing the SOFT
       // ceiling only nudges (a delta in the tree) — it NEVER discards the turn. The hard
       // per-turn stop is MAX_STEPS (recovered above). The tapCause below stays for an
       // explicit freeze()/runaway, which is the only thing that throws BudgetExhaustedError.
@@ -300,9 +300,9 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
         Effect.tryPromise({
           try: () =>
             otelContext.with(traceContext, () =>
-              // agent() brackets the leaf in start→done|error node events; the opts
-              // bag is threaded through unchanged (behavior-identical to a bare leaf).
-              agentNode(
+              // runNode() brackets the node in start→done|error node events; the opts
+              // bag is threaded through unchanged (behavior-identical to a bare node).
+              runNode(
                 {
                   nodeId: `turn:${sessionId}`,
                   gen,

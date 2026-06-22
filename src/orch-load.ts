@@ -24,7 +24,7 @@ import * as Effect from "effect/Effect"
 import type { AnySpan } from "effect/Tracer"
 import { ax, type AxAIService, AxMemory, type AxGen } from "@ax-llm/ax"
 import { limits, llm, MODEL, onEvent, readUsageOf } from "./runtime.ts"
-import { adversarialVerify, agent, judge, loopUntilDry, structuredPipeline, type AgentNode, type EmitSink, type PipelineStage } from "./orch-recipes.ts"
+import { adversarialVerify, judge, loopUntilDry, runNode, structuredPipeline, type AgentNode, type EmitSink, type PipelineStage } from "./orch-recipes.ts"
 import {
   allocate,
   type Budget,
@@ -32,8 +32,8 @@ import {
   type BudgetUsage,
   emit,
   type EmitOpts,
-  leaf,
   type LeafOpts,
+  node,
   type NodeEvent,
   parallel,
   pipeline,
@@ -44,12 +44,13 @@ import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 export const ORCH_SCRIPTS_DIR = resolvePath(process.cwd(), ".ax/orch")
 
 // The toolkit injected into a loaded script: the 5 CORE prims (orch.ts) + the 4
-// userland recipes (orch-recipes.ts) + a gen factory for building leaves inline.
+// userland recipes (orch-recipes.ts) + a gen factory for building nodes inline.
 // A script composes these — it never re-imports the engine, so the core stays exactly
 // 5 prims (gen is a toolkit convenience that wraps ax()). The script can't smuggle a 6th.
+// UNIFIED VOCABULARY: the unit is a NODE — node() is the core prim; runNode() runs one.
 export type OrchPrims = {
   // 5 core
-  readonly leaf: typeof leaf
+  readonly node: typeof node
   readonly parallel: typeof parallel
   readonly pipeline: typeof pipeline
   readonly emit: typeof emit
@@ -57,7 +58,7 @@ export type OrchPrims = {
   // generator factory (wraps ax() + setDescription)
   readonly gen: (signature: string, description?: string) => AxGen
   // 5 recipes
-  readonly agent: typeof agent
+  readonly runNode: typeof runNode
   readonly judge: typeof judge
   readonly loopUntilDry: typeof loopUntilDry
   readonly adversarialVerify: typeof adversarialVerify
@@ -68,7 +69,7 @@ export type OrchPrims = {
 // The run context handed to a loaded script's orchestrate(ctx, prims). Mirrors the
 // boundary state orch-run builds: the LLM service, the shared budget, the lifecycle
 // sink (already wired to emit() at the session boundary), a per-branch LeafOpts
-// factory that FORKS a fresh AxMemory (never shared across concurrent leaves), the
+// factory that FORKS a fresh AxMemory (never shared across concurrent nodes), the
 // usage reader for budget charging, plus a stable rootId to nest nodes under.
 export type OrchLoadCtx = {
   readonly sessionId: string
@@ -131,7 +132,7 @@ const clip = (v: unknown, max = 256): string => {
 // Shared by the user-triggered /run path (loadAndRunOrch) and the agent-callable
 // run_orch_script tool (orch-tools.ts) so both inject the IDENTICAL ambient engine.
 export const orchPrims = (): OrchPrims => ({
-  leaf,
+  node,
   parallel,
   pipeline,
   emit,
@@ -141,7 +142,7 @@ export const orchPrims = (): OrchPrims => ({
     if (description !== undefined) g.setDescription(description)
     return g
   },
-  agent,
+  runNode,
   judge,
   loopUntilDry,
   adversarialVerify,

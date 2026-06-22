@@ -4,15 +4,15 @@
 // design-check.test / ponytail-debt.test / orch-core.test.
 //
 // Where orch-core.test pins the NodeEvent / result SHAPES, this file pins the engine's
-// load-bearing CONCURRENCY INVARIANT: parallel() leaves each forward over their OWN
+// load-bearing CONCURRENCY INVARIANT: parallel() nodes each forward over their OWN
 // forked AxMemory, so two branches running at once can NEVER mutate each other's
-// multi-turn history. It drives leaf + parallel + pipeline + the agent() recipe with a
+// multi-turn history. It drives node + parallel + pipeline + the runNode() recipe with a
 // FAKE AxGen — NO LLM, NO network — whose forward() actually WRITES into opts.mem, then
 // asserts every branch's memory holds only its own write (no cross-branch bleed).
 import type { AxAIService, AxGen } from "@ax-llm/ax"
 import { AxMemory } from "@ax-llm/ax"
-import { agent, type EmitSink } from "../src/orch-recipes.ts"
-import { leaf, type LeafOpts, type NodeEvent, parallel, pipeline } from "../src/orch.ts"
+import { runNode, type EmitSink } from "../src/orch-recipes.ts"
+import { type LeafOpts, node, type NodeEvent, parallel, pipeline } from "../src/orch.ts"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {
@@ -32,9 +32,9 @@ const recorder = () => {
 // A FAKE AxGen that WRITES into the forked memory it was handed (opts.mem) before
 // returning — exactly the multi-turn side effect a real forward() has. This is what
 // lets us prove fork isolation: if the engine shared one AxMemory across concurrent
-// leaves, both branches' writes would land in the same history.
+// nodes, both branches' writes would land in the same history.
 // ponytail: structural fake over the AxGen surface (only forward() is exercised by
-// leaf()). Upgrade: a typed double implementing the full AxGen interface if the engine
+// node()). Upgrade: a typed double implementing the full AxGen interface if the engine
 // starts calling more methods on the gen.
 const memWritingGen = (reply: string) =>
   ({
@@ -68,13 +68,13 @@ const soleTurn = (m: AxMemory): string => {
 }
 
 await (async () => {
-  // 1) leaf — the only thing that calls the gen — forwards over its opts and returns
+  // 1) node — the only thing that calls the gen — forwards over its opts and returns
   // the reply. Drives the core primitive directly (no recipe wrapper).
   {
     const opts = optsFor()
-    const out = await leaf(memWritingGen("L"), opts)(fakeAi, { tag: "leaf-tag" })
-    assert(out.reply === "L", `leaf returns the gen reply, got ${JSON.stringify(out)}`)
-    assert(soleTurn(opts.mem) === "leaf-tag", "leaf forwarded over its own forked mem")
+    const out = await node(memWritingGen("L"), opts)(fakeAi, { tag: "node-tag" })
+    assert(out.reply === "L", `node returns the gen reply, got ${JSON.stringify(out)}`)
+    assert(soleTurn(opts.mem) === "node-tag", "node forwarded over its own forked mem")
   }
 
   // 2) FORK ISOLATION via parallel() — the headline invariant. Three branches run
@@ -85,7 +85,7 @@ await (async () => {
     const mems = [optsFor(), optsFor(), optsFor()]
     const tags = ["alpha", "beta", "gamma"]
     const replies = await parallel(
-      mems.map((opts, i) => () => leaf(memWritingGen(`r${i}`), opts)(fakeAi, { tag: tags[i]! })),
+      mems.map((opts, i) => () => node(memWritingGen(`r${i}`), opts)(fakeAi, { tag: tags[i]! })),
     )
     assert(replies.length === 3 && replies.every((r) => r !== null), "all three branches resolved")
     // Each branch sees only its own write.
@@ -108,19 +108,19 @@ await (async () => {
     assert(out.join(",") === "11,21,31", `pipeline maps each item through both stages, got ${out.join(",")}`)
   }
 
-  // 4) agent() recipe over a fake gen — start → done, returns the reply, and the leaf
+  // 4) runNode() recipe over a fake gen — start → done, returns the reply, and the node
   // still forwarded over the recipe-supplied forked mem (recipe doesn't break the fork).
   {
     const { events, sink } = recorder()
     const opts = optsFor()
-    const out = await agent(
+    const out = await runNode(
       { nodeId: "rec", gen: memWritingGen("R"), opts, onEvent: sink, phase: "answer" },
       fakeAi,
       { tag: "recipe-tag" },
     )
-    assert(out.reply === "R", `agent reply, got ${JSON.stringify(out)}`)
-    assert(events.length === 2 && events[0]?.type === "start" && events[1]?.type === "done", "agent emits start then done")
-    assert(soleTurn(opts.mem) === "recipe-tag", "agent's leaf forwarded over its forked mem")
+    assert(out.reply === "R", `runNode reply, got ${JSON.stringify(out)}`)
+    assert(events.length === 2 && events[0]?.type === "start" && events[1]?.type === "done", "runNode emits start then done")
+    assert(soleTurn(opts.mem) === "recipe-tag", "runNode's node forwarded over its forked mem")
   }
 })()
 
