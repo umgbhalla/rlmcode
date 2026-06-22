@@ -243,52 +243,90 @@ function NodeTokens({ tokens, hot }: { tokens: number | undefined; hot: boolean 
   return <span fg={hot ? "#7f849c" : "#585b70"}>{`  ${fmtTokens(tokens)}`}</span>
 }
 
-function NodeView({
-  id,
-  nodes,
-  childrenOf,
-  depth,
-  expNodes,
-  onToggle,
-}: {
+// Compact per-node meta for the collapsed summary: tool count (this node OWNS its tools).
+const nodeToolsLabel = (n: OrchNode): string => {
+  const c = n.tools?.length ?? 0
+  return c > 0 ? `${c} tool${c > 1 ? "s" : ""}` : ""
+}
+
+// Shared props for the recursive NodeView + its detail body (the per-node tool/child renderers).
+type NodeViewProps = {
   id: string
   nodes: Readonly<Record<string, OrchNode>>
   childrenOf: Readonly<Record<string, readonly string[]>>
   depth: number
   expNodes: Set<string>
   onToggle: (id: string) => void
+  expTools: Set<string>
+  onToggleTool: (id: string) => void
+  focusedKey: string | undefined
+  cols: number
+}
+
+// The collapsible one-line node header (glyph · label · summary · tokens · tool-count · ▸/▾).
+function NodeHeader({ n, expanded, hasDetail, hot, setHover, onToggle }: {
+  n: OrchNode
+  expanded: boolean
+  hasDetail: boolean
+  hot: boolean
+  setHover: (v: boolean) => void
+  onToggle: () => void
 }) {
-  const [hover, setHover] = useState(false)
-  const n = nodes[id]
-  if (n === undefined) return null
-  const kids = childrenOf[id] ?? []
-  const hasKids = kids.length > 0
-  const expanded = n.status === "running" || expNodes.has(id) // running auto-expands
   const color = nodeColor(n.status)
   const summary = n.status === "running" ? n.phase || "running…" : (n.result ?? n.phase)
-  const hot = hasKids && hover
+  const toolsLabel = nodeToolsLabel(n)
   return (
-    <box flexDirection="column" style={{ paddingLeft: depth === 0 ? 0 : INDENT }}>
-      <text
-        fg={color}
-        selectable={false}
-        onMouseDown={(hasKids ? (() => onToggle(id)) : undefined) as any}
-        onMouseOver={(hasKids ? (() => setHover(true)) : undefined) as any}
-        onMouseOut={(() => setHover(false)) as any}
-      >
-        <span fg={hot ? "#ffffff" : color}>{`${nodeGlyph(n.status)} `}</span>
-        <span fg={hot ? "#ffffff" : "#cdd6f4"}>{n.label}</span>
-        {summary ? <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${oneLine(summary)}`}</span> : null}
-        <NodeTokens tokens={n.tokens} hot={hot} />
-        {hasKids ? <span fg={hot ? "#cdd6f4" : "#585b70"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
-      </text>
-      {expanded && hasKids && (
-        <box flexDirection="column">
-          {kids.map((k) => (
-            <NodeView key={k} id={k} nodes={nodes} childrenOf={childrenOf} depth={depth + 1} expNodes={expNodes} onToggle={onToggle} />
-          ))}
-        </box>
-      )}
+    <text
+      fg={color}
+      selectable={false}
+      onMouseDown={(hasDetail ? onToggle : undefined) as any}
+      onMouseOver={(hasDetail ? (() => setHover(true)) : undefined) as any}
+      onMouseOut={(() => setHover(false)) as any}
+    >
+      <span fg={hot ? "#ffffff" : color}>{`${nodeGlyph(n.status)} `}</span>
+      <span fg={hot ? "#ffffff" : "#cdd6f4"}>{n.label}</span>
+      {summary ? <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${oneLine(summary)}`}</span> : null}
+      <NodeTokens tokens={n.tokens} hot={hot} />
+      {/* collapsed-only: show the owned-tool count so a node's work is visible without expanding */}
+      {!expanded && toolsLabel ? <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${toolsLabel}`}</span> : null}
+      {hasDetail ? <span fg={hot ? "#cdd6f4" : "#585b70"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
+    </text>
+  )
+}
+
+// The expanded detail body: this node's OWN tool steps first (it OWNS them), then its child
+// nodes (recursively, each independently expandable). Reuses ToolView per owned tool.
+function NodeDetail({ tools, kids, p }: { tools: readonly ToolMsg[]; kids: readonly string[]; p: NodeViewProps }) {
+  return (
+    <box flexDirection="column" style={{ paddingLeft: INDENT }}>
+      {tools.map((m) => (
+        <ToolView key={m.id} m={m} expanded={p.expTools.has(m.id)} focused={p.focusedKey === `tool:${m.id}`} cols={p.cols} onToggle={() => p.onToggleTool(m.id)} />
+      ))}
+      {kids.map((k) => (
+        <NodeView key={k} {...p} id={k} depth={p.depth + 1} />
+      ))}
+    </box>
+  )
+}
+
+// Orchestration node = its OWN sub-agent. Collapsed = a one-line summary (label · tokens ·
+// tool-count · status glyph); expanded = its OWNED tool steps (per-node, reusing ToolView) PLUS
+// its child nodes (recursively, each independently expandable). Running auto-expands so you watch
+// the fan-out live; a settled node collapses to its summary on click.
+function NodeView(p: NodeViewProps) {
+  const [hover, setHover] = useState(false)
+  const n = p.nodes[p.id]
+  if (n === undefined) return null
+  const kids = p.childrenOf[p.id] ?? []
+  const tools = (n.tools ?? []) as readonly ToolMsg[]
+  // A node is EXPANDABLE when it owns tools OR has child nodes — its own collapse state.
+  const hasDetail = kids.length > 0 || tools.length > 0
+  const expanded = n.status === "running" || p.expNodes.has(p.id) // running auto-expands; done collapses on click
+  const hot = hasDetail && hover
+  return (
+    <box flexDirection="column" style={{ paddingLeft: p.depth === 0 ? 0 : INDENT }}>
+      <NodeHeader n={n} expanded={expanded} hasDetail={hasDetail} hot={hot} setHover={setHover} onToggle={() => p.onToggle(p.id)} />
+      {expanded && hasDetail && <NodeDetail tools={tools} kids={kids} p={p} />}
     </box>
   )
 }
@@ -323,6 +361,27 @@ const childrenIndex = (orch: OrchTree | undefined): Record<string, string[]> => 
     if (p !== undefined && orch.nodes[p] !== undefined) (idx[p] ??= []).push(id)
   }
   return idx
+}
+
+// PER-NODE TOOL ROUTING: the orchestration tool rows that join the Tab focus ring. Walk the
+// live tree in render order (roots → children); for each EXPANDED node expose its owned tool
+// rows (same `tool:<id>` key as transcript tools, so toggleFocused drives them unchanged).
+const orchToolFocusables = (
+  orch: OrchTree | undefined,
+  childrenOf: Readonly<Record<string, readonly string[]>>,
+  expNodes: Set<string>,
+): string[] => {
+  if (!orch) return []
+  const out: string[] = []
+  const expanded = (id: string) => orch.nodes[id]?.status === "running" || expNodes.has(id)
+  const walk = (id: string) => {
+    const node = orch.nodes[id]
+    if (node === undefined || !expanded(id)) return
+    for (const m of node.tools ?? []) out.push(`tool:${m.id}`)
+    for (const k of childrenOf[id] ?? []) walk(k)
+  }
+  for (const rid of orch.roots) walk(rid)
+  return out
 }
 
 // Per-id expansion toggle set (orch nodes). Encapsulates the Set + reset-on-session.
@@ -433,6 +492,9 @@ function App() {
     if (t.steps.length > 0) focusables.push(`turn:${t.idx}`)
     if (isExpanded(t)) for (const s of t.steps) if (s.kind === "tool") focusables.push(`tool:${s.id}`)
   }
+  // PER-NODE TOOL ROUTING: orchestration node tool rows join the Tab ring too (helper walks
+  // the expanded tree). Same `tool:<id>` key as transcript tools, so toggleFocused drives them.
+  focusables.push(...orchToolFocusables(orch, childrenOf, expNodes))
   const focusedKey = focusables.length ? focusables[((focus % focusables.length) + focusables.length) % focusables.length] : undefined
   const toggleFocused = () => {
     if (!focusedKey) return
@@ -656,6 +718,10 @@ function App() {
                   depth={0}
                   expNodes={expNodes}
                   onToggle={toggleNode}
+                  expTools={expTools}
+                  onToggleTool={toggleTool}
+                  focusedKey={focusedKey}
+                  cols={width || 80}
                 />
               ))}
             </box>
