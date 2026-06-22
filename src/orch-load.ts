@@ -22,7 +22,7 @@ import { context as otelContext, trace as otelTrace, type Context as OtelContext
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import * as Effect from "effect/Effect"
 import type { AnySpan } from "effect/Tracer"
-import { AxMemory } from "@ax-llm/ax"
+import { ax, AxMemory, type AxGen } from "@ax-llm/ax"
 import { limits, llm, MODEL, onEvent, readUsageOf } from "./agent.ts"
 import { adversarialVerify, agent, judge, loopUntilDry, type AgentNode, type EmitSink } from "./orch-recipes.ts"
 import {
@@ -44,8 +44,9 @@ import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 export const ORCH_SCRIPTS_DIR = resolvePath(process.cwd(), ".ax/orch")
 
 // The toolkit injected into a loaded script: the 5 CORE prims (orch.ts) + the 4
-// userland recipes (orch-recipes.ts). A script composes these — it never re-imports
-// the engine, so the core stays exactly 5 prims and the script can't smuggle a 6th.
+// userland recipes (orch-recipes.ts) + a gen factory for building leaves inline.
+// A script composes these — it never re-imports the engine, so the core stays exactly
+// 5 prims (gen is a toolkit convenience that wraps ax()). The script can't smuggle a 6th.
 export type OrchPrims = {
   // 5 core
   readonly leaf: typeof leaf
@@ -53,6 +54,8 @@ export type OrchPrims = {
   readonly pipeline: typeof pipeline
   readonly emit: typeof emit
   readonly allocate: typeof allocate
+  // generator factory (wraps ax() + setDescription)
+  readonly gen: (signature: string, description?: string) => AxGen
   // 4 recipes
   readonly agent: typeof agent
   readonly judge: typeof judge
@@ -161,12 +164,20 @@ export const loadAndRunOrch = (parent: AnySpan, sessionId: string, scriptRef: st
       abortSignal: aborter.signal,
     })
 
+    // gen factory: wraps ax() + optional setDescription
+    const genFactory = (signature: string, description?: string): AxGen => {
+      const g = ax(signature)
+      if (description !== undefined) g.setDescription(description)
+      return g
+    }
+
     const prims: OrchPrims = {
       leaf,
       parallel,
       pipeline,
       emit,
       allocate,
+      gen: genFactory,
       agent,
       judge,
       loopUntilDry,

@@ -50,9 +50,10 @@ const BASE_PROMPT = [
   "Orchestration: beyond a single reply you can drive deterministic multi-node runs whose nodes render live in a tree.",
   "User-invoked triggers: `^o` runs a built-in fan-out over the current input; `/run <name> [message]` loads + runs a saved script.",
   "To author a CUSTOM flow, write_file a script to `.ax/orch/<name>.ts` (trusted dir; paths escaping it are rejected) exporting",
-  "`orchestrate(ctx, prims)`, then tell the user to `/run <name>`. prims = { leaf, parallel, pipeline, emit, allocate } plus recipes",
-  "{ agent, judge, loopUntilDry, adversarialVerify }; ctx = { message, ai, budget, onEvent, optsFor(), usageOf }. Compose ONLY through",
-  "`prims` so the engine core stays the 5 primitives. RULE: never share a mutating memory across concurrent branches — call",
+  "`orchestrate(ctx, prims)`, then tell the user to `/run <name>`. prims = { leaf, parallel, pipeline, emit, allocate, gen } plus recipes",
+  "{ agent, judge, loopUntilDry, adversarialVerify }; ctx = { message, ai, budget, onEvent, optsFor(), usageOf }. A dynamic orch script needs",
+  "NO runtime imports — gen() is an ambient prim factory that builds leaves inline: gen(signature, description?) returns an AxGen for leaf().",
+  "Compose ONLY through prims, so the engine core stays the 5 primitives. RULE: never share a mutating memory across concurrent branches — call",
   "`ctx.optsFor()` for a fresh forked memory per parallel leaf. See `.ax/orch/example.ts` for the canonical pattern.",
 ].join(" ")
 
