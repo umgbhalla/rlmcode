@@ -28,7 +28,7 @@
 // Effect boundary is needed here; we read the ambient tracer/context synchronously.
 import { ax, AxMemory, type AxAIService, type AxFunction, type AxGen } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { limits, llm, onEvent, readUsageOf } from "./agent.ts"
+import { limits, llm, onEvent, readUsageOf } from "./runtime.ts"
 import { adversarialVerify, agent, judge, loopUntilDry } from "./orch-recipes.ts"
 import { allocate, type Budget, BudgetExhaustedError, type LeafOpts } from "./orch.ts"
 import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
@@ -84,15 +84,16 @@ const leafGen = (description: string): AxGen => {
 
 // One bracketed worker leaf over `task`, charged to the shared budget. nodeId nests it
 // under rootId in the live tree.
-const worker = (
-  ai: AxAIService,
-  rootId: string,
-  i: number,
-  task: string,
-  persona: string,
-  optsFor: () => LeafOpts,
-  budget: Budget,
-): Promise<string> => {
+type WorkerOpts = {
+  ai: AxAIService
+  rootId: string
+  i: number
+  task: string
+  persona: string
+  optsFor: () => LeafOpts
+  budget: Budget
+}
+const worker = ({ ai, rootId, i, task, persona, optsFor, budget }: WorkerOpts): Promise<string> => {
   const nodeId = `${rootId}/branch-${i}`
   onEvent({ type: "start", nodeId, parentId: rootId, phase: `branch ${i + 1}` })
   const gen = leafGen(
@@ -118,21 +119,30 @@ const numbered = (xs: readonly string[]) => xs.map((c, i) => `#${i + 1}:\n${c}`)
 // fans out workers (BASE_TOOLS leaves, forked mem), then judges/verifies per strategy.
 // Every node emits through onEvent → the OrchTree. Budget breaches bubble as
 // BudgetExhaustedError, caught by the handler for a partial return.
-const runOrchestration = async (
-  ai: AxAIService,
-  strategy: Strategy,
-  task: string,
-  branches: number,
-  optsFor: () => LeafOpts,
-  budget: Budget,
-  rootId: string,
-): Promise<{ reply: string; branches: number; accepted?: boolean }> => {
+type OrchestrationOpts = {
+  ai: AxAIService
+  strategy: Strategy
+  task: string
+  branches: number
+  optsFor: () => LeafOpts
+  budget: Budget
+  rootId: string
+}
+const runOrchestration = async ({
+  ai,
+  strategy,
+  task,
+  branches,
+  optsFor,
+  budget,
+  rootId,
+}: OrchestrationOpts): Promise<{ reply: string; branches: number; accepted?: boolean }> => {
   onEvent({ type: "start", nodeId: rootId, phase: `orchestrate:${strategy}` })
   try {
     const fanOut = (n: number): Promise<string[]> =>
       Promise.all(
         Array.from({ length: n }, (_, i) =>
-          worker(ai, rootId, i, task, PERSONAS[i % PERSONAS.length]!, optsFor, budget).catch(() => ""),
+          worker({ ai, rootId, i, task, persona: PERSONAS[i % PERSONAS.length]!, optsFor, budget }).catch(() => ""),
         ),
       ).then((rs) => rs.filter((r) => r.length > 0))
 
@@ -259,7 +269,7 @@ const orchestrateTool: AxFunction = {
     const { optsFor, budget } = boundary(sessionId, signal, rootId)
     try {
       const out = await otelContext.with(otelContext.active(), () =>
-        runOrchestration(ai, strategy, task, branches, optsFor, budget, rootId),
+        runOrchestration({ ai, strategy, task, branches, optsFor, budget, rootId }),
       )
       return clip(out.reply)
     } catch (e) {

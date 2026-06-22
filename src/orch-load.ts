@@ -23,7 +23,7 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import * as Effect from "effect/Effect"
 import type { AnySpan } from "effect/Tracer"
 import { ax, type AxAIService, AxMemory, type AxGen } from "@ax-llm/ax"
-import { limits, llm, MODEL, onEvent, readUsageOf } from "./agent.ts"
+import { limits, llm, MODEL, onEvent, readUsageOf } from "./runtime.ts"
 import { adversarialVerify, agent, judge, loopUntilDry, type AgentNode, type EmitSink } from "./orch-recipes.ts"
 import {
   allocate,

@@ -3,10 +3,10 @@
 // emits canonical gen_ai.* child spans (token usage, finish reasons, message
 // events). Effect's own Telemetry.addGenAIAnnotations stamps the semconv
 // attributes on our span. Metrics + correlated logs come along automatically.
-import { ai, ax, type AxLoggerFunction, AxMemory } from "@ax-llm/ax"
+import { ax, type AxLoggerFunction, AxMemory } from "@ax-llm/ax"
 import { existsSync, readFileSync } from "node:fs"
 import { emitActivity } from "./activity.ts"
-import { allocate, BudgetExhaustedError, type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
+import { allocate, BudgetExhaustedError, type BudgetUsage } from "./orch.ts"
 import { agent as agentNode } from "./orch-recipes.ts"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
@@ -17,36 +17,20 @@ import type { AnySpan } from "effect/Tracer"
 import * as Telemetry from "effect/unstable/ai/Telemetry"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
-// orch-tools.ts imports this module's runtime helpers (llm/onEvent/readUsageOf/limits),
-// so there is a static import cycle agent ⇄ orch-tools. It is SAFE because the cycle is
-// init-order-tolerant ONE way: orch-tools' top level reads NONE of agent's exports
-// (ORCH_TOOLS is built from pure prims; agent's values are touched only inside handlers
-// at call time), so when agent.ts loads first (the app entry: chat.tsx→atoms→agent),
-// ORCH_TOOLS is fully defined by the time the `chat` gen below references it. (Importing
-// orch-tools.ts as the standalone entry module would invert the order — not a real path.)
+import { limits, llm, MODEL, onEvent } from "./runtime.ts"
 import { ORCH_TOOLS } from "./orch-tools.ts"
 
-const MAX_STEPS = Number(process.env.AX2_MAX_STEPS ?? 50) // max tool-call iterations per turn
+const MAX_STEPS = limits.maxSteps // max tool-call iterations per turn
 // Hard per-turn TOKEN ceiling, enforced by orch's Budget (charged after each leaf
 // from the forward result's usage). Distinct from MAX_STEPS (tool-call iterations,
 // still recovered by turn() below): this is a real token gate that throws
 // BudgetExhaustedError when a turn's cumulative usage crosses it.
-const TOKEN_BUDGET = Number(process.env.AX2_TOKEN_BUDGET ?? 2_000_000)
+const TOKEN_BUDGET = limits.tokenBudget
 
 const BUDGET_NUDGE =
   "Your tool-call budget for this turn is used up. Do NOT call any more tools. Using everything you've gathered so far, give the user your best, concise answer now."
 
-export const MODEL = "@cf/moonshotai/kimi-k2.7-code"
 const PROVIDER = "cloudflare.workers-ai"
-
-// The shared AI service. Exported so the orchestration demo (orch-run.ts) drives
-// the SAME provider/logger/captureFetch wiring as turn() — one client, one trace.
-export const llm = ai({
-  name: "openai",
-  apiKey: process.env.CLOUDFLARE_API_TOKEN!,
-  apiURL: `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/v1`,
-  config: { model: MODEL as any },
-})
 
 const BASE_PROMPT = [
   "You are a capable coding agent running inside a terminal, in the user's project directory.",
@@ -230,26 +214,6 @@ const readResponseId = (gen: typeof chat): string | undefined => {
   const last = Array.isArray(log) ? log[log.length - 1] : undefined
   return last?.remoteId ?? undefined
 }
-
-// Node-lifecycle sink handed to the agent() recipe. emit() is Effect<void> (an
-// Effect.sync body: bus push + active-OTel-span addEvent). We run it synchronously
-// at the session boundary — the recipe stays Promise-native and never touches
-// Effect. agentNode() runs inside otelContext.with(traceContext), so getActiveSpan()
-// inside emit() resolves to the live chat.turn span (not a forked/empty context).
-export const onEvent = (event: NodeEvent): void => Effect.runSync(emit(event))
-
-// Generic usage reader (readUsage is typed to `typeof chat`; this is the same
-// getUsage() probe over any AxGen the orchestration demo forwards). Exported so
-// orch-run.ts charges the shared Budget from each leaf's usage, exactly like turn().
-export const readUsageOf = (gen: unknown): BudgetUsage | undefined => {
-  const u = (gen as { getUsage?: () => unknown }).getUsage?.()
-  const last = Array.isArray(u) ? u[u.length - 1] : u
-  return (last as { tokens?: BudgetUsage })?.tokens ?? (last as BudgetUsage | undefined)
-}
-
-// Tool-call iteration ceiling + per-orchestration token ceiling, re-exported so the
-// orchestration demo (orch-run.ts) builds LeafOpts/Budget with the same limits as turn().
-export const limits = { maxSteps: MAX_STEPS, tokenBudget: TOKEN_BUDGET } as const
 
 export type TurnResult = { reply: string; tokens?: number; finishReason?: string; budget: boolean }
 
