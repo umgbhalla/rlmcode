@@ -160,24 +160,33 @@ export const withTimeout = <T>(
 // failures only). The forked timeout signal REPLACES opts.abortSignal so ax aborts the
 // real HTTP on timeout/cancel. A logic error (AxFunctionError/budget) is NOT retried; a
 // hang aborts + surfaces NodeTimeoutError (the caller's fanOut maps it to a null slot).
+// Resilience knobs. onRetry fires before each backoff (a live-tree delta). timeoutMs is the
+// per-node wall-clock cap — default LEAF_TIMEOUT_MS (a sub-agent node should never HANG); a
+// NON-FINITE value DISABLES the timeout, used by the MAIN turn (long-horizon — it can fan out
+// a whole orchestration — bounded by maxSteps + abort, not a 120s leaf deadline; without this
+// an orchestrating turn is guillotined mid-fan-out).
+export type ResilienceOpts = {
+  onRetry?: (tryIndex: number, err: unknown, delayMs: number) => void
+  timeoutMs?: number
+}
 export const resilientNode = <I extends AxGenIn, O extends AxGenOut>(
   gen: AxGen<I, O>,
   opts: NodeOpts,
   nodeId: string,
   ai: AxAIService,
   input: I,
-  onRetry: (tryIndex: number, err: unknown, delayMs: number) => void = () => {},
+  r: ResilienceOpts = {},
 ): Promise<O> => {
+  const { onRetry = () => {}, timeoutMs = LEAF_TIMEOUT_MS } = r
   // A bare-stub NodeOpts (tests) or a caller that didn't thread one falls back to a never-
   // aborted signal — resilience still works, cancellation is just a no-op.
   const signal = opts.abortSignal ?? new AbortController().signal
+  const once = (nodeSignal: AbortSignal) =>
+    // The forked/own signal is the node's abortSignal: ax honors it in forward(), so a
+    // timeout/cancel actually stops the in-flight request (not just rejects the race).
+    node(gen, { ...opts, abortSignal: nodeSignal })(ai, input)
   return withRetry(
-    () =>
-      withTimeout(nodeId, LEAF_TIMEOUT_MS, signal, (nodeSignal) =>
-        // The forked signal is the node's abortSignal: ax honors it in forward(), so a
-        // timeout/cancel actually stops the in-flight request (not just rejects the race).
-        node(gen, { ...opts, abortSignal: nodeSignal })(ai, input),
-      ),
+    () => (Number.isFinite(timeoutMs) ? withTimeout(nodeId, timeoutMs, signal, once) : once(signal)),
     signal,
     onRetry,
   )

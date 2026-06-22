@@ -182,7 +182,7 @@ export const emit = (event: NodeEvent, _opts?: EmitOpts): Effect.Effect<void> =>
         : event.type === "done"
           ? { kind: "node", nodeId: event.nodeId, event: "done", parentId: undefined, detail: clip(event.result), tokens: event.tokens }
           : event.type === "error"
-            ? { kind: "node", nodeId: event.nodeId, event: "error", parentId: undefined, detail: clip(event.cause) }
+            ? { kind: "node", nodeId: event.nodeId, event: "error", parentId: undefined, detail: causeText(event.cause) }
             : { kind: "node", nodeId: event.nodeId, event: "start", parentId: event.parentId, detail: event.phase }
     emitActivity(activity)
 
@@ -203,7 +203,7 @@ export const emit = (event: NodeEvent, _opts?: EmitOpts): Effect.Effect<void> =>
         ...(event.type === "start" ? { "orch.node.parent_id": event.parentId ?? "", "orch.node.phase": event.phase } : {}),
         ...(event.type === "delta" ? { "orch.node.chunk": event.chunk } : {}),
         ...(event.type === "done" ? { "orch.node.result": clip(event.result), ...(event.tokens !== undefined ? { "orch.node.tokens": event.tokens } : {}) } : {}),
-        ...(event.type === "error" ? { "orch.node.cause": clip(event.cause) } : {}),
+        ...(event.type === "error" ? { "orch.node.cause": causeText(event.cause) } : {}),
       })
     }
   })
@@ -212,6 +212,20 @@ export const emit = (event: NodeEvent, _opts?: EmitOpts): Effect.Effect<void> =>
 const clip = (v: unknown, max = 256): string => {
   const s = typeof v === "string" ? v : (() => { try { return JSON.stringify(v) ?? String(v) } catch { return String(v) } })()
   return s.length > max ? `${s.slice(0, max)}…` : s
+}
+
+// HUMAN error text for an error NodeEvent — the message/tag, NOT the whole serialized
+// error object. JSON.stringify(cause) leaked `{"nodeId":…,"_tag":"NodeTimeoutError",…}`
+// as the node's summary cell (the widest row on screen); an Error's .message ("node X
+// timed out after 120000ms") or a tagged error's _tag is what a human needs.
+const causeText = (cause: unknown): string => {
+  if (cause instanceof Error) return clip(cause.message)
+  if (cause !== null && typeof cause === "object") {
+    const o = cause as { message?: unknown; _tag?: unknown }
+    if (typeof o.message === "string") return clip(o.message)
+    if (typeof o._tag === "string") return clip(o._tag)
+  }
+  return clip(cause)
 }
 
 // 5. allocate — ADVISORY token gate over a real internal tally. `soft` is the nudge

@@ -71,7 +71,7 @@ await (async () => {
   {
     const { gen, state } = scriptedGen([statusErr(429), statusErr(503), null], "recovered")
     let retries = 0
-    const out = await resilientNode(gen, optsFor(), "n1", fakeAi, { message: "q" }, () => retries++)
+    const out = await resilientNode(gen, optsFor(), "n1", fakeAi, { message: "q" }, { onRetry: () => retries++ })
     assert(out.reply === "recovered", `resilientNode returns the recovered reply, got ${JSON.stringify(out)}`)
     assert(state.calls === 3, `resilientNode retried the transient: 3 forward calls, got ${state.calls}`)
     assert(retries === 2, `onRetry fired once per retry (2), got ${retries}`)

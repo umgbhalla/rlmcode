@@ -9,7 +9,7 @@
 import type { AxAIService, AxGen, AxGenIn, AxGenOut, AxStepHooks } from "@ax-llm/ax"
 import { makeNodeLogger } from "./activity.ts"
 import { type Budget, type BudgetUsage, node, type NodeOpts, type NodeEvent, tokensOf } from "./orch.ts"
-import { resilientNode } from "./orch-resilience.ts"
+import { LEAF_TIMEOUT_MS, resilientNode } from "./orch-resilience.ts"
 // Re-export the resilience surface so callers/tests keep a single recipe import site.
 export { LEAF_TIMEOUT_MS, NodeTimeoutError, resilientNode, withRetry, withTimeout } from "./orch-resilience.ts"
 
@@ -164,21 +164,27 @@ export const runNode = async <I extends AxGenIn, O extends AxGenOut>(
   ai: AxAIService,
   input: I,
 ): Promise<O> => {
-  const { nodeId, parentId, gen, onEvent = noopSink, phase = "node", budget, usageOf } = spec
-  // PER-NODE TOOL ROUTING: tag this node's forward with a nodeId-bound logger so its tools
-  // route under this node (not the main transcript). EXCEPTION: the MAIN turn (agent.ts) is
-  // also run through runNode but its tools must stay in the transcript (untagged), served by
-  // the service-level global logger — so it opts out. It is the ONLY node whose id starts with
-  // `turn:`; every orchestration node has an `orch`/rootId-prefixed id, so this is unambiguous.
-  const opts = nodeId.startsWith("turn:") ? spec.opts : withNodeLogger(spec.opts, nodeId)
+  const { nodeId, parentId, gen, phase = "node", budget, usageOf } = spec
+  // THE MAIN TURN (agent.ts) runs through runNode too, but it is NOT an orchestration node:
+  // it is the only node whose id starts with `turn:` (every orch node is rootId-prefixed). So
+  // for the main turn we (1) keep its tools in the transcript (untagged — opt out of the per-
+  // node logger), (2) SUPPRESS its lifecycle events so it never renders as a tree node (the
+  // turn's reply/error is owned by the transcript, NOT the OrchTree — no double-render), and
+  // (3) DISABLE the per-node 120s leaf timeout (a turn is long-horizon — it can fan out a whole
+  // orchestration — and is bounded by maxSteps + abort, not a leaf deadline).
+  const isMainTurn = nodeId.startsWith("turn:")
+  const onEvent: EmitSink = isMainTurn ? noopSink : (spec.onEvent ?? noopSink)
+  const timeoutMs = isMainTurn ? Number.POSITIVE_INFINITY : LEAF_TIMEOUT_MS
+  const opts = isMainTurn ? spec.opts : withNodeLogger(spec.opts, nodeId)
   onEvent({ type: "start", nodeId, parentId, phase })
   try {
     // TRANSIENT RESILIENCE on the node path: per-node timeout (abort a hang) + retry-with-
     // backoff on transient (429/5xx/network/timeout) errors only — a logic error
     // (AxFunctionError/budget) fails fast. A retry emits a delta so the live tree shows it.
-    let result = await resilientNode(gen, opts, nodeId, ai, input, (tryIndex, _err, delayMs) =>
-      onEvent({ type: "delta", nodeId, chunk: `⟳ transient failure — retry ${tryIndex + 1} in ${delayMs}ms` }),
-    )
+    let result = await resilientNode(gen, opts, nodeId, ai, input, {
+      onRetry: (tryIndex, _err, delayMs) => onEvent({ type: "delta", nodeId, chunk: `⟳ transient failure — retry ${tryIndex + 1} in ${delayMs}ms` }),
+      timeoutMs,
+    })
     // GRACEFUL-FINALIZE CLEANER (orch-recipes.ts:77 Upgrade): if a stripped-tools finalize
     // returned kimi's RAW tool-call sentinel tokens as text (the degenerate maxSteps<=1 case),
     // run ONE no-tools nudge forward on the SAME mem (the tool results / prior context persist
