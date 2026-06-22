@@ -3,7 +3,7 @@
 // these are reified into orch.ts: the engine stays exactly 5 prims. Promise-native,
 // like the combinators they call; Effect stays at the session boundary.
 import type { AxAIService, AxGen, AxGenIn, AxGenOut } from "@ax-llm/ax"
-import { leaf, type LeafOpts, type NodeEvent, parallel } from "./orch.ts"
+import { type Budget, type BudgetUsage, leaf, type LeafOpts, type NodeEvent, parallel } from "./orch.ts"
 
 // A sink that records a NodeEvent. Promise-native recipes stay Effect-free: the
 // SESSION BOUNDARY (turn() in agent.ts) supplies this, running the real emit()
@@ -16,22 +16,29 @@ const noopSink: EmitSink = () => {}
 // agent — run one leaf as a lifecycle-bracketed node: start → done | error. The
 // caller-supplied sink fires the lifecycle events; the recipe itself never
 // touches Effect (it is pure Promise plumbing over leaf() + the 3 events).
+// budget/usageOf are optional: when both are supplied, the recipe charges the
+// budget from the forward result's usage (read off the gen via usageOf) AFTER the
+// leaf returns — leaf()'s core (ai,input)=>Promise<O> signature is untouched. A
+// charge that crosses `total` throws BudgetExhaustedError, surfacing as a node error.
 export type AgentNode<I extends AxGenIn, O extends AxGenOut> = {
   nodeId: string
   gen: AxGen<I, O>
   opts: LeafOpts
   onEvent?: EmitSink
   phase?: string
+  budget?: Budget
+  usageOf?: (gen: AxGen<I, O>) => BudgetUsage | undefined
 }
 export const agent = async <I extends AxGenIn, O extends AxGenOut>(
   node: AgentNode<I, O>,
   ai: AxAIService,
   input: I,
 ): Promise<O> => {
-  const { nodeId, gen, opts, onEvent = noopSink, phase = "agent" } = node
+  const { nodeId, gen, opts, onEvent = noopSink, phase = "agent", budget, usageOf } = node
   onEvent({ type: "start", nodeId, phase })
   try {
     const result = await leaf(gen, opts)(ai, input)
+    if (budget !== undefined) budget.charge(usageOf?.(gen))
     onEvent({ type: "done", nodeId, result })
     return result
   } catch (cause) {

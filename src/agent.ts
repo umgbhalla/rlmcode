@@ -6,7 +6,7 @@
 import { ai, ax, type AxLoggerFunction, AxMemory } from "@ax-llm/ax"
 import { existsSync, readFileSync } from "node:fs"
 import { emitActivity } from "./activity.ts"
-import { emit, type NodeEvent } from "./orch.ts"
+import { allocate, BudgetExhaustedError, type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
 import { agent as agentNode } from "./orch-recipes.ts"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
@@ -19,6 +19,11 @@ import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { tools } from "./tools.ts"
 
 const MAX_STEPS = Number(process.env.AX2_MAX_STEPS ?? 50) // max tool-call iterations per turn
+// Hard per-turn TOKEN ceiling, enforced by orch's Budget (charged after each leaf
+// from the forward result's usage). Distinct from MAX_STEPS (tool-call iterations,
+// still recovered by turn() below): this is a real token gate that throws
+// BudgetExhaustedError when a turn's cumulative usage crosses it.
+const TOKEN_BUDGET = Number(process.env.AX2_TOKEN_BUDGET ?? 2_000_000)
 
 const BUDGET_NUDGE =
   "Your tool-call budget for this turn is used up. Do NOT call any more tools. Using everything you've gathered so far, give the user your best, concise answer now."
@@ -87,6 +92,11 @@ class ChatError {
   readonly _tag = "ChatError"
   constructor(readonly cause: unknown) {}
 }
+
+// The token budget (orch.allocate) throws BudgetExhaustedError, wrapped by
+// runForward into a ChatError. Unwrap one level to surface it on the span.
+const asBudgetExhausted = (e: unknown): BudgetExhaustedError | undefined =>
+  e instanceof ChatError && e.cause instanceof BudgetExhaustedError ? e.cause : undefined
 
 // Tool-call args as a string for the UI. No de-double needed: the only place ax
 // doubles params (mergeFunctionCalls, params += params) is the STREAMING done-cb
@@ -244,6 +254,11 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       lastFinishReason = undefined // reset the captureFetch latch for this turn
       const aborter = new AbortController()
       turnAborters.set(sessionId, aborter)
+      // One token budget for the whole turn (shared across the chat + answerGen
+      // leaves). agent() charges it from each forward result's usage; crossing the
+      // ceiling throws BudgetExhaustedError, caught below and surfaced on the span.
+      const budget = allocate(TOKEN_BUDGET)
+      const usageOf = (gen: typeof chat): BudgetUsage | undefined => readUsage(gen)
 
       yield* Effect.logInfo("turn.start").pipe(
         Effect.annotateLogs({ "session.id": sessionId, "message.chars": message.length }),
@@ -265,6 +280,8 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
                   gen,
                   opts: { mem, sessionId, tracer, traceContext, maxSteps: MAX_STEPS, stream: false, abortSignal: aborter.signal },
                   onEvent,
+                  budget,
+                  usageOf,
                 },
                 llm,
                 { message: msg },
@@ -293,6 +310,19 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
             return yield* runForward(answerGen, BUDGET_NUDGE)
           }),
         ),
+        // Token budget breach is a HARD failure (distinct from max-steps recovery):
+        // annotate the span with the typed error's spent/total, then re-fail.
+        (eff) =>
+          Effect.tapCause(eff, (cause) => {
+            const be = asBudgetExhausted(Cause.squash(cause))
+            return be
+              ? Effect.annotateCurrentSpan({
+                  "chat.budget_token_exhausted": true,
+                  "chat.budget_spent": be.spent,
+                  "chat.budget_total": be.total,
+                })
+              : Effect.void
+          }),
       )
 
       // Canonical gen_ai annotations via Effect's own helper (no hand-typed keys).

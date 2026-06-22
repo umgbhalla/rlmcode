@@ -33,13 +33,39 @@ export type NodeEvent =
 
 export type EmitOpts = { readonly spanId?: string }
 
-// Token gate. Reads usage via the existing usage reader in agent.ts (once wired).
+// The usage reader shape from agent.ts (readUsage/sumUsage): a leaf's token usage
+// as a structural triple. charge() derives a token count from this (totalTokens, or
+// promptTokens+completionTokens as a fallback) and adds it to the internal tally.
+export type BudgetUsage = { promptTokens?: number; completionTokens?: number; totalTokens?: number }
+
+// Token gate. Holds an internal used-token tally; charge() adds a leaf's usage after
+// it returns, spent()/remaining() reflect the tally, freeze()/over-budget throw.
 export type Budget = {
   readonly total: number
+  charge(usage: BudgetUsage | undefined): void
   spent(): Promise<number>
   remaining(): Promise<number>
   freeze(reason: string): void
 }
+
+// Typed, throwable budget breach: emitted by freeze() and by charge() when the
+// tally crosses `total`. Carries the reason and the spent/total numbers so a
+// boundary catch can annotate a span or surface a nudge.
+export class BudgetExhaustedError extends Error {
+  readonly _tag = "BudgetExhaustedError"
+  constructor(
+    readonly reason: string,
+    readonly spent: number,
+    readonly total: number,
+  ) {
+    super(`budget exhausted (${reason}): spent ${spent} of ${total} tokens`)
+    this.name = "BudgetExhaustedError"
+  }
+}
+
+// Derive a token count from a usage triple: prefer totalTokens, else sum the parts.
+const tokensOf = (u: BudgetUsage | undefined): number =>
+  u === undefined ? 0 : typeof u.totalTokens === "number" ? u.totalTokens : (u.promptTokens ?? 0) + (u.completionTokens ?? 0)
 
 // 1. leaf — the ONLY thing that calls ax. Curried so opts bind once, then (ai,input)
 // runs the forward. opts is cast to Readonly<AxProgramForwardOptions> at the boundary:
@@ -116,13 +142,27 @@ const clip = (v: unknown, max = 256): string => {
   return s.length > max ? `${s.slice(0, max)}…` : s
 }
 
-// 5. allocate — STUB. Token gate. spent/remaining resolve to 0/total, freeze is a no-op.
-// ponytail: advisory-only skeleton; no real usage read, no enforcement.
-// Ceiling: a run can blow past `total` with no signal. Upgrade: read real usage via
-// readUsage + typed BudgetExhaustedError (budget-enforce).
-export const allocate = (total: number): Budget => ({
-  total,
-  spent: async () => 0,
-  remaining: async () => total,
-  freeze: (_reason: string) => {},
-})
+// 5. allocate — token gate over a real internal tally. charge() folds a leaf's usage
+// (the readUsage/sumUsage triple) into `used`; the moment `used` crosses `total` it
+// throws BudgetExhaustedError, as does freeze(). spent()/remaining() reflect the tally.
+export const allocate = (total: number): Budget => {
+  let used = 0
+  let frozen: string | undefined
+  const guard = () => {
+    if (frozen !== undefined) throw new BudgetExhaustedError(frozen, used, total)
+    if (used > total) throw new BudgetExhaustedError("over-budget", used, total)
+  }
+  return {
+    total,
+    charge: (usage) => {
+      used += tokensOf(usage)
+      guard()
+    },
+    spent: async () => used,
+    remaining: async () => Math.max(0, total - used),
+    freeze: (reason: string) => {
+      frozen = reason
+      guard()
+    },
+  }
+}
