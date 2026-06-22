@@ -96,6 +96,17 @@ const DISTILLER_RULE =
   "You are the DISTILLER: select evidence from the raw `context` for a downstream executor — do NOT answer. CRITICAL for locate/find/name/which questions: the answer is often ONE buried line, so do NOT paraphrase or summarize the context away. Instead RETRIEVE: derive search terms from the query (and obvious synonyms — e.g. for a '/auth route' question, search for 'auth', 'route', 'register', 'app.post', 'app.get'), `context.split('\\n').filter(l => /term/i.test(l))` to grep the raw context, and forward the MATCHING LINES VERBATIM (plus a few neighbors) as the distilled evidence. Preserve exact identifiers/code — never lose a candidate line to a summary. " +
   SANDBOX_RULE
 
+// EXECUTOR stage steer — the other half of the intermittent "buried fact lost" failure. The
+// distiller→executor handoff occasionally lands `inputs.distilledContext` as undefined/empty (an
+// ax-internal flake). When that happens the executor must NOT give up or scan globalThis: the raw
+// task still arrives on `inputs.executorRequest` (and the distiller's matching lines are usually
+// inside it), so read THAT directly, grep it for the query terms, and final(...) the verbatim hit.
+// Probe BOTH fields on turn 1 (`console.log(typeof inputs.distilledContext, typeof inputs.executorRequest)`)
+// and mine whichever is non-empty — never conclude "not found" while a non-empty input string exists.
+const EXECUTOR_RULE =
+  "You are the EXECUTOR. Your inputs are `inputs.executorRequest` (the task + the distiller's evidence) and `inputs.distilledContext` (the distilled slice — but it MAY be undefined/empty if the distiller handoff dropped it). On your FIRST turn, console.log the type+length of BOTH so you know which holds the source. If `inputs.distilledContext` is undefined or empty, DO NOT conclude 'not found' and DO NOT scan globalThis — the source/evidence is in `inputs.executorRequest`: grep IT (`String(inputs.executorRequest).split('\\n').filter(l => /term/i.test(l))`) for the query terms and answer from the matching line. Only call final(...) once you have read a non-empty input string and located the literal answer in it. " +
+  SANDBOX_RULE
+
 // Build a REAL single-level RLM and forward it over { context, query }, bridging the
 // actor/context callbacks into the node-event tree. Returns the responder's answer +
 // evidence. rootId nests every RLM node under the live chat.turn span. Exported so the
@@ -157,7 +168,7 @@ export const runRlm = async (
     // require AND off the askClarification/globalThis-scan dead-ends; variable NAMING is left to
     // ax's per-stage template (distiller: `context`; executor: inputs.executorRequest/distilledContext).
     contextOptions: { description: DISTILLER_RULE },
-    executorOptions: { description: SANDBOX_RULE },
+    executorOptions: { description: EXECUTOR_RULE },
     // actorTurnCallback fires once per executor turn (1-based). Bridge each turn into a
     // start→done|error pair labelled by stage (distiller/executor) so the live tree
     // shows the RLM's internal loop nested under the turn span.
