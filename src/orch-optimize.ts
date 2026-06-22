@@ -1,5 +1,11 @@
 // orch-optimize — OPT-IN GEPA self-improvement scaffold over the ORCHESTRATOR.
 //
+// ⚠️ WIP — NOT WORKING / UNVERIFIED. This is a scaffold only: the optimize() wiring has
+// NEVER been run against a real GEPA optimize (the build gate was compile + a DRY
+// assertOptimizeWiring check, not a live run), so the call construction, scoring, and
+// artifact apply are UNPROVEN and likely need fixing. Do not treat GEPA as a working
+// feature. See the SCAFFOLD-ONLY ponytail below; the real run + validation is the Upgrade.
+//
 // THE IDEA: the orchestrator decides, per user task, HOW to fan out — which model
 // (kimi|glm), which strategy (parallel|judge|verify|pipeline), how many branches, and
 // what node prompt to hand each leaf. Today those decisions are hand-written. GEPA can
