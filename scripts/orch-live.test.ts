@@ -16,7 +16,7 @@
 import { AxAgentClarificationError, ai, type AxAIService, type AxFunction } from "@ax-llm/ax"
 import { ORCH_TOOLS } from "../src/orch-tools.ts"
 import { RLM_TOOLS, runRlm } from "../src/rlm-tool.ts"
-import { MODEL, rateLimiter } from "../src/runtime.ts"
+import { limits, MODEL, rateLimiter } from "../src/runtime.ts"
 
 // Build the CF-Kimi AxAIService EXACTLY like src/runtime.ts's `llm` (openai-shaped
 // Cloudflare Workers AI endpoint from .env). A standalone builder — not the shared
@@ -112,6 +112,25 @@ export const runStructuredPipelineLive = async (
   const out = await scriptTool.func(
     { name: "structured-pipe", message },
     { sessionId: "live-structpipe", ai: liveAi, abortSignal: new AbortController().signal },
+  )
+  return String(out ?? "")
+}
+
+// (F) GRACEFUL MAX-STEPS: drive a TOOL-DEMANDING task with a LOW maxSteps cap (the harness
+// runs this gate with AX2_MAX_STEPS=1 — limits.maxSteps is read at module load). With the
+// graceful ceiling, finalizeOnMaxSteps (orch-recipes.ts) strips the node's tools on its last
+// permitted step via ax's stepHooks.beforeStep, FORCING a real final text reply with NO further
+// tool calls and NO "max steps reached" throw. Without it the node would throw/return empty.
+// Returns the orchestrate tool's verbatim string (branches:1 = one real node, no judge noise).
+export const runGracefulMaxStepsLive = async (
+  task: string,
+  liveAi: AxAIService = buildLiveAi(),
+): Promise<string> => {
+  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
+  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
+  const out = await orchestrateTool.func(
+    { task, strategy: "parallel", branches: 1 },
+    { sessionId: "live-graceful", ai: liveAi, abortSignal: new AbortController().signal },
   )
   return String(out ?? "")
 }
@@ -319,6 +338,35 @@ await (async () => {
   assert(
     pipeTerms.some((t) => pipeReply.toLowerCase().includes(t)),
     `structured-pipeline summary reflects the threaded facts (one of ${pipeTerms.join(", ")}), got: ${JSON.stringify(pipeReply.slice(0, 400))}`,
+  )
+
+  // (F) GRACEFUL MAX-STEPS gate: a TOOL-DEMANDING task that WILL exceed a small maxSteps.
+  // The harness runs this gate with AX2_MAX_STEPS=1 (limits.maxSteps below reflects it), so
+  // the node's first step is also its last: finalizeOnMaxSteps strips its tools on that step
+  // via ax's stepHooks.beforeStep, FORCING a real final text reply with NO further tool calls
+  // and NO "max steps reached" throw. We assert the orchestrate tool did NOT throw, returned a
+  // real non-empty reply (not a failure/partial sentinel) — proof the ceiling is GRACEFUL
+  // (claude_code model), not a cliff. Only meaningful at a low cap; logs the cap it ran under.
+  const gracefulTask =
+    "Read the file package.json in this repo with your tools and report the project name and one dependency. If you cannot finish, summarize what you know."
+  let gracefulThrew = false
+  let gracefulReply = ""
+  try {
+    gracefulReply = await runGracefulMaxStepsLive(gracefulTask)
+  } catch (e) {
+    gracefulThrew = true
+    console.error("GRACEFUL MAX-STEPS THREW:", e)
+  }
+
+  console.log("─".repeat(60))
+  console.log(`LIVE GRACEFUL MAX-STEPS REPLY (AX2_MAX_STEPS=${limits.maxSteps}, tool-demanding task):`)
+  console.log(gracefulReply)
+  console.log("─".repeat(60))
+
+  assert(!gracefulThrew, "graceful max-steps: orchestrate did NOT throw at the step cap (ceiling, not a cliff)")
+  assert(
+    isRealReply(gracefulReply),
+    `graceful max-steps reply is a real non-empty string (forced in-loop finalize, not a throw/empty/sentinel), got: ${JSON.stringify(gracefulReply.slice(0, 200))}`,
   )
 
   // (C) RLM gate: a LONG context with a buried fact (like the proven /tmp smoke). The

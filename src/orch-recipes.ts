@@ -74,14 +74,15 @@ const noopSink: EmitSink = () => {}
 // the main turn; BASE_TOOLS for a node). onEvent + nodeId let the marker render on the live node.
 // Real ax types end-to-end (AxStepHooks / AxStepContext.removeFunctions) — no `any`.
 //
-// ponytail: the in-loop finalize is clean only when the model has done >=1 real tool step before
-// the cap (the realistic case: AX2_MAX_STEPS default 50, verified clean at low caps >=2). At the
-// DEGENERATE cap maxSteps=1 (the first step is also the last, so ZERO prior tool work) kimi, primed
-// by a tool-heavy system prompt, can emit raw `<|tool_call_begin|>` sentinel tokens as text instead
-// of prose — a non-empty but garbage reply. Ceiling: a maxSteps=1 turn over a tool-demanding task.
-// Upgrade: when the finalize reply still looks like raw tool-call tokens, run ONE no-tools nudge
-// forward ("you have tool results; answer now, do NOT call tools") on the SAME mem to coerce clean
-// prose — the old answerGen recovery, now a rare last-resort cleaner rather than the primary path.
+// The in-loop finalize is clean when the model has done >=1 real tool step before the cap (the
+// realistic case: AX2_MAX_STEPS default 50, verified clean at low caps >=2). At the DEGENERATE cap
+// maxSteps=1 (first step is also the last, ZERO prior tool work) kimi, primed by a tool-heavy
+// system prompt, can emit raw `<|tool_call_begin|>` sentinel tokens as text instead of prose — a
+// non-empty but garbage reply. That degenerate shape is now CAUGHT and coerced: runNode() (below)
+// detects the raw-tool-token reply (looksLikeRawToolTokens) and runs ONE no-tools nudge forward
+// (functionCall:'none') on the SAME mem to force clean prose — the old answerGen recovery, kept as a
+// rare last-resort cleaner rather than the primary path. So both cap>=2 (clean finalize) and cap=1
+// (clean after the nudge) yield usable prose, never raw sentinels.
 // onTruncate (optional) fires ONCE when the cap is hit and tools are stripped — the caller
 // (turn() in agent.ts) flips a flag so the turn can be annotated/marked as truncated-finalized.
 export const finalizeOnMaxSteps = (
@@ -111,6 +112,18 @@ export const finalizeOnMaxSteps = (
   }
 }
 
+// kimi (the CF model) sometimes emits its RAW tool-call wire tokens as plain TEXT instead of
+// prose — the `<|tool_call(s)_section_begin|>` / `<|tool_call_begin|>` sentinels. This is the
+// DEGENERATE graceful-finalize case (orch-recipes.ts:77 ponytail): when tools are stripped on a
+// node's FIRST=LAST step (maxSteps<=1, ZERO prior tool work), kimi — primed by a tool-heavy
+// system prompt — answers with these sentinel tokens, a non-empty but garbage reply. Detect it so
+// the finalize cleaner can coerce real prose. A plain regex over the known kimi sentinels — no `any`.
+const looksLikeRawToolTokens = (s: string): boolean => /<\|tool_calls?(_section)?_begin\|>|<\|tool_call_begin\|>/i.test(s)
+
+// extract the reply field off a forward result (string-shaped node O) for the sentinel check —
+// every node gen here is `… -> reply:string`, so the reply field is the user-facing text.
+const replyOf = (o: unknown): string => String((o as { reply?: unknown })?.reply ?? "")
+
 // runNode — run ONE node (the core `node` prim) as a lifecycle-bracketed unit:
 // start → done | error. The caller-supplied sink fires the lifecycle events; the recipe
 // itself never touches Effect (it is pure Promise plumbing over node() + the 3 events).
@@ -139,7 +152,22 @@ export const runNode = async <I extends AxGenIn, O extends AxGenOut>(
   const { nodeId, parentId, gen, opts, onEvent = noopSink, phase = "node", budget, usageOf } = spec
   onEvent({ type: "start", nodeId, parentId, phase })
   try {
-    const result = await node(gen, opts)(ai, input)
+    let result = await node(gen, opts)(ai, input)
+    // GRACEFUL-FINALIZE CLEANER (orch-recipes.ts:77 Upgrade): if a stripped-tools finalize
+    // returned kimi's RAW tool-call sentinel tokens as text (the degenerate maxSteps<=1 case),
+    // run ONE no-tools nudge forward on the SAME mem (the tool results / prior context persist
+    // in opts.mem) with functionCall:'none' so ax disables tool-calling and the model is FORCED
+    // to answer in clean prose. A single, bounded, last-resort coercion — NOT the primary path
+    // (the realistic cap>=2 already finalizes cleanly). Guarded: only fires on the sentinel shape.
+    if (looksLikeRawToolTokens(replyOf(result))) {
+      onEvent({ type: "delta", nodeId, chunk: "⚠ finalize emitted raw tool tokens — coercing a clean reply (no tools)" })
+      const nudgeInput = {
+        ...(input as Record<string, unknown>),
+        message: "You already have the tool results in context. Answer the original request now in plain prose. Do NOT call any tools or emit tool-call syntax.",
+      } as unknown as I
+      const nudged = await node(gen, { ...opts, functionCall: "none", maxSteps: 1 })(ai, nudgeInput).catch(() => result)
+      if (!looksLikeRawToolTokens(replyOf(nudged))) result = nudged
+    }
     // ADVISORY charge: track this node's spend AFTER it returned its real work. charge()
     // never throws for the soft line, so the node result below is ALWAYS returned. When
     // spend crosses the soft ceiling we emit a delta nudge (visible in the tree/span) but
