@@ -1,0 +1,19 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      # `bun install` runs the `prepare` script -> patches typescript with the
+      # Effect language service, so `bun run check` gets Effect diagnostics.
+      - run: bun install --frozen-lockfile
+      # Whole-tree gate: tsc + Effect LS, gate self-tests, yuku design analysis,
+      # ponytail debt ledger. (Pre-commit uses --staged; CI scans everything.)
+      - run: bun run lint
