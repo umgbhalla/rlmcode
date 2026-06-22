@@ -21,11 +21,12 @@ import { BASE_PROMPT, limits, llm, MODEL, onEvent } from "./runtime.ts"
 import { ORCH_TOOLS } from "./orch-tools.ts"
 import { RLM_TOOLS } from "./rlm-tool.ts"
 
-const MAX_STEPS = limits.maxSteps // max tool-call iterations per turn
-// Hard per-turn TOKEN ceiling, enforced by orch's Budget (charged after each leaf
-// from the forward result's usage). Distinct from MAX_STEPS (tool-call iterations,
-// still recovered by turn() below): this is a real token gate that throws
-// BudgetExhaustedError when a turn's cumulative usage crosses it.
+const MAX_STEPS = limits.maxSteps // max tool-call iterations per turn — the HARD per-turn stop
+// Per-turn SOFT TOKEN ceiling (advisory), tracked by orch's Budget (charged after each
+// leaf from the forward result's usage). allocate() with no hard arg is pure-advisory:
+// charge() NEVER throws for crossing it — a turn that did real work is never discarded.
+// MAX_STEPS (tool-call iterations, recovered by turn() below) is the real per-turn stop;
+// the token tally is a tracking/backstop signal. Only an explicit freeze() throws.
 const TOKEN_BUDGET = limits.tokenBudget
 
 const BUDGET_NUDGE =
@@ -272,9 +273,11 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       finishReasonState.last = undefined // reset the captureFetch latch for this turn
       const aborter = new AbortController()
       turnAborters.set(sessionId, aborter)
-      // One token budget for the whole turn (shared across the chat + answerGen
-      // leaves). agent() charges it from each forward result's usage; crossing the
-      // ceiling throws BudgetExhaustedError, caught below and surfaced on the span.
+      // One ADVISORY token budget for the whole turn (shared across the chat + answerGen
+      // leaves). agent() charges it from each forward result's usage; crossing the SOFT
+      // ceiling only nudges (a delta in the tree) — it NEVER discards the turn. The hard
+      // per-turn stop is MAX_STEPS (recovered above). The tapCause below stays for an
+      // explicit freeze()/runaway, which is the only thing that throws BudgetExhaustedError.
       const budget = allocate(TOKEN_BUDGET)
       const usageOf = (gen: typeof chat): BudgetUsage | undefined => readUsage(gen)
 

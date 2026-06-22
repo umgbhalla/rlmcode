@@ -14,9 +14,11 @@
 //      and never loop tools — so they carry NO functions at all (not even BASE_TOOLS).
 //      Giving them ZERO tools is strictly stronger than the BASE_TOOLS-only guard, so the
 //      one-level recursion contract holds a fortiori for them.
-//   2. BUDGET ceiling: each self-orchestration runs under its OWN allocate(ORCH_BUDGET)
-//      (AX2_ORCH_TOKEN_BUDGET, default ~40k). On BudgetExhaustedError we return a PARTIAL
-//      result string to the model rather than throwing the whole turn.
+//   2. BUDGET ceiling (ADVISORY/soft): each self-orchestration runs under its OWN
+//      allocate(SOFT, HARD). The SOFT line (AX2_ORCH_TOKEN_BUDGET) only NUDGES — a leaf
+//      that did real work is ALWAYS returned, never discarded for crossing it. Only the
+//      HARD ceiling (AX2_ORCH_TOKEN_HARD, a very high runaway backstop) throws
+//      BudgetExhaustedError → a PARTIAL result string. maxSteps is the per-leaf hard stop.
 //   3. BRANCH cap: orchestrate clamps the model's requested branch count to <= 4.
 //   4. abortSignal: extra.abortSignal threads into every LeafOpts, so a cancelled turn
 //      cancels the whole sub-run (ax honors it in forward()).
@@ -35,13 +37,21 @@ import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 
-// Per-self-orchestration token ceiling, SHARED across the sub-run's branches. A real
-// exploration leaf spends 70k–400k tokens, so a 4-branch fan-out needs ~2M of headroom;
-// the old 40k default killed every leaf instantly (BudgetExhaustedError). This is a
-// backstop against runaway loops, NOT a tight per-leaf budget.
-// ponytail: ONE shared ceiling across concurrent branches — a greedy branch can starve
-// the others. Upgrade: per-branch budgets (allocate per worker) so fan-out is fair.
+// Per-self-orchestration SOFT token ceiling, SHARED across the sub-run's branches. This
+// is the ADVISORY nudge line — crossing it logs/nudges but NEVER discards a completed
+// leaf (the root-cause fix: the old hard model threw BudgetExhaustedError after a leaf
+// finished and the empty-string discard nuked its real work). A real exploration leaf
+// spends 70k–400k tokens, so ~2M is a sane "this run is getting big" marker.
 const ORCH_TOKEN_BUDGET = Number(process.env.AX2_ORCH_TOKEN_BUDGET ?? 2_000_000)
+
+// HARD runaway backstop — the ONLY ceiling that aborts (BudgetExhaustedError). Very high
+// (~20M) so it never trips a single genuine leaf/fan-out; it only catches a true runaway
+// loop. maxSteps (limits.maxSteps, ax-enforced per leaf forward) is the real per-leaf stop.
+const ORCH_TOKEN_HARD = Number(process.env.AX2_ORCH_TOKEN_HARD ?? 20_000_000)
+
+// ponytail: ONE shared soft+hard ceiling across concurrent branches — a greedy branch can
+// starve the others' headroom. Upgrade: per-branch budgets (allocate per worker) so fan-out
+// is fair.
 
 // BRANCH cap — hard upper bound on parallel leaves, regardless of what the model asks.
 const MAX_BRANCHES = 4
@@ -73,7 +83,7 @@ const boundary = (sessionId: string, signal: AbortSignal, rootId: string) => {
     stream: false,
     abortSignal: signal,
   })
-  const budget = allocate(ORCH_TOKEN_BUDGET)
+  const budget = allocate(ORCH_TOKEN_BUDGET, ORCH_TOKEN_HARD)
   return { optsFor, budget, rootId }
 }
 
@@ -87,9 +97,20 @@ const boundary = (sessionId: string, signal: AbortSignal, rootId: string) => {
 // crisp. BASE_PROMPT is imported from runtime.ts (the neutral cycle-breaker module),
 // NOT agent.ts — so a leaf gets the main agent's capable prompt without re-introducing
 // the agent ⇄ orch-tools static init cycle.
+// Terse tool-scoping overlay for a leaf — mirrors claude_code's Explore agent prompt
+// (a short bulleted list of the leaf's tools + usage priorities). Appended AFTER the
+// persona so a leaf knows exactly what it has and how to use it, without bloating the
+// prompt. A leaf is one level deep: it canNOT orchestrate (BASE_TOOLS only, structural).
+const LEAF_TOOL_SCOPE = [
+  "Your tools: glob (find files by pattern), grep (search file contents), read_file (read a known path),",
+  "write_file / edit_file (modify files), bash (run real commands).",
+  "Prefer glob/grep to LOCATE before reading; read_file before you edit_file; run real bash commands to VERIFY.",
+  "You are a single-level sub-agent: do the task end-to-end yourself — you canNOT orchestrate or spawn more sub-agents.",
+].join(" ")
+
 const leafGen = (persona: string): AxGen => {
   const g = ax("message:string -> reply:string", { functions: BASE_TOOLS })
-  g.setDescription(`${BASE_PROMPT} ${persona}`)
+  g.setDescription(`${BASE_PROMPT} ${persona} ${LEAF_TOOL_SCOPE}`)
   return g
 }
 
@@ -134,8 +155,9 @@ const numbered = (xs: readonly string[]) => xs.map((c, i) => `#${i + 1}:\n${c}`)
 
 // Compose one self-orchestration over `task` for the requested strategy. Promise-native:
 // fans out workers (BASE_TOOLS leaves, forked mem), then judges/verifies per strategy.
-// Every node emits through onEvent → the OrchTree. Budget breaches bubble as
-// BudgetExhaustedError, caught by the handler for a partial return.
+// Every node emits through onEvent → the OrchTree. The budget is ADVISORY: a leaf over
+// the soft line still returns its real work (a nudge delta marks it); only a HARD-ceiling
+// runaway bubbles as BudgetExhaustedError, caught by the handler for a partial return.
 type OrchestrationOpts = {
   ai: AxAIService
   strategy: Strategy
@@ -319,10 +341,12 @@ const orchestrateTool: AxFunction = {
       )
       return clip(out.reply)
     } catch (e) {
-      // BUDGET ceiling (guard 2): a breach returns a PARTIAL result string — never throws
-      // the whole turn. spent()/total surface so the model knows the sub-run was capped.
+      // BUDGET ceiling (guard 2): the soft budget is ADVISORY (never throws — a completed
+      // leaf is always returned, see runOrchestration/agent). So this only fires for a
+      // genuine RUNAWAY (the HARD ceiling) or an explicit freeze() — return a PARTIAL string
+      // rather than throwing the whole turn. spent()/total surface that the sub-run was capped.
       if (e instanceof BudgetExhaustedError) {
-        return `partial: the orchestration hit its token budget (${e.spent}/${e.total}) and was stopped before finishing. ${e.reason}.`
+        return `partial: the orchestration hit its HARD runaway token ceiling (${e.spent}/${e.total}) and was stopped. ${e.reason}.`
       }
       return `orchestration failed: ${String((e as { message?: string })?.message ?? e).slice(0, 500)}`
     }
@@ -371,8 +395,10 @@ const runOrchScriptTool: AxFunction = {
       const out = await otelContext.with(otelContext.active(), () => runLoadedScript(name, ctx))
       return clip(out.reply)
     } catch (e) {
+      // ADVISORY budget: only a HARD-ceiling runaway (or freeze) throws — a completed leaf
+      // is always returned. So this is the runaway backstop, not a per-leaf guillotine.
       if (e instanceof BudgetExhaustedError) {
-        return `partial: the script hit its token budget (${e.spent}/${e.total}) and was stopped. ${e.reason}.`
+        return `partial: the script hit its HARD runaway token ceiling (${e.spent}/${e.total}) and was stopped. ${e.reason}.`
       }
       return `script failed: ${String((e as { message?: string })?.message ?? e).slice(0, 500)}`
     }

@@ -18,8 +18,10 @@ const noopSink: EmitSink = () => {}
 // touches Effect (it is pure Promise plumbing over leaf() + the 3 events).
 // budget/usageOf are optional: when both are supplied, the recipe charges the
 // budget from the forward result's usage (read off the gen via usageOf) AFTER the
-// leaf returns — leaf()'s core (ai,input)=>Promise<O> signature is untouched. A
-// charge that crosses `total` throws BudgetExhaustedError, surfacing as a node error.
+// leaf returns — leaf()'s core (ai,input)=>Promise<O> signature is untouched. The
+// budget is ADVISORY (soft): charge() NEVER discards a completed leaf for crossing the
+// soft ceiling — it just flips overSoft(), which we surface as a delta nudge. Only a
+// genuine runaway (the HARD ceiling) or an explicit freeze() throws BudgetExhaustedError.
 export type AgentNode<I extends AxGenIn, O extends AxGenOut> = {
   nodeId: string
   parentId?: string
@@ -39,7 +41,14 @@ export const agent = async <I extends AxGenIn, O extends AxGenOut>(
   onEvent({ type: "start", nodeId, parentId, phase })
   try {
     const result = await leaf(gen, opts)(ai, input)
-    if (budget !== undefined) budget.charge(usageOf?.(gen))
+    // ADVISORY charge: track this leaf's spend AFTER it returned its real work. charge()
+    // never throws for the soft line, so the leaf result below is ALWAYS returned. When
+    // spend crosses the soft ceiling we emit a delta nudge (visible in the tree/span) but
+    // do NOT discard the leaf — a runaway is bounded by the hard ceiling + maxSteps.
+    if (budget !== undefined) {
+      budget.charge(usageOf?.(gen))
+      if (budget.overSoft()) onEvent({ type: "delta", nodeId, chunk: "⚠ over soft token budget (advisory — continuing)" })
+    }
     onEvent({ type: "done", nodeId, result })
     return result
   } catch (cause) {

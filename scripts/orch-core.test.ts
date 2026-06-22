@@ -87,16 +87,39 @@ await (async () => {
     assert((await budget.remaining()) === 70, `budget remaining 70, got ${await budget.remaining()}`)
   }
 
-  // 4) allocate(): crossing total throws BudgetExhaustedError; freeze() throws too.
+  // 4) allocate() is ADVISORY (soft budget): crossing the SOFT ceiling NEVER throws — it
+  // only flips overSoft() (a completed leaf is never discarded). Only crossing the HARD
+  // ceiling, or an explicit freeze(), throws BudgetExhaustedError.
   {
-    const b = allocate(10)
+    // soft=10 (no hard) → pure advisory: charge past soft does NOT throw, overSoft() flips.
+    const soft = allocate(10)
+    let threw = false
+    try {
+      soft.charge({ totalTokens: 11 })
+    } catch {
+      threw = true
+    }
+    assert(!threw, "crossing the SOFT ceiling does NOT throw (advisory)")
+    assert(soft.overSoft() === true, "overSoft() is true once spend crosses the soft ceiling")
+    assert((await soft.spent()) === 11, `spent reflects the tally past soft, got ${await soft.spent()}`)
+
+    // soft=10, hard=20 → crossing soft nudges (no throw), crossing hard throws.
+    const hard = allocate(10, 20)
+    let softThrew = false
+    try {
+      hard.charge({ totalTokens: 15 })
+    } catch {
+      softThrew = true
+    }
+    assert(!softThrew && hard.overSoft(), "between soft and hard: no throw, overSoft() true")
     let tag: string | undefined
     try {
-      b.charge({ totalTokens: 11 })
+      hard.charge({ totalTokens: 10 }) // now 25 > hard 20
     } catch (e) {
       tag = (e as BudgetExhaustedError)._tag
     }
-    assert(tag === "BudgetExhaustedError", `over-budget throws BudgetExhaustedError, got ${tag}`)
+    assert(tag === "BudgetExhaustedError", `crossing the HARD ceiling throws BudgetExhaustedError, got ${tag}`)
+
     const f = allocate(10)
     let froze = false
     try {

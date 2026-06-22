@@ -38,19 +38,28 @@ export type EmitOpts = { readonly spanId?: string }
 // promptTokens+completionTokens as a fallback) and adds it to the internal tally.
 export type BudgetUsage = { promptTokens?: number; completionTokens?: number; totalTokens?: number }
 
-// Token gate. Holds an internal used-token tally; charge() adds a leaf's usage after
-// it returns, spent()/remaining() reflect the tally, freeze()/over-budget throw.
+// ADVISORY token gate (soft budget). Holds an internal used-token tally; charge()
+// adds a leaf's usage AFTER it returns and NEVER throws for crossing the soft line —
+// a leaf that did real work is never discarded for spending tokens. spent()/remaining()
+// reflect the tally; over()/overSoft() expose the soft/hard state for a nudge/log.
+// `total` is the SOFT ceiling (the advisory nudge line); `hard` is the runaway backstop
+// (default Infinity = pure advisory) — only crossing `hard`, or an explicit freeze(),
+// throws BudgetExhaustedError. maxSteps (per-leaf, ax-enforced) is the real hard stop.
 export type Budget = {
-  readonly total: number
+  readonly total: number // soft ceiling (advisory nudge line)
+  readonly hard: number // hard ceiling (runaway backstop; Infinity = pure advisory)
   charge(usage: BudgetUsage | undefined): void
   spent(): Promise<number>
   remaining(): Promise<number>
+  // true once spend crosses the SOFT ceiling — drives an advisory nudge/log, NOT a throw.
+  overSoft(): boolean
   freeze(reason: string): void
 }
 
-// Typed, throwable budget breach: emitted by freeze() and by charge() when the
-// tally crosses `total`. Carries the reason and the spent/total numbers so a
-// boundary catch can annotate a span or surface a nudge.
+// Typed, throwable budget breach: emitted by freeze() and by charge() ONLY when the
+// tally crosses the HARD ceiling (a genuine runaway). Crossing the SOFT ceiling does
+// NOT throw — it nudges. Carries the reason and the spent/total numbers so a boundary
+// catch can annotate a span or surface a partial.
 export class BudgetExhaustedError extends Error {
   readonly _tag = "BudgetExhaustedError"
   constructor(
@@ -146,24 +155,31 @@ const clip = (v: unknown, max = 256): string => {
   return s.length > max ? `${s.slice(0, max)}…` : s
 }
 
-// 5. allocate — token gate over a real internal tally. charge() folds a leaf's usage
-// (the readUsage/sumUsage triple) into `used`; the moment `used` crosses `total` it
-// throws BudgetExhaustedError, as does freeze(). spent()/remaining() reflect the tally.
-export const allocate = (total: number): Budget => {
+// 5. allocate — ADVISORY token gate over a real internal tally. `soft` is the nudge
+// line; `hard` (default Infinity) is the runaway backstop. charge() folds a leaf's
+// usage (the readUsage/sumUsage triple) into `used` and NEVER throws for crossing the
+// soft line — the leaf result is always returned; crossing soft only flips overSoft()
+// (the caller logs/nudges). It throws BudgetExhaustedError ONLY when `used` crosses the
+// HARD ceiling (a genuine runaway), as does freeze(). spent()/remaining() reflect the
+// tally. This is the root-cause fix: a completed leaf is tracked, never guillotined.
+export const allocate = (soft: number, hard: number = Number.POSITIVE_INFINITY): Budget => {
   let used = 0
   let frozen: string | undefined
+  // ONLY the hard ceiling (or an explicit freeze) throws — the soft ceiling never does.
   const guard = () => {
-    if (frozen !== undefined) throw new BudgetExhaustedError(frozen, used, total)
-    if (used > total) throw new BudgetExhaustedError("over-budget", used, total)
+    if (frozen !== undefined) throw new BudgetExhaustedError(frozen, used, hard)
+    if (used > hard) throw new BudgetExhaustedError("runaway", used, hard)
   }
   return {
-    total,
+    total: soft,
+    hard,
     charge: (usage) => {
       used += tokensOf(usage)
       guard()
     },
     spent: async () => used,
-    remaining: async () => Math.max(0, total - used),
+    remaining: async () => Math.max(0, soft - used),
+    overSoft: () => used > soft,
     freeze: (reason: string) => {
       frozen = reason
       guard()

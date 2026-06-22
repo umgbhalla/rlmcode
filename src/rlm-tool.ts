@@ -13,8 +13,10 @@
 //   1. ONE LEVEL: this tool lives on the MAIN chat gen only (agent.ts ORCH_TOOLS). The
 //      RLM's own executor runs JS in the AxJSRuntime sandbox (TIMING permission only —
 //      no network/fs/process); it has NO ax2 file/shell tools and cannot re-orchestrate.
-//   2. BUDGET ceiling: the RLM runs under its OWN allocate(RLM_TOKEN_BUDGET); the
-//      run's usage is charged after forward() returns. A breach surfaces as a partial.
+//   2. BUDGET ceiling (ADVISORY/soft): the RLM runs under its OWN allocate(SOFT, HARD);
+//      usage is charged PER EXECUTOR TURN off actorTurnCallback.usage (streamed live), not
+//      once-after. Crossing the SOFT line only nudges — the RLM answer is ALWAYS returned.
+//      Only the HARD runaway ceiling throws BudgetExhaustedError → a partial. maxSteps caps turns.
 //   3. maxSteps cap: the RLM actor loop is bounded by maxSteps (executor turns).
 //   4. abortSignal: extra.abortSignal threads into forward() so a cancelled turn
 //      cancels the RLM run.
@@ -35,16 +37,18 @@ import {
   AxMemory,
 } from "@ax-llm/ax"
 import { context as otelContext } from "@opentelemetry/api"
-import { limits, llm, onEvent, readUsageOf } from "./runtime.ts"
+import { limits, llm, onEvent } from "./runtime.ts"
 import { allocate, BudgetExhaustedError } from "./orch.ts"
 
-// Per-RLM token ceiling, charged after forward() returns. An RLM explores a big
-// context across many executor turns + sub-LM queries, so it needs generous headroom
-// (matches the orchestrate ceiling). Backstop against a runaway loop, not a tight cap.
-// ponytail: ONE ceiling charged once after the whole run — not per executor turn, so a
-// runaway actor isn't stopped mid-run, only after. Upgrade: stream per-turn usage off
-// actorTurnCallback.usage and charge incrementally so the budget can abort live.
+// Per-RLM SOFT token ceiling (advisory nudge line). An RLM explores a big context across
+// many executor turns + sub-LM queries, so ~2M is a sane "this run is getting big" marker.
+// Charged PER EXECUTOR TURN off actorTurnCallback.usage (streamed live) — crossing it only
+// nudges; the RLM answer is ALWAYS returned (the soft-budget root-cause fix).
 const RLM_TOKEN_BUDGET = Number(process.env.AX2_RLM_TOKEN_BUDGET ?? 2_000_000)
+
+// HARD runaway backstop — the ONLY ceiling that aborts (BudgetExhaustedError). Very high
+// (~20M) so a single genuine RLM run never trips it; it only catches a true runaway loop.
+const RLM_TOKEN_HARD = Number(process.env.AX2_RLM_TOKEN_HARD ?? 20_000_000)
 
 const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
 
@@ -62,10 +66,26 @@ export const runRlm = async (
   rootId: string,
   signal: AbortSignal,
 ): Promise<{ answer: string; evidence: string[]; turns: number; callbacks: number }> => {
-  const budget = allocate(RLM_TOKEN_BUDGET)
+  const budget = allocate(RLM_TOKEN_BUDGET, RLM_TOKEN_HARD)
   // Bridge counters surfaced to the caller so the smoke can assert callbacks fired.
   let turns = 0
   let callbacks = 0
+  // a.usage is the RLM's CUMULATIVE usage array; we charge the per-turn DELTA so the soft
+  // budget streams live (not once-after). Track the highest total already charged.
+  let chargedTokens = 0
+  type Tok = { totalTokens?: number; promptTokens?: number; completionTokens?: number }
+  const tokensOf = (t: Tok | undefined): number =>
+    t === undefined ? 0 : typeof t.totalTokens === "number" ? t.totalTokens : (t.promptTokens ?? 0) + (t.completionTokens ?? 0)
+  // a.usage is an AxProgramUsage[] (cumulative) — read the last element's tokens.
+  const tokensFromTurn = (usage: ReadonlyArray<{ tokens?: Tok }> | undefined): number => tokensOf(usage?.[usage.length - 1]?.tokens)
+  // getUsage() is AxProgramUsage[] | AxAgentUsage ({ actor, responder }) — SUM every
+  // entry's tokens so the final reconcile captures the responder stage too.
+  const tokensFromGetUsage = (u: unknown): number => {
+    const entries: Array<{ tokens?: Tok }> = Array.isArray(u)
+      ? (u as Array<{ tokens?: Tok }>)
+      : [...((u as { actor?: Array<{ tokens?: Tok }> })?.actor ?? []), ...((u as { responder?: Array<{ tokens?: Tok }> })?.responder ?? [])]
+    return entries.reduce((sum, e) => sum + tokensOf(e?.tokens), 0)
+  }
 
   // The RLM, built EXACTLY per the proven standalone pattern (../ax/src/examples/rlm.ts):
   // contextFields keeps `context` OUT of the prompt and IN the code runtime; the JS
@@ -85,6 +105,16 @@ export const runRlm = async (
       turns = Math.max(turns, a.turn)
       const nodeId = `${rootId}/${a.stage}-${a.turn}`
       onEvent({ type: "start", nodeId, parentId: rootId, phase: `rlm:${a.stage} turn ${a.turn}` })
+      // ADVISORY per-turn charge: fold this turn's cumulative-usage DELTA into the budget
+      // so spend streams live across executor turns (the old model charged once-after).
+      // charge() never throws for the soft line — it only flips overSoft(), which we nudge.
+      // Only the HARD runaway ceiling throws; the RLM answer is still returned regardless.
+      const seen = tokensFromTurn(a.usage as ReadonlyArray<{ tokens?: Tok }> | undefined)
+      if (seen > chargedTokens) {
+        budget.charge({ totalTokens: seen - chargedTokens })
+        chargedTokens = seen
+        if (budget.overSoft()) onEvent({ type: "delta", nodeId, chunk: "⚠ over soft token budget (advisory — continuing)" })
+      }
       if (a.code) onEvent({ type: "delta", nodeId, chunk: clip(a.code, 256) })
       if (a.isError) onEvent({ type: "error", nodeId, cause: new Error(clip(a.output, 256)) })
       else onEvent({ type: "done", nodeId, result: clip(a.output, 256) })
@@ -109,9 +139,14 @@ export const runRlm = async (
     { abortSignal: signal, mem: new AxMemory() },
   )) as { answer?: unknown; evidence?: unknown }
 
-  // Charge the run's usage to the per-RLM budget (after forward, like the agent recipe).
-  // A breach throws BudgetExhaustedError, caught by the tool handler for a partial.
-  budget.charge(readUsageOf(rlm))
+  // Reconcile any tail usage not seen by the per-turn callback (e.g. the responder stage),
+  // charging only the remaining DELTA so the soft tally is complete. Still advisory — this
+  // never throws for the soft line; only the hard runaway ceiling does.
+  const finalSeen = tokensFromGetUsage(rlm.getUsage())
+  if (finalSeen > chargedTokens) {
+    budget.charge({ totalTokens: finalSeen - chargedTokens })
+    chargedTokens = finalSeen
+  }
 
   const answer = String(out.answer ?? "")
   const evidence = Array.isArray(out.evidence) ? out.evidence.map((x) => String(x)) : []
