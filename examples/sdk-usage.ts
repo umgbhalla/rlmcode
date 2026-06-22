@@ -51,11 +51,15 @@ const main = async () => {
   const types: string[] = []
   let reply: string | undefined
   let replyCount = 0
+  let usageTotal: number | undefined
+  let stopReason: string | undefined
   for await (const ev of agent.runTurn("sdk-smoke-1", "hello")) {
     types.push(ev.type)
     if (ev.type === "reply") {
       replyCount++
       reply = ev.result.reply
+      usageTotal = ev.result.usage.total
+      stopReason = ev.result.stopReason
     }
   }
 
@@ -65,6 +69,10 @@ const main = async () => {
   // final-reply-once: exactly ONE terminal reply, and it is the LAST event.
   assert(replyCount === 1, `exactly one terminal reply (got ${replyCount})`)
   assert(types[types.length - 1] === "reply", `the reply is the LAST event (saw tail: ${types.slice(-3).join(",")})`)
+  // hide #2: readUsage (kept internal) still flows the stub's tokens onto the normalized
+  // TurnResult.usage; a clean reply maps to the 'stop' StopReason (no provider-wire leakage).
+  assert(usageTotal === 8, `usage.total populated from the internal readUsage (got: ${usageTotal})`)
+  assert(stopReason === "stop", `clean reply -> stopReason 'stop' (got: ${stopReason})`)
   // No CF env was touched, and the injected (non-CF) service was the one used.
   assert(
     process.env.CLOUDFLARE_API_TOKEN === cfTokenBefore && process.env.CLOUDFLARE_ACCOUNT_ID === cfAccountBefore,

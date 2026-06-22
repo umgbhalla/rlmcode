@@ -139,6 +139,11 @@ type Usage = {
 // lightly-documented, API returning AxProgramUsage[] with .tokens per call. It's
 // the source for gen_ai.usage.* + the token metric (ax's own span carries usage
 // only as an event). Guarded: yields nothing if ax changes the shape (non-fatal).
+// KEPT internal (never re-exported across src/core/sdk.ts): it feeds usage.* on the
+// normalized public TurnResult, not the wire.
+// ponytail: `(gen as any).getUsage?.()` casts past ax's public type. Upgrade: replace
+// with ax's public per-call usage API (AxProgramUsage) once it lands a stable typed
+// accessor, dropping the `any` cast and the shape-guard fallback below.
 const readUsage = (gen: AxGen): Usage | undefined => {
   const u = (gen as any).getUsage?.()
   const last = Array.isArray(u) ? u[u.length - 1] : u
