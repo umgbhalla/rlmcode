@@ -1,3 +1,18 @@
 #!/bin/sh
-# Block commits that fail the static-analysis gate (tsc+Effect LS, yuku design, debt).
+# Static-analysis gate: tsc+Effect LS, gate tests, yuku design, debt.
 bun run lint || exit 1
+
+# Guard-preservation: src/tools.ts is the unsandboxed trust boundary (bash,
+# read/write/edit run real fs/shell). Block a commit that nets-out a guard
+# (try/catch/throw/path-check) without replacing it. Override: --no-verify.
+diff=$(git diff --cached -U0 -- src/tools.ts)
+if [ -n "$diff" ]; then
+  pat='(try \{|catch|throw|\.startsWith\(|path\.(resolve|normalize))'
+  removed=$(printf '%s\n' "$diff" | grep -cE "^-[^-]*$pat")
+  added=$(printf '%s\n' "$diff" | grep -cE "^\+[^+]*$pat")
+  if [ "$removed" -gt "$added" ]; then
+    echo "guard-check: src/tools.ts drops $((removed - added)) guard(s) (try/catch/throw/path-check)"
+    echo "  at the unsandboxed trust boundary. Intentional? git commit --no-verify"
+    exit 1
+  fi
+fi

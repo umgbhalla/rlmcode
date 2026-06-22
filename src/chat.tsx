@@ -80,6 +80,7 @@ function Spinner() {
 }
 
 function ToolView({ m, expanded, cols, onToggle }: { m: ToolMsg; expanded: boolean; cols: number; onToggle: () => void }) {
+  const [hover, setHover] = useState(false)
   const running = m.status === "running"
   const isError = m.status === "error"
   const color = isError ? "#f38ba8" : m.status === "ok" ? "#a6e3a1" : "#7f849c"
@@ -87,15 +88,22 @@ function ToolView({ m, expanded, cols, onToggle }: { m: ToolMsg; expanded: boole
   const label = toolLabel(m.name, m.args)
   const summary = running ? "running…" : toolSummary(m.name, m.result, isError)
   const hasBody = !running && toolHasBody(m.name, m.result, isError)
+  const hot = hasBody && hover // clickable + hovered -> brighten
   const diff = expanded && hasBody ? toolDiff(m.name, m.args, isError) : null
   const preview = expanded && hasBody && !diff ? toolPreview(m.name, m.args, m.result, isError, Math.max(20, cols - 10)) : []
   return (
     <box flexDirection="column" style={{ marginTop: expanded && hasBody ? 1 : 0 }}>
-      <text fg={color} selectable={false} onMouseDown={(hasBody ? onToggle : undefined) as any}>
-        <span fg={color}>{`${mark} `}</span>
-        <span fg="#cdd6f4">{label}</span>
-        <span fg="#585b70">{`  ${summary}`}</span>
-        {hasBody ? <span fg="#585b70">{expanded ? "  ▾" : "  ▸"}</span> : null}
+      <text
+        fg={color}
+        selectable={false}
+        onMouseDown={(hasBody ? onToggle : undefined) as any}
+        onMouseOver={(hasBody ? (() => setHover(true)) : undefined) as any}
+        onMouseOut={(() => setHover(false)) as any}
+      >
+        <span fg={hot ? "#ffffff" : color}>{`${mark} `}</span>
+        <span fg={hot ? "#ffffff" : "#cdd6f4"}>{label}</span>
+        <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${summary}`}</span>
+        {hasBody ? <span fg={hot ? "#cdd6f4" : "#585b70"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
       </text>
       {diff ? (
         <box style={{ paddingLeft: INDENT, paddingTop: 1 }}>
@@ -131,6 +139,7 @@ function TurnView({
   onToggleTurn: () => void
   onToggleTool: (id: string) => void
 }) {
+  const [hoverSteps, setHoverSteps] = useState(false)
   return (
     <box flexDirection="column" style={{ marginTop: first ? 0 : 1 }}>
       <box border={["left"]} borderColor="#45475a" style={{ paddingLeft: 1, width: "100%" }}>
@@ -138,7 +147,13 @@ function TurnView({
       </box>
       {t.steps.length > 0 && (
         <box flexDirection="column" style={{ paddingLeft: INDENT }}>
-          <text fg="#7f849c" selectable={false} onMouseDown={onToggleTurn as any}>
+          <text
+            fg={hoverSteps ? "#cdd6f4" : "#7f849c"}
+            selectable={false}
+            onMouseDown={onToggleTurn as any}
+            onMouseOver={(() => setHoverSteps(true)) as any}
+            onMouseOut={(() => setHoverSteps(false)) as any}
+          >
             {`${expanded ? "▾" : "▸"} ${t.steps.length} step${t.steps.length > 1 ? "s" : ""}`}
             {!expanded ? `   ${toolsUsed(t.steps)}` : ""}
           </text>
