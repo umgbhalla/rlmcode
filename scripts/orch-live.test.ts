@@ -99,6 +99,23 @@ export const runFanOutLive = async (
   return String(out ?? "")
 }
 
+// (E) STRUCTURED PIPELINE: drive the REAL run_orch_script tool over the example
+// .ax/orch/structured-pipe.ts script — proving the first-class structuredPipeline recipe
+// threads a TYPED structured object (stage 1's `facts:json`) into stage 2 end-to-end on
+// the real model. Returns the script's verbatim string result (the final stage's summary).
+export const runStructuredPipelineLive = async (
+  message: string,
+  liveAi: AxAIService = buildLiveAi(),
+): Promise<string> => {
+  const scriptTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "run_orch_script")
+  if (!scriptTool?.func) throw new Error("run_orch_script tool not found in ORCH_TOOLS")
+  const out = await scriptTool.func(
+    { name: "structured-pipe", message },
+    { sessionId: "live-structpipe", ai: liveAi, abortSignal: new AbortController().signal },
+  )
+  return String(out ?? "")
+}
+
 // (C) RLM: drive the REAL run_rlm path over a long context with a buried fact. Builds
 // the @ax-llm/ax single-level RLM (distiller→executor→responder over runtime-held
 // context) EXACTLY like the standalone smoke and asserts the ANSWER contains the fact.
@@ -258,6 +275,30 @@ await (async () => {
   assert(
     fanHits >= 8,
     `at least 8/12 fan-out branches produced their specific uppercased answer, got ${fanHits}: ${JSON.stringify(fanReply.slice(0, 400))}`,
+  )
+
+  // (E) STRUCTURED PIPELINE gate: run the .ax/orch/structured-pipe.ts script through the
+  // REAL run_orch_script tool. Stage 1 extracts a TYPED `facts:json` object from the message;
+  // stage 2 consumes that structured object (not a string) and returns a summary. A real
+  // non-empty summary that reflects the message's content proves the typed stage→stage
+  // threading works end-to-end on the live model (leap 2: first-class structured pipeline).
+  const pipeMessage =
+    "The Apollo 11 mission landed the first humans on the Moon in July 1969. Neil Armstrong and Buzz Aldrin walked on the surface while Michael Collins orbited above."
+  const pipeReply = await runStructuredPipelineLive(pipeMessage)
+
+  console.log("─".repeat(60))
+  console.log("LIVE STRUCTURED PIPELINE REPLY (typed facts:json → summary):")
+  console.log(pipeReply)
+  console.log("─".repeat(60))
+
+  assert(isRealReply(pipeReply), `structured-pipeline reply is a real non-empty string (not a failure/partial sentinel), got: ${JSON.stringify(pipeReply.slice(0, 200))}`)
+  // The summary must reflect the message's content — proof the typed facts object threaded
+  // from stage 1 into stage 2 and stage 2 summarised the REAL extracted facts. Require at
+  // least one salient term so a generic non-answer doesn't pass.
+  const pipeTerms = ["apollo", "moon", "1969", "armstrong", "aldrin", "lunar", "space"]
+  assert(
+    pipeTerms.some((t) => pipeReply.toLowerCase().includes(t)),
+    `structured-pipeline summary reflects the threaded facts (one of ${pipeTerms.join(", ")}), got: ${JSON.stringify(pipeReply.slice(0, 400))}`,
   )
 
   // (C) RLM gate: a LONG context with a buried fact (like the proven /tmp smoke). The

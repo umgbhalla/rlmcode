@@ -24,7 +24,7 @@ import * as Effect from "effect/Effect"
 import type { AnySpan } from "effect/Tracer"
 import { ax, type AxAIService, AxMemory, type AxGen } from "@ax-llm/ax"
 import { limits, llm, MODEL, onEvent, readUsageOf } from "./runtime.ts"
-import { adversarialVerify, agent, judge, loopUntilDry, type AgentNode, type EmitSink } from "./orch-recipes.ts"
+import { adversarialVerify, agent, judge, loopUntilDry, structuredPipeline, type AgentNode, type EmitSink, type PipelineStage } from "./orch-recipes.ts"
 import {
   allocate,
   type Budget,
@@ -56,11 +56,13 @@ export type OrchPrims = {
   readonly allocate: typeof allocate
   // generator factory (wraps ax() + setDescription)
   readonly gen: (signature: string, description?: string) => AxGen
-  // 4 recipes
+  // 5 recipes
   readonly agent: typeof agent
   readonly judge: typeof judge
   readonly loopUntilDry: typeof loopUntilDry
   readonly adversarialVerify: typeof adversarialVerify
+  // structuredPipeline — thread TYPED structured stage outputs through pipeline().
+  readonly structuredPipeline: typeof structuredPipeline
 }
 
 // The run context handed to a loaded script's orchestrate(ctx, prims). Mirrors the
@@ -92,7 +94,7 @@ type OrchScriptFn = (ctx: OrchLoadCtx, prims: OrchPrims) => Promise<unknown> | u
 type OrchScriptModule = { orchestrate?: OrchScriptFn; default?: OrchScriptFn }
 
 // re-export the prim TYPES so a script can `import type` them for annotations.
-export type { AgentNode, Budget, BudgetExhaustedError, BudgetUsage, EmitOpts, EmitSink, LeafOpts, NodeEvent }
+export type { AgentNode, Budget, BudgetExhaustedError, BudgetUsage, EmitOpts, EmitSink, LeafOpts, NodeEvent, PipelineStage }
 
 class OrchLoadError {
   readonly _tag = "OrchLoadError"
@@ -143,6 +145,7 @@ export const orchPrims = (): OrchPrims => ({
   judge,
   loopUntilDry,
   adversarialVerify,
+  structuredPipeline,
 })
 
 // Promise-native trusted-script core: resolve INSIDE the trusted root (path-escape

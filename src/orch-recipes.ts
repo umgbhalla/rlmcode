@@ -3,7 +3,7 @@
 // these are reified into orch.ts: the engine stays exactly 5 prims. Promise-native,
 // like the combinators they call; Effect stays at the session boundary.
 import type { AxAIService, AxGen, AxGenIn, AxGenOut } from "@ax-llm/ax"
-import { type Budget, type BudgetUsage, leaf, type LeafOpts, type NodeEvent } from "./orch.ts"
+import { type Budget, type BudgetUsage, leaf, type LeafOpts, type NodeEvent, pipeline } from "./orch.ts"
 
 // Hard upper bound on in-flight thunks for parallelLimit — the absolute concurrency
 // ceiling regardless of what a caller (or the model) asks for. A big fan-out (e.g. 100
@@ -142,4 +142,75 @@ export const adversarialVerify = async <T>(
   const raw = await parallelLimit(skeptics.map((s) => () => s(value)), skeptics.length)
   const votes = raw.filter((v): v is boolean => v !== null)
   return { value, accepted: accept(votes), votes }
+}
+
+// structuredPipeline — FIRST-CLASS typed structured pipeline. Each stage is a node:
+// a gen typed by its OWN signature (e.g. `text:string -> facts:json` then
+// `facts:json -> summary:string`) plus its LeafOpts. The recipe threads the TYPED
+// output of stage k straight into stage k+1's input — no string flattening between
+// stages, no intermediate collection. The KEY invariant: stage k's output object must
+// match stage k+1's input field shape (the gen signatures encode this), so the chain
+// is structured end-to-end. ax's forward() parses/validates/retries each stage's JSON
+// against its signature, so a stage yields a real typed object, not a string blob.
+//
+// Built ENTIRELY from the existing prims: each stage wraps leaf(gen, opts) in a
+// pipeline() stage fn, bracketed with start/done|error NodeEvents (so every stage
+// renders as a node in the OrchTree) and ADVISORY-charged to the budget (same contract
+// as agent(): a completed stage is never discarded — only a HARD-ceiling runaway or
+// freeze() throws). NOT a 6th core prim: orch.ts stays exactly 5 — this is a userland
+// recipe over leaf + pipeline + emit + allocate. Unlike fan-out it is pure serial
+// threading, so it needs NO concurrency cap.
+//
+// A stage's I/O is `any` at the boundary because pipeline() is heterogeneous (stage k's
+// O is stage k+1's I, but the array's element type can't name that chain in TS without
+// a variadic-tuple HKT). The signatures carry the real types; the runtime contract is
+// enforced by ax's parse/retry. ponytail: stage I/O typed as AxGenIn/AxGenOut, not a
+// statically-chained tuple. Upgrade: a variadic-tuple builder that proves O_k === I_{k+1}
+// at compile time (e.g. a fluent `.then(gen)` chain that carries the running output type).
+export type PipelineStage = {
+  readonly gen: AxGen<AxGenIn, AxGenOut>
+  readonly opts: LeafOpts
+  readonly nodeId?: string
+  readonly phase?: string
+  readonly budget?: Budget
+  readonly usageOf?: (gen: AxGen<AxGenIn, AxGenOut>) => BudgetUsage | undefined
+}
+export const structuredPipeline = async (
+  stages: ReadonlyArray<PipelineStage>,
+  ai: AxAIService,
+  input: AxGenIn,
+  onEvent: EmitSink = noopSink,
+  rootId = "pipeline",
+): Promise<AxGenOut> => {
+  if (stages.length === 0) throw new Error("structuredPipeline needs at least one stage")
+  // Each stage becomes a pipeline() stage fn: bracket the node, run its leaf, charge the
+  // (advisory) budget AFTER it returns its real typed work, and pass the typed object on.
+  const stageFns = stages.map((stage, i) => async (prev: AxGenOut): Promise<AxGenOut> => {
+    const { gen, opts, nodeId = `${rootId}/stage-${i}`, phase = `stage ${i + 1}`, budget, usageOf } = stage
+    onEvent({ type: "start", nodeId, parentId: rootId, phase })
+    try {
+      const out = await leaf(gen, opts)(ai, prev as AxGenIn)
+      if (budget !== undefined) {
+        budget.charge(usageOf?.(gen))
+        if (budget.overSoft()) onEvent({ type: "delta", nodeId, chunk: "⚠ over soft token budget (advisory — continuing)" })
+      }
+      onEvent({ type: "done", nodeId, result: out })
+      return out
+    } catch (cause) {
+      onEvent({ type: "error", nodeId, cause })
+      throw cause
+    }
+  })
+  onEvent({ type: "start", nodeId: rootId, phase: "structuredPipeline" })
+  try {
+    // pipeline() threads the single input through every stage fn in order; we drain the
+    // async-generator and keep the LAST yielded value — the final stage's typed output.
+    let result: AxGenOut = input as AxGenOut
+    for await (const v of pipeline([input as AxGenOut], ...stageFns)) result = v as AxGenOut
+    onEvent({ type: "done", nodeId: rootId, result })
+    return result
+  } catch (cause) {
+    onEvent({ type: "error", nodeId: rootId, cause })
+    throw cause
+  }
 }

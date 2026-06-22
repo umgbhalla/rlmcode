@@ -7,7 +7,7 @@
 // asserts the NodeEvent stream and result shapes. This is the first exercise of the
 // orchestration engine off-LLM: it pins the verify-before-accept flow's contract.
 import type { AxAIService, AxGen } from "@ax-llm/ax"
-import { adversarialVerify, agent, type EmitSink, MAX_CONCURRENCY, parallelLimit } from "../src/orch-recipes.ts"
+import { adversarialVerify, agent, type EmitSink, MAX_CONCURRENCY, parallelLimit, structuredPipeline } from "../src/orch-recipes.ts"
 import { allocate, BudgetExhaustedError, type LeafOpts, type NodeEvent, parallel, pipeline } from "../src/orch.ts"
 
 let failed = 0
@@ -230,6 +230,64 @@ await (async () => {
       async () => false,
     ])
     assert(v.accepted === false, "tie (1 accept / 1 reject) is rejected, not accepted")
+  }
+
+  // 9) structuredPipeline(): threads a TYPED structured object stage→stage. Stage 1
+  // returns { facts }, stage 2 consumes that object and returns { summary }. We assert
+  // (a) stage 2 received stage 1's TYPED output (not a string), (b) the node lifecycle
+  // brackets each stage + the root, (c) the budget is charged per stage.
+  {
+    const { events, sink } = recorder()
+    let stage2Input: unknown
+    const stage1Gen = fakeGen({ facts: { topic: "t", points: ["p1", "p2"] } }, { usageTokens: 10 })
+    // stage 2's fake forward records what it received and returns the final shape.
+    const stage2Gen = {
+      forward: async (_ai: unknown, input: unknown): Promise<{ summary: string }> => {
+        stage2Input = input
+        return { summary: "ok" }
+      },
+      getUsage: () => [{ tokens: { totalTokens: 5 } }],
+    } as unknown as import("@ax-llm/ax").AxGen<any, { summary: string }>
+    const budget = allocate(1000)
+    const result = (await structuredPipeline(
+      [
+        { gen: stage1Gen as any, opts, budget, usageOf: (g) => (g as any).getUsage().at(-1)?.tokens },
+        { gen: stage2Gen as any, opts, budget, usageOf: (g) => (g as any).getUsage().at(-1)?.tokens },
+      ],
+      fakeAi,
+      { message: "q" },
+      sink,
+      "pipe",
+    )) as { summary: string }
+    assert(result.summary === "ok", `structuredPipeline returns the final stage output, got ${JSON.stringify(result)}`)
+    assert(
+      (stage2Input as { facts?: { topic?: string } })?.facts?.topic === "t",
+      `stage 2 received stage 1's TYPED object (not a string), got ${JSON.stringify(stage2Input)}`,
+    )
+    assert((await budget.spent()) === 15, `structuredPipeline charges each stage, got ${await budget.spent()}`)
+    // root start + 2 stage starts + 2 stage dones + root done = 6 events, in order.
+    assert(events[0]?.type === "start" && events[0].nodeId === "pipe", "structuredPipeline emits root start first")
+    assert(events.at(-1)?.type === "done" && events.at(-1)?.nodeId === "pipe", "structuredPipeline emits root done last")
+    assert(events.filter((e) => e.type === "start").length === 3, "structuredPipeline brackets root + 2 stages with start")
+  }
+
+  // 10) structuredPipeline(): a failing stage emits error + rethrows (no swallow).
+  {
+    const { events, sink } = recorder()
+    let threw = false
+    try {
+      await structuredPipeline(
+        [{ gen: fakeGen({ x: 1 }, { fail: true }) as any, opts }],
+        fakeAi,
+        { message: "q" },
+        sink,
+        "boom",
+      )
+    } catch {
+      threw = true
+    }
+    assert(threw, "structuredPipeline rethrows a stage failure")
+    assert(events.some((e) => e.type === "error"), "structuredPipeline emits an error event on stage failure")
   }
 })()
 

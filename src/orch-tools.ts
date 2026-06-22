@@ -378,7 +378,7 @@ const orchestrateTool: AxFunction = {
 const runOrchScriptTool: AxFunction = {
   name: "run_orch_script",
   description:
-    "Load and run a saved orchestration script from .ax/orch/<name> (trusted dir; paths escaping it are rejected) against an optional message. The script composes the engine prims { leaf, parallel, pipeline, emit, allocate, gen } + recipes { agent, judge, loopUntilDry, adversarialVerify }. Author one with write_file to .ax/orch/<name>.ts exporting orchestrate(ctx, prims), then run it here. Returns the script's result.",
+    "Load and run a saved orchestration script from .ax/orch/<name> (trusted dir; paths escaping it are rejected) against an optional message. The script composes the engine prims { leaf, parallel, pipeline, emit, allocate, gen } + recipes { agent, judge, loopUntilDry, adversarialVerify, structuredPipeline }. structuredPipeline threads TYPED structured stage outputs (gen with its own signature like 'text:string -> facts:json') stage→stage — use it for multi-step transforms where each step's structured object feeds the next (see .ax/orch/structured-pipe.ts). Author one with write_file to .ax/orch/<name>.ts exporting orchestrate(ctx, prims), then run it here. Returns the script's result.",
   parameters: {
     type: "object",
     properties: {
