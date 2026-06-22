@@ -12,10 +12,11 @@ import { createCliRenderer, decodePasteBytes, RenderableEvents, SyntaxStyle } fr
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { abortTurn, projectDocLoaded } from "./agent.ts"
-import { appAtom, busyAtom, deleteSessionAtom, type Msg, newSessionAtom, type OrchNode, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
+import { appAtom, busyAtom, deleteSessionAtom, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
+import { flatten, type Row as OrchRow } from "./tui/orch-tree.ts"
 
 const projectDoc = projectDocLoaded
 const mdStyle = SyntaxStyle.create()
@@ -229,52 +230,41 @@ function TurnView({
   )
 }
 
-// Orchestration node tree (orch.emit). Recursive: one row per node, indented by
-// depth, with a status glyph (running/done/error). Collapsible — running nodes
-// auto-expand so you watch the fan-out live; settled subtrees collapse on click.
-const nodeGlyph = (s: OrchNode["status"]) => (s === "running" ? "◌" : s === "error" ? "✗" : "✓")
-const nodeColor = (s: OrchNode["status"]) => (s === "error" ? "#f38ba8" : s === "done" ? "#a6e3a1" : "#7f849c")
+// Orchestration node tree (orch.emit) as a VELOCITY UNICODE TREE: pure flatten()
+// (src/tui/orch-tree.ts) walks roots→children and precomputes each node's ├─/└─/│
+// connector prefix; here we render one <text> per Row plus that node's OWNED tool
+// steps hung under its continuation stem. Collapsible — running nodes auto-expand so
+// you watch the fan-out live; settled subtrees collapse on click (omitted by flatten).
 
 // COST-METER per-node token badge — its own component so the guard/format logic lives
-// outside NodeView (keeps NodeView under the cyclomatic budget). Renders nothing for an
+// outside NodeRow (keeps NodeRow under the cyclomatic budget). Renders nothing for an
 // unsettled / untracked node.
 function NodeTokens({ tokens, hot }: { tokens: number | undefined; hot: boolean }) {
   if (typeof tokens !== "number" || tokens <= 0) return null
   return <span fg={hot ? "#7f849c" : "#585b70"}>{`  ${fmtTokens(tokens)}`}</span>
 }
 
-// Compact per-node meta for the collapsed summary: tool count (this node OWNS its tools).
-const nodeToolsLabel = (n: OrchNode): string => {
-  const c = n.tools?.length ?? 0
-  return c > 0 ? `${c} tool${c > 1 ? "s" : ""}` : ""
-}
-
-// Shared props for the recursive NodeView + its detail body (the per-node tool/child renderers).
-type NodeViewProps = {
-  id: string
-  nodes: Readonly<Record<string, OrchNode>>
-  childrenOf: Readonly<Record<string, readonly string[]>>
-  depth: number
-  expNodes: Set<string>
-  onToggle: (id: string) => void
+// Shared props for NodeRow + its owned-tool body.
+type NodeRowProps = {
+  row: OrchRow
   expTools: Set<string>
+  onToggle: (id: string) => void
   onToggleTool: (id: string) => void
   focusedKey: string | undefined
   cols: number
 }
 
-// The collapsible one-line node header (glyph · label · summary · tokens · tool-count · ▸/▾).
-function NodeHeader({ n, expanded, hasDetail, hot, setHover, onToggle }: {
-  n: OrchNode
-  expanded: boolean
-  hasDetail: boolean
+// One flattened node header line: connector prefix + glyph + label + summary + token
+// badge + collapsed-only tool-count + ▾/▸. The prefix (├─/└─/│/blanks) renders in a
+// muted guide color so the tree structure reads at a glance. Clickable/hoverable when
+// the node has detail (owns tools or has children) — toggles its collapse state.
+function NodeHeader({ row, hot, setHover, onToggle }: {
+  row: OrchRow
   hot: boolean
   setHover: (v: boolean) => void
   onToggle: () => void
 }) {
-  const color = nodeColor(n.status)
-  const summary = n.status === "running" ? n.phase || "running…" : (n.result ?? n.phase)
-  const toolsLabel = nodeToolsLabel(n)
+  const { prefix, color, glyph, label, summary, tokens, toolsLabel, hasDetail, expanded } = row
   return (
     <text
       fg={color}
@@ -283,10 +273,11 @@ function NodeHeader({ n, expanded, hasDetail, hot, setHover, onToggle }: {
       onMouseOver={(hasDetail ? (() => setHover(true)) : undefined) as any}
       onMouseOut={(() => setHover(false)) as any}
     >
-      <span fg={hot ? "#ffffff" : color}>{`${nodeGlyph(n.status)} `}</span>
-      <span fg={hot ? "#ffffff" : "#cdd6f4"}>{n.label}</span>
+      {prefix ? <span fg={hot ? "#6c7086" : "#45475a"}>{prefix}</span> : null}
+      <span fg={hot ? "#ffffff" : color}>{`${glyph} `}</span>
+      <span fg={hot ? "#ffffff" : "#cdd6f4"}>{label}</span>
       {summary ? <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${oneLine(summary)}`}</span> : null}
-      <NodeTokens tokens={n.tokens} hot={hot} />
+      <NodeTokens tokens={tokens} hot={hot} />
       {/* collapsed-only: show the owned-tool count so a node's work is visible without expanding */}
       {!expanded && toolsLabel ? <span fg={hot ? "#9399b2" : "#585b70"}>{`  ${toolsLabel}`}</span> : null}
       {hasDetail ? <span fg={hot ? "#cdd6f4" : "#585b70"}>{expanded ? "  ▾" : "  ▸"}</span> : null}
@@ -294,39 +285,30 @@ function NodeHeader({ n, expanded, hasDetail, hot, setHover, onToggle }: {
   )
 }
 
-// The expanded detail body: this node's OWN tool steps first (it OWNS them), then its child
-// nodes (recursively, each independently expandable). Reuses ToolView per owned tool.
-function NodeDetail({ tools, kids, p }: { tools: readonly ToolMsg[]; kids: readonly string[]; p: NodeViewProps }) {
-  return (
-    <box flexDirection="column" style={{ paddingLeft: INDENT }}>
-      {tools.map((m) => (
-        <ToolView key={m.id} m={m} expanded={p.expTools.has(m.id)} focused={p.focusedKey === `tool:${m.id}`} cols={p.cols} onToggle={() => p.onToggleTool(m.id)} />
-      ))}
-      {kids.map((k) => (
-        <NodeView key={k} {...p} id={k} depth={p.depth + 1} />
-      ))}
-    </box>
-  )
-}
-
-// Orchestration node = its OWN sub-agent. Collapsed = a one-line summary (label · tokens ·
-// tool-count · status glyph); expanded = its OWNED tool steps (per-node, reusing ToolView) PLUS
-// its child nodes (recursively, each independently expandable). Running auto-expands so you watch
-// the fan-out live; a settled node collapses to its summary on click.
-function NodeView(p: NodeViewProps) {
+// Render one flattened tree row: its header line, then (when expanded) its OWNED tool
+// steps, each reusing ToolView and indented under the node's continuation stem so the
+// per-node tool ring hangs INSIDE the tree. Child nodes are NOT rendered here — flatten
+// already emitted them as their own rows; this keeps the tree a flat <text> list.
+function NodeRow(p: NodeRowProps) {
   const [hover, setHover] = useState(false)
-  const n = p.nodes[p.id]
-  if (n === undefined) return null
-  const kids = p.childrenOf[p.id] ?? []
-  const tools = (n.tools ?? []) as readonly ToolMsg[]
-  // A node is EXPANDABLE when it owns tools OR has child nodes — its own collapse state.
-  const hasDetail = kids.length > 0 || tools.length > 0
-  const expanded = n.status === "running" || p.expNodes.has(p.id) // running auto-expands; done collapses on click
-  const hot = hasDetail && hover
+  const { row } = p
+  const hot = row.hasDetail && hover
   return (
-    <box flexDirection="column" style={{ paddingLeft: p.depth === 0 ? 0 : INDENT }}>
-      <NodeHeader n={n} expanded={expanded} hasDetail={hasDetail} hot={hot} setHover={setHover} onToggle={() => p.onToggle(p.id)} />
-      {expanded && hasDetail && <NodeDetail tools={tools} kids={kids} p={p} />}
+    <box flexDirection="column">
+      <NodeHeader row={row} hot={hot} setHover={setHover} onToggle={() => p.onToggle(row.id)} />
+      {row.expanded && row.tools.length > 0 && (
+        <box flexDirection="column">
+          {row.tools.map((m) => (
+            <box key={m.id} flexDirection="row">
+              {/* align owned tools under their node: the node's body stem + one connector cell */}
+              <text fg="#45475a" selectable={false}>{`${row.bodyPrefix}   `}</text>
+              <box style={{ flexGrow: 1, flexShrink: 1 }}>
+                <ToolView m={m} expanded={p.expTools.has(m.id)} focused={p.focusedKey === `tool:${m.id}`} cols={p.cols} onToggle={() => p.onToggleTool(m.id)} />
+              </box>
+            </box>
+          ))}
+        </box>
+      )}
     </box>
   )
 }
@@ -351,37 +333,26 @@ function List({ sessions, cursor }: { sessions: readonly SessionView[]; cursor: 
   )
 }
 
-// parent->children index for NodeView recursion; child order follows first-seen
-// insertion in nodes. Only edges whose parent exists are kept.
-const childrenIndex = (orch: OrchTree | undefined): Record<string, string[]> => {
-  const idx: Record<string, string[]> = {}
-  if (!orch) return idx
-  for (const id of Object.keys(orch.nodes)) {
-    const p = orch.nodes[id]!.parentId
-    if (p !== undefined && orch.nodes[p] !== undefined) (idx[p] ??= []).push(id)
-  }
-  return idx
+// PER-NODE TOOL ROUTING: the orchestration tool rows that join the Tab focus ring,
+// derived from the SAME flattened rows the tree renders (render order = focus order).
+// Each EXPANDED node's owned tools expose a `tool:<id>` key (same key as transcript
+// tools), so toggleFocused drives them unchanged. Collapsed nodes are absent from
+// `rows` (flatten omits their subtree) so their tools don't join the ring — correct.
+const orchToolFocusables = (rows: readonly OrchRow[]): string[] => {
+  const out: string[] = []
+  for (const r of rows) if (r.expanded) for (const m of r.tools) out.push(`tool:${m.id}`)
+  return out
 }
 
-// PER-NODE TOOL ROUTING: the orchestration tool rows that join the Tab focus ring. Walk the
-// live tree in render order (roots → children); for each EXPANDED node expose its owned tool
-// rows (same `tool:<id>` key as transcript tools, so toggleFocused drives them unchanged).
-const orchToolFocusables = (
-  orch: OrchTree | undefined,
-  childrenOf: Readonly<Record<string, readonly string[]>>,
-  expNodes: Set<string>,
-): string[] => {
-  if (!orch) return []
-  const out: string[] = []
-  const expanded = (id: string) => orch.nodes[id]?.status === "running" || expNodes.has(id)
-  const walk = (id: string) => {
-    const node = orch.nodes[id]
-    if (node === undefined || !expanded(id)) return
-    for (const m of node.tools ?? []) out.push(`tool:${m.id}`)
-    for (const k of childrenOf[id] ?? []) walk(k)
-  }
-  for (const rid of orch.roots) walk(rid)
-  return out
+// Σ footer summary: the live run total — COST-METER tokens (preserved from orch.totalTokens)
+// · node count · error count. Computed over the whole node map (not just visible rows) so a
+// collapsed subtree still counts toward the totals.
+const orchSigma = (orch: OrchTree): string => {
+  const nodes = Object.values(orch.nodes)
+  const errors = nodes.filter((n) => n.status === "error").length
+  const parts = [`Σ ${fmtTokens(orch.totalTokens)}`, `${nodes.length} node${nodes.length === 1 ? "" : "s"}`]
+  if (errors > 0) parts.push(`${errors} error${errors === 1 ? "" : "s"}`)
+  return parts.join(" · ")
 }
 
 // Per-id expansion toggle set (orch nodes). Encapsulates the Set + reset-on-session.
@@ -465,10 +436,11 @@ function App() {
   const active = state.sessions.find((s) => s.id === state.activeId) ?? null
   const inChat = state.view === "chat" && active !== null
   const turns = active ? toTurns(active.messages) : []
-  // Orchestration tree (only present once orch.emit has fired). childrenIndex builds
-  // the parent->children index NodeView recurses over (memoized on the node map).
+  // Orchestration tree (only present once orch.emit has fired). flatten() walks the
+  // immutable tree into ordered, connector-prefixed Rows (one per visible node) — all
+  // tree geometry lives in the pure helper; the render is a flat list of <text> rows.
   const orch = active?.orch
-  const childrenOf = useMemo(() => childrenIndex(orch), [orch])
+  const orchRows = useMemo(() => (orch ? flatten(orch, expNodes) : []), [orch, expNodes])
   const isExpanded = (t: Turn) => expTurns.has(t.idx) || t.final === null // in-progress auto-expands
 
   // STICKY SELF-RESTORING FOCUS (focus-sticky): opentui focus is a SINGLE imperative
@@ -507,9 +479,9 @@ function App() {
     if (t.steps.length > 0) focusables.push(`turn:${t.idx}`)
     if (isExpanded(t)) for (const s of t.steps) if (s.kind === "tool") focusables.push(`tool:${s.id}`)
   }
-  // PER-NODE TOOL ROUTING: orchestration node tool rows join the Tab ring too (helper walks
-  // the expanded tree). Same `tool:<id>` key as transcript tools, so toggleFocused drives them.
-  focusables.push(...orchToolFocusables(orch, childrenOf, expNodes))
+  // PER-NODE TOOL ROUTING: orchestration node tool rows join the Tab ring too (derived from
+  // the same flattened rows). Same `tool:<id>` key as transcript tools, so toggleFocused drives them.
+  focusables.push(...orchToolFocusables(orchRows))
   const focusedKey = focusables.length ? focusables[((focus % focusables.length) + focusables.length) % focusables.length] : undefined
   const toggleFocused = () => {
     if (!focusedKey) return
@@ -693,29 +665,23 @@ function App() {
         ))}
         {orch && orch.roots.length > 0 && (
           <box flexDirection="column" style={{ marginTop: 1, paddingLeft: 1 }}>
-            <text fg="#585b70">
-              orchestration
-              {/* COST-METER footer: live run total over every node's tokens. */}
-              {orch.totalTokens > 0 ? (
-                <span fg="#6c7086">{`  ·  ${orch.roots.length} ${orch.roots.length === 1 ? "tree" : "trees"} · ${fmtTokens(orch.totalTokens)}`}</span>
-              ) : null}
-            </text>
+            <text fg="#585b70">orchestration</text>
+            {/* VELOCITY UNICODE TREE: one flat <text> per flattened Row, connectors
+                precomputed by flatten() — no nested padding boxes. */}
             <box flexDirection="column" style={{ paddingLeft: INDENT }}>
-              {orch.roots.map((rid) => (
-                <NodeView
-                  key={rid}
-                  id={rid}
-                  nodes={orch.nodes}
-                  childrenOf={childrenOf}
-                  depth={0}
-                  expNodes={expNodes}
-                  onToggle={toggleNode}
+              {orchRows.map((row) => (
+                <NodeRow
+                  key={row.id}
+                  row={row}
                   expTools={expTools}
+                  onToggle={toggleNode}
                   onToggleTool={toggleTool}
                   focusedKey={focusedKey}
                   cols={width || 80}
                 />
               ))}
+              {/* Σ footer: live run total — tokens · nodes · errors (COST-METER total preserved). */}
+              <text fg="#6c7086">{orchSigma(orch)}</text>
             </box>
           </box>
         )}
