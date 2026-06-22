@@ -28,7 +28,7 @@ Bun + TypeScript. Effect v4 core, opentui (React) UI, real OpenTelemetry → loc
     bun run check        # tsc --noEmit + Effect LS (Effect anti-patterns)
     bun run analyze      # yuku semantic design analysis
     bun run debt         # ponytail debt ledger
-    bun run test:tui:frame  # HEADLESS FRAME GATE — see below (needs the termctrl binary + a PTY)
+    bun run test:tui     # HEADLESS TUI GATE — see below (needs the termctrl binary + a PTY)
 
 ## Static analysis — what & WHEN to run
 
@@ -43,35 +43,55 @@ Workflow: edit → `bun run check` (tight loop) → when done → `bun run lint`
 Budgets in `scripts/design-check.ts` (CC 18, nest 5, params 6) are tunable; raise only
 with a reason, not to silence a real smell.
 
-## Headless TUI frame gate (`bun run test:tui:frame`)
+## Headless TUI gate (`bun run test:tui`) — the TUI is now headless-testable
 
 The TUI used to be verifiable ONLY by a human running `bun run chat` — every render/focus
 bug (stranded input focus, tools under the wrong node, a flat tree, no thinking state)
-slipped past `tsc` + yuku + the headless `test:tui` because none of them see a *rendered
-frame*. `scripts/tui/` closes that gap by mounting the **real** `chat.tsx` in a headless
-pseudo-terminal and asserting against the captured cell-grid text.
+slipped past `tsc` + yuku because none of them see a *rendered frame*. `bun run test:tui`
+closes that gap: it runs `scripts/tui/*.test.ts`, mounting the **real** `chat.tsx` in a
+headless pseudo-terminal and asserting against the captured cell-grid text. De-flake standard:
+the gate is deterministic (no real timers/network; frame-stable waits) and runs 10/10 green.
 
-- **`scripts/tui/driver.ts`** — mounts `bun src/chat.tsx` under
+- **`scripts/tui/driver.ts`** — mounts `bun src/tui/chat.tsx` under
   [`terminal-control`](vendor/terminal-control) (the vendored PTY driver by opentui's author)
-  with `AX2_MOCK=1`, and exposes `{ frame, type, key, click, waitFor, stop }`. It drives the
-  REAL app boot + input/focus path (not an in-process render tree), so the bugs above are
-  catchable. Waits use the frame-stable `waitFor` poll, never `setTimeout`-then-assert.
-- **`scripts/tui/*.test.ts`** — focus, node-tree, thinking-streaming, tool-grouping. Each
-  asserts STABLE structure (the `❯` focus gutter, `├─ └─ │` connectors, the Σ footer, `✗`
-  error cards) over captured frames — not a byte-exact golden (the spinner glyph cycles).
-- **Mock layer** (`src/mock-ai.ts` + `src/mock.ts`, off in prod behind `AX2_MOCK=1`): a canned
-  `AxAIService` (zero network) drives the REAL turn loop; a `mock_orch` tool replays canned
-  NodeEvents + a per-node tool cluster through the REAL activity bus so the orch tree renders
-  from fixed data. `runtime.ts`/`agent.ts` read the seam ONCE; unset ⇒ the unchanged CF path.
-- **Streaming is NOT wired** (`streaming:false`): the thinking/streaming test pins the CURRENT
-  non-streaming render and carries a `TODO` that flips to a delta-by-delta assertion once
-  `stream:true` lands. It does not fake streaming.
+  with `AX2_MOCK=1`, and exposes `{ frame, type, key, click, waitFor, waitForFrame, stop }`. It
+  drives the REAL app boot + input/focus path (not an in-process render tree), so the bugs above
+  are catchable. Waits use the frame-stable `waitFor` poll, never `setTimeout`-then-assert.
+- **`scripts/tui/*.test.ts`** — `mock` (the deterministic mock unit, no PTY), then `smoke`,
+  `focus`, `ime`, `layout`, `node-tree`, `thinking-streaming`, `tool-grouping`,
+  `tool-grouping-steps`. Each asserts STABLE structure (the `❯` focus gutter, `├─ └─ │`
+  connectors, the Σ footer, `✗` error cards) over captured frames — not a byte-exact golden
+  (the spinner glyph cycles). They run SEQUENTIALLY (`&&`) so PTY mounts never overlap.
+- **Mock layer** (`src/core/mock-ai.ts` + `src/core/mock.ts`, off in prod behind `AX2_MOCK=1`):
+  a canned `AxAIService` (zero network) drives the REAL turn loop; a `mock_orch` tool replays
+  canned NodeEvents + a per-node tool cluster through the REAL per-turn activity bus so the orch
+  tree renders from fixed data. `agent.ts` reads the seam ONCE; unset ⇒ the unchanged CF path.
+  The activity bus is PER-TURN (`run.ts` threads each turn's `emit` into `turn()`); under
+  `AX2_MOCK` `setMockEmit(emit)` points the mock's group-variant tool-CALL feed at that sink.
 
-SEPARATE from `bun run lint`: the frame gate needs the `termctrl` native binary on PATH
-(`cargo install --git https://github.com/kitlangton/terminal-control terminal-control`, or set
-`TERMCTRL_BINARY`) and a real PTY, which bare CI may lack — so it is its own
-`test:tui:frame` gate, run locally / in a PTY-capable runner before shipping TUI changes. The
-deterministic mock UNIT (`test:tui` → `scripts/tui/mock.test.ts`) stays in `lint`.
+### How to add a TUI test
+
+1. Add `scripts/tui/<name>.test.ts`. Import `launchDriver` from `./driver.ts` and `report`
+   from `./assert.ts`; wrap the body in `await report("<name>.test", async (a) => { … })`.
+2. `const d = await launchDriver()` (optionally `{ cols, rows, env }`); always `await d.stop()`
+   in a `finally`. Drive the app with `d.type(text)`, `d.key("Enter"|"Tab"|"Escape"|"Arrow…",
+   { shift })`, `d.click(x, y)`.
+3. Gate every assertion on a FRAME-STABLE wait — `const f = await d.waitFor(pred, { label })`
+   (or `d.waitForFrame(pred, deadlineMs)`) — NEVER `setTimeout`-then-assert. Assert with
+   `a.has(f, needle, msg)` / `a.hasNot(...)` over the captured text. Match STABLE structure
+   (connectors, labels, the Σ footer), not a byte-exact grid (the spinner cycles).
+4. To exercise an orchestration tree or a tool cluster, send a message the mock routes on:
+   `"orchestrate …"` (→ `mock_orch` replays the canned node feed) or `"explore …"` (→ the
+   read/glob/grep group). Keep new fixtures in `src/core/mock.ts` / `mock-ai.ts`, SMALL.
+5. Register the new file in the single `test:tui` `&&` chain in `package.json` (sequential,
+   the mock unit first) — that is the only place to wire it.
+
+SEPARATE from `bun run lint`: the frame portion of `test:tui` needs the `termctrl` native
+binary on PATH (`cargo install --git https://github.com/kitlangton/terminal-control
+terminal-control`, or set `TERMCTRL_BINARY`) and a real PTY, which bare CI may lack — so the
+full `test:tui` is its own gate, run locally / in a PTY-capable runner before shipping TUI
+changes. The deterministic mock UNIT (`scripts/tui/mock.test.ts`, zero PTY) is the part `lint`
+keeps in its `test` target, so `bun run lint` stays green on a bare CI box.
 
 ## tsconfig discipline
 

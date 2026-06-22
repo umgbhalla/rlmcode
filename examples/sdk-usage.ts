@@ -1,23 +1,12 @@
-// Runnable headless SDK smoke: an EXTERNAL caller drives the ax2 core with NO
-// Cloudflare env. Proves the injection seam — createAgent over a caller-supplied
-// AxAIService, a non-CF model, empty tools, run ONE turn via the returned Effect.
+// Runnable headless SDK smoke: an EXTERNAL caller drives the ax2 core with NO Cloudflare env and
+// NO Effect / OTel / @effect/atom wiring. Proves the public barrel (src/core/sdk.ts): createAgent
+// over a caller-supplied AxAIService, then runTurn as a PLAIN AsyncGenerator (for-await-of). This
+// file is the regression gate for the whole extraction — it imports ONLY the public surface.
 //
 //   bun examples/sdk-usage.ts        # exits 0 on success, 1 on any failed assertion
-//
-// This file is ALSO the regression gate for the whole extraction: it consumes the
-// public src/sdk.ts surface, so its exports are no longer dead.
 import { AxMockAIService } from "@ax-llm/ax"
-import { context as otelContext } from "@opentelemetry/api"
-import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks"
-import { NoopSpanProcessor } from "@opentelemetry/sdk-trace-base"
-import * as NodeSdk from "@effect/opentelemetry/NodeSdk"
-import * as Resource from "@effect/opentelemetry/Resource"
-import * as Effect from "effect/Effect"
-import * as Layer from "effect/Layer"
-import * as Tracer from "effect/Tracer"
-import { setActivitySink } from "../src/core/activity.ts"
-// The ENTIRE surface a caller needs comes from sdk.ts — no reaching into internals.
-import { type AxAIService, AxMemory, createAgent } from "../src/core/sdk.ts"
+// The ENTIRE surface a caller needs comes from the barrel — no reaching into internals.
+import { type AxAIService, createAgent } from "../src/core/sdk.ts"
 
 // ── plain ax2-style assertions ──────────────────────────────────────────────────
 let failed = 0
@@ -35,10 +24,8 @@ const cfTokenBefore = process.env.CLOUDFLARE_API_TOKEN
 const cfAccountBefore = process.env.CLOUDFLARE_ACCOUNT_ID
 
 // ── caller-supplied stub AxAIService (NO network, deterministic) ────────────────
-// ponytail: example stub ai echoes the message — no real provider, no network.
-// Upgrade: point this at a real injected provider (OpenAI/Ollama) in CI.
-// ax's DSP parser maps the single output field `reply:string` straight off the raw
-// content, so returning the echoed message as content yields { reply: <echo> }.
+// ax's DSP parser maps the single output field `reply:string` straight off the raw content, so
+// returning the text as content yields { reply: <text> }. No tools ⇒ one step, straight to reply.
 const REPLY = "echo: hello from the stub"
 const stubAi: AxAIService = new AxMockAIService({
   name: "stub",
@@ -54,61 +41,46 @@ const stubAi: AxAIService = new AxMockAIService({
   }),
 }) as unknown as AxAIService
 
-// ── inject config: non-CF model + empty tools prove createAgent's DI ────────────
-const sdk = createAgent({ ai: stubAi, model: "stub/echo", maxSteps: 4, tokenBudget: 50_000, tools: [] })
-
-// ── OTel: a real (no-exporter) provider so turn()'s span machinery works headless.
-// turn() needs an OtelTracerProvider in context AND a live active OTel span
-// (currentOtelSpan + emit()'s getActiveSpan().addEvent on a RAW SDK span). Mirror the
-// app's wiring (src/otel.ts TracingLive) minus the OTLP exporters: register a global
-// AsyncLocalStorage context manager (so otelContext.with(...) tracks the active span),
-// then merge NodeSdk.layer (which sets the GLOBAL SDK provider — this is what makes
-// getActiveSpan() return a raw SpanImpl, not an effect wrapper) with layerTracerProvider
-// (which surfaces the OtelTracerProvider service turn() reads). The span processor is a
-// Noop — spans are recorded then dropped (no motel needed). Same shape as the app.
-otelContext.setGlobalContextManager(new AsyncLocalStorageContextManager().enable())
-const resourceCfg = { serviceName: "ax2-sdk-smoke", serviceVersion: "0.0.0" }
-const spanProcessor = new NoopSpanProcessor()
-const TracingLive = Layer.mergeAll(
-  NodeSdk.layer(() => ({ resource: resourceCfg, spanProcessor })),
-  Layer.provide(NodeSdk.layerTracerProvider([spanProcessor]), Resource.layer(resourceCfg)),
-)
+// ── inject config: a non-CF model + base tools prove createAgent's DI ───────────
+const agent = createAgent({ ai: stubAi, model: "stub/echo", maxSteps: 4, tokenBudget: 50_000, tools: "base" })
 
 const main = async () => {
-  // Collect the live node Activities the turn emits via the GLOBAL sink (the same
-  // mechanism atoms.ts installs per turn). turn() pushes node start/done events here.
-  const activities: string[] = []
-  setActivitySink((a) => {
-    activities.push(a.kind === "node" ? `node:${a.event}` : a.kind)
-  })
-
-  // A session: caller-built AxMemory + an external parent span (the session root).
-  const mem = new AxMemory()
-  const parent = Tracer.externalSpan({ traceId: "0".repeat(32), spanId: "0".repeat(16), sampled: false })
-  const sessionId = "sdk-smoke-1"
-
-  // turn() returns an EFFECT — run it at the boundary with the OtelTracerProvider
-  // layer it needs. No CF env, no app runtime.
-  const result = await Effect.runPromise(
-    sdk.turn(mem, parent, sessionId)("hello").pipe(Effect.provide(TracingLive)),
-  )
-
-  setActivitySink(null)
+  // Drive ONE turn as a serializable event stream — the ONLY input is (sessionId, message), the
+  // session is opened lazily. Collect every event type; the terminal {type:'reply'} carries the
+  // normalized TurnResult. NO Effect, NO manual OTel — the SDK runs it on the app runtime inside.
+  const types: string[] = []
+  let reply: string | undefined
+  let replyCount = 0
+  for await (const ev of agent.runTurn("sdk-smoke-1", "hello")) {
+    types.push(ev.type)
+    if (ev.type === "reply") {
+      replyCount++
+      reply = ev.result.reply
+    }
+  }
 
   // ── assertions ────────────────────────────────────────────────────────────────
-  assert(typeof result.reply === "string" && result.reply.length > 0, "a reply string came back")
-  assert(result.reply === REPLY, `reply is the stub echo (got: ${JSON.stringify(result.reply)})`)
-  assert(activities.some((a) => a.startsWith("node:")), `at least one node Activity observed (saw: ${activities.join(",") || "none"})`)
+  assert(typeof reply === "string" && reply.length > 0, "a reply string came back")
+  assert(reply === REPLY, `reply is the stub echo (got: ${JSON.stringify(reply)})`)
+  // final-reply-once: exactly ONE terminal reply, and it is the LAST event.
+  assert(replyCount === 1, `exactly one terminal reply (got ${replyCount})`)
+  assert(types[types.length - 1] === "reply", `the reply is the LAST event (saw tail: ${types.slice(-3).join(",")})`)
+  // No CF env was touched, and the injected (non-CF) service was the one used.
   assert(
     process.env.CLOUDFLARE_API_TOKEN === cfTokenBefore && process.env.CLOUDFLARE_ACCOUNT_ID === cfAccountBefore,
     "no CF env was mutated (the stub ai needs none)",
   )
-  // The injection seam itself: createAgent accepted a non-CF AxAIService + model.
   assert(stubAi.getName() === "stub", "the injected (non-CF) AxAIService was the one used")
+  // info() reads back the metadata surface.
+  const info = agent.info()
+  assert(info.model === "stub/echo" && info.maxSteps === 4 && info.tokenBudget === 50_000, "info() reflects the injected config")
+  assert(info.toolNames.length > 0 && info.axVersion.length > 0, "info() exposes toolNames + axVersion")
+  // closeSession drops the lazily-opened session.
+  assert(agent.closeSession("sdk-smoke-1") === true, "closeSession released the opened session")
 }
 
 await main().catch((e) => {
-  console.error("FAIL: turn threw", e)
+  console.error("FAIL: runTurn threw", e)
   failed++
 })
 

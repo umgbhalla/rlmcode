@@ -14,9 +14,18 @@
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import type { Activity } from "./activity.ts"
-import { abortTurn, turn, type TurnResult as RawTurnResult } from "./agent.ts"
+import { abortTurn as defaultAbort, type AxAgentSDK, turn as defaultTurn, type TurnResult as RawTurnResult } from "./agent.ts"
 import { coreRuntime } from "../otel.ts"
-import { sessionsRT } from "./sessions.ts"
+import { ensureSession } from "./sessions.ts"
+
+// A turn DRIVER — the two agent capabilities runTurn needs, decoupled from any one construction
+// site. The TUI uses the module default agent; src/core/sdk.ts builds a fresh agent per
+// createAgent() and supplies its own driver (its createAgent output IS this shape). `turn`
+// returns the INTERNAL Effect (Effect/ChatError never escape — runTurn drives it on coreRuntime);
+// `abortTurn` wraps the agent's per-session abort.
+export type TurnDriver = Pick<AxAgentSDK, "turn" | "abortTurn">
+
+const defaultDriver: TurnDriver = { turn: defaultTurn, abortTurn: defaultAbort }
 
 // ── PUBLIC, FULLY SERIALIZABLE event vocabulary ─────────────────────────────────────────
 // Every field is string|number|boolean|undefined — NO AxMemory / AxSpan / Effect / Cause. The
@@ -162,57 +171,69 @@ const errorResult = (cause: Cause.Cause<unknown>): TurnResult => {
   }
 }
 
+// A reply EVENT helper for the no-session / empty-message early exit (final-reply-once still holds).
+const earlyReply = (why: string): TurnEvent => ({
+  type: "reply",
+  result: { reply: `⚠ ${why}`, stopReason: "error", usage: {}, aborted: false, error: { kind: "unknown", message: why } },
+})
+
+// makeRunTurn — bind the turn boundary to a specific agent DRIVER. Returns the plain
+// AsyncGenerator runTurn. Effect runs INSIDE on coreRuntime; the outside is a for-await-of. The
+// final yield is ALWAYS a single {type:'reply'} — success, error, or abort. Never two, never zero.
+export const makeRunTurn =
+  (driver: TurnDriver) =>
+  async function* runTurn(sessionId: string, message: string, opts?: TurnOptions): AsyncGenerator<TurnEvent, void, void> {
+    const text = message.trim()
+    // Empty message: still honor final-reply-once with a single terminal reply.
+    if (text.length === 0) {
+      yield earlyReply("empty message")
+      return
+    }
+    // Lazily open the session on first use (the SDK path); the TUI pre-creates it, so this is a
+    // no-op there (ensureSession returns the existing richer-span entry).
+    const rt = ensureSession(sessionId)
+
+    // PER-TURN emit: THE per-turn closure that replaces the deleted module-global sink. Every
+    // Activity (mapped to a flat TurnEvent) pushes into THIS turn's queue. It is threaded NATIVELY
+    // into turn() — which wires it into all three producers: ax's logger (makeLiveLogger(emit) in
+    // the forward opts), the orch NodeEvent path (makeOnEvent(emit) + getTurnEmit for tool
+    // handlers), and the streaming reply/thinking deltas. No module-global sink whatsoever.
+    const queue = new TurnQueue<TurnEvent>()
+    const emit = (a: Activity): void => queue.push(toEvent(a))
+
+    // Abort: a caller signal aborts THIS session's in-flight turn (wraps the driver's abortTurn).
+    const onAbort = (): void => void driver.abortTurn(sessionId)
+    if (opts?.signal !== undefined) {
+      if (opts.signal.aborted) onAbort()
+      else opts.signal.addEventListener("abort", onAbort, { once: true })
+    }
+
+    // Run turn()'s Effect on the headless runtime as a detached promise; map success/failure into
+    // the SINGLE terminal reply. Effect/Cause/ChatError never escape this closure. turn()'s Effect
+    // requires OtelTracerProvider — coreRuntime (TracingLive) supplies it, so the program type
+    // keeps that requirement and runPromise discharges it (don't annotate R=never).
+    const program = driver.turn(rt.mem, rt.parent, sessionId, emit)(text).pipe(
+      Effect.map(okResult),
+      Effect.catchCause((c) => Effect.succeed(errorResult(c))),
+    )
+    const replyPromise: Promise<TurnResult> = coreRuntime
+      .runPromise(program)
+      .catch((e: unknown) => errorResult(Cause.fail(e)))
+      .finally(() => {
+        if (opts?.signal !== undefined) opts.signal.removeEventListener("abort", onAbort)
+        queue.close()
+      })
+
+    // DRAIN: yield every queued activity event as it arrives. The queue closes when the turn
+    // settles (the .finally above), ending the drain — so the loop never hangs.
+    for await (const ev of queue.drain()) yield ev
+
+    // TERMINAL: the one and only reply, always, even on error/abort.
+    yield { type: "reply", result: await replyPromise }
+  }
+
 /**
- * Drive ONE turn of a session as a serializable event stream. Effect runs INSIDE on
- * coreRuntime; the outside is a for-await-of. The final yield is ALWAYS a single
- * {type:'reply'} — on success, error, or abort. Never two replies, never zero.
+ * The DEFAULT-agent turn boundary (used by the TUI's sendAtom). A serializable AsyncGenerator
+ * over the module default agent; src/core/sdk.ts builds per-agent runTurns via makeRunTurn.
  */
-export async function* runTurn(sessionId: string, message: string, opts?: TurnOptions): AsyncGenerator<TurnEvent, void, void> {
-  const text = message.trim()
-  const rt = sessionsRT.get(sessionId)
-  // No session / empty message: still honor final-reply-once with a single terminal reply.
-  if (text.length === 0 || rt === undefined) {
-    const why = rt === undefined ? "unknown session" : "empty message"
-    yield { type: "reply", result: { reply: `⚠ ${why}`, stopReason: "error", usage: {}, aborted: false, error: { kind: "unknown", message: why } } }
-    return
-  }
-
-  // PER-TURN emit: THE per-turn closure that replaces the deleted module-global sink. Every
-  // Activity (mapped to a flat TurnEvent) pushes into THIS turn's queue. It is threaded NATIVELY
-  // into turn() — which wires it into all three producers: ax's logger (makeLiveLogger(emit) in
-  // the forward opts), the orch NodeEvent path (makeOnEvent(emit) + forward `extra.emit` for tool
-  // handlers), and the streaming reply/thinking deltas. No module-global sink whatsoever.
-  const queue = new TurnQueue<TurnEvent>()
-  const emit = (a: Activity): void => queue.push(toEvent(a))
-
-  // Abort: a caller signal aborts THIS session's in-flight turn (wraps agent.ts abortTurn).
-  const onAbort = (): void => void abortTurn(sessionId)
-  if (opts?.signal !== undefined) {
-    if (opts.signal.aborted) onAbort()
-    else opts.signal.addEventListener("abort", onAbort, { once: true })
-  }
-
-  // Run turn()'s Effect on the headless runtime as a detached promise; map success/failure into
-  // the SINGLE terminal reply. Effect/Cause/ChatError never escape this closure.
-  // turn()'s Effect requires OtelTracerProvider — coreRuntime (TracingLive) supplies it, so the
-  // program type keeps that requirement and runPromise discharges it. Let it infer (annotating
-  // R=never would wrongly assert the requirement is gone before runPromise provides it).
-  const program = turn(rt.mem, rt.parent, sessionId, emit)(text).pipe(
-    Effect.map(okResult),
-    Effect.catchCause((c) => Effect.succeed(errorResult(c))),
-  )
-  const replyPromise: Promise<TurnResult> = coreRuntime
-    .runPromise(program)
-    .catch((e: unknown) => errorResult(Cause.fail(e)))
-    .finally(() => {
-      if (opts?.signal !== undefined) opts.signal.removeEventListener("abort", onAbort)
-      queue.close()
-    })
-
-  // DRAIN: yield every queued activity event as it arrives. The queue closes when the turn
-  // settles (the .finally above), ending the drain — so the loop never hangs.
-  for await (const ev of queue.drain()) yield ev
-
-  // TERMINAL: the one and only reply, always, even on error/abort.
-  yield { type: "reply", result: await replyPromise }
-}
+export const runTurn = makeRunTurn(defaultDriver)
