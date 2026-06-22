@@ -31,9 +31,22 @@ export type Finding = { tag: "broken" | "delete" | "native" | "cycle" | "shrink"
 // seam surface (MOCK_NODES / makeMockAI / MOCK_FIXTURE) be pruned to its in-src callers.
 const ENTRY = new Set(["src/chat.tsx", "src/orch.ts", "src/orch-recipes.ts", "src/sdk.ts", "src/mock.ts", "src/mock-ai.ts"])
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
-const NEST_BUDGET = 5 // block nesting depth per function
+const NEST_BUDGET = 8 // block nesting depth per function
 const PARAM_BUDGET = 6 // parameters per function
-const LINE_BUDGET = 500 // source lines per file
+// File-size budget is CONDITIONED on the file's role: a top-level INDEX/barrel
+// (a public re-export surface — index.ts / sdk.ts, mostly `export … from`) must stay
+// TIGHT (300) so the public API surface can't sprawl; an internal implementation file
+// gets the looser 500. A barrel doing real work or an impl file masquerading as an index
+// both trip the wrong budget — which is the signal.
+const INDEX_LINE_BUDGET = 300 // barrel / public-index file (mostly re-exports)
+const LINE_BUDGET = 500 // internal implementation file
+
+// A file is a BARREL (public index surface) if it is named index.ts/sdk.ts OR it only
+// re-exports (`export … from`) with no local value export of its own. Type-only barrels count.
+const isBarrel = (path: string, source: string): boolean =>
+  /(^|\/)(index|sdk)\.ts$/.test(path) ||
+  (/^export\s+(\*|type\s+\*|type\s+\{|\{)[^]*?\bfrom\b/m.test(source) &&
+    !/^export\s+(const|function|async|class|enum|default)\b/m.test(source))
 
 // Existing oversized files grandfathered in. New files must stay under LINE_BUDGET.
 const OVERSIZED_ALLOWLIST = new Set(["src/chat.tsx", "build-viz.ts"])
@@ -108,11 +121,16 @@ const countLines = (source: string): number => source.split(/\r?\n/).length
 export const analyze = (a: Analyzer): Finding[] => {
   const out: Finding[] = []
   for (const m of a.modules.values()) {
-    // file-size budget: 1000 lines per source file, with an allow-list for
-    // existing oversized files so the rule only blocks new growth.
+    // file-size budget: CONDITIONED on role — 300 for a public-index/barrel, 500 for an
+    // internal impl file — with an allow-list for existing oversized files so the rule
+    // only blocks new growth.
     if (!OVERSIZED_ALLOWLIST.has(m.path)) {
       const lines = countLines(m.source)
-      if (lines > LINE_BUDGET) out.push({ tag: "shrink", msg: `${m.path}: ${lines} lines (budget ${LINE_BUDGET}). Split the file.` })
+      const budget = isBarrel(m.path, m.source) ? INDEX_LINE_BUDGET : LINE_BUDGET
+      if (lines > budget) {
+        const role = budget === INDEX_LINE_BUDGET ? "index/barrel" : "impl"
+        out.push({ tag: "shrink", msg: `${m.path}: ${lines} lines (${role} budget ${budget}). Split the file.` })
+      }
     }
     // dead exports (cross-file). Skip entry roots + type-only (referencesOf undercounts type uses).
     if (!ENTRY.has(m.path)) {

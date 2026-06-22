@@ -81,10 +81,13 @@ errors; fix the underlying type or add an explicit, locally justified assertion.
 
 ## File-size budget
 
-Keep source files under 500 lines. If a file approaches that, split by concern
-(e.g. types, pure helpers, effects, UI) rather than growing it. Tests and
-auto-generated files are exempt. `src/chat.tsx` and `build-viz.ts` are
-grandfathered; new files must stay under the budget.
+File-size budget is **conditioned on role**: a top-level **index/barrel** (a public
+re-export surface — `index.ts`/`sdk.ts`, mostly `export … from`) stays tight at **300**
+lines so the public API can't sprawl; an **internal implementation** file gets **500**.
+Nesting depth budget is **8**. If a file approaches its budget, split by concern (types,
+pure helpers, effects, UI) rather than growing it. Tests and auto-generated files are
+exempt. `src/chat.tsx` and `build-viz.ts` are grandfathered; new files must stay under
+the budget.
 
 ## Extended ponytail scan
 
