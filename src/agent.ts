@@ -336,7 +336,12 @@ export const createAgent = (config: AxAgentConfig) => {
                     tracer,
                     traceContext,
                     maxSteps,
-                    stream: false,
+                    // STREAM: ax consumes the stream INTERNALLY (forward() still resolves with
+                    // the authoritative final result) and fires the per-chunk LOGGER, which the
+                    // activity bus turns into replyDelta/thinkingDelta → the reply + reasoning
+                    // render live. sendAtom reconciles to the resolved res.reply at turn end, so
+                    // a provider that doesn't truly stream just shows the reply at the end.
+                    stream: true,
                     abortSignal: aborter.signal,
                     stepHooks,
                     // PER-TURN finish-reason capture: skim choices[0].finish_reason off a

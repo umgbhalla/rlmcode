@@ -18,7 +18,11 @@ export type TurnMeta = { readonly model: string; readonly ms: number; readonly t
 
 export type Msg =
   | { readonly kind: "you"; readonly text: string }
-  | { readonly kind: "agent"; readonly text: string; readonly meta?: TurnMeta }
+  // STREAMING: `thinking` holds the live/settled reasoning_content (rendered as a collapsible
+  // block that auto-folds once `text` starts). `streaming` marks the in-flight reply (drives
+  // the cursor + tells sendAtom to FINALIZE this message in place with the authoritative
+  // res.reply rather than append a duplicate). Both absent on a plain non-streaming reply.
+  | { readonly kind: "agent"; readonly text: string; readonly meta?: TurnMeta; readonly thinking?: string; readonly streaming?: boolean }
   | {
       readonly kind: "tool"
       readonly id: string
@@ -155,10 +159,29 @@ const installSink = (
   patch: (fn: (m: readonly Msg[]) => readonly Msg[]) => void,
   orchPatch: (fn: (t: OrchTree) => OrchTree) => void,
 ) =>
+  // STREAMING: grow the in-flight streaming agent message in place (append to its reply text
+  // or its thinking), or start one if the trailing message isn't a live stream. Thinking
+  // arrives first (model reasons, then answers), so the first thinkingDelta mints the message
+  // with empty text; replyDelta then grows text and chat.tsx auto-folds the thinking block.
+  const grow = (m: readonly Msg[], field: "reply" | "thinking", text: string): readonly Msg[] => {
+    const last = m[m.length - 1]
+    if (last?.kind === "agent" && last.streaming === true) {
+      const next: Msg = field === "reply" ? { ...last, text: last.text + text } : { ...last, thinking: (last.thinking ?? "") + text }
+      return [...m.slice(0, -1), next]
+    }
+    const fresh: Msg = field === "reply" ? { kind: "agent", text, streaming: true } : { kind: "agent", text: "", thinking: text, streaming: true }
+    return [...m, fresh]
+  }
   setActivitySink((a) => {
     switch (a.kind) {
       case "text":
         patch((m) => [...m, { kind: "agent", text: a.text }])
+        break
+      case "replyDelta":
+        patch((m) => grow(m, "reply", a.text))
+        break
+      case "thinkingDelta":
+        patch((m) => grow(m, "thinking", a.text))
         break
       case "tool": {
         const step: Msg = { kind: "tool", id: a.id, name: a.name, args: a.args, status: "running", result: "", startedAt: Date.now() }
@@ -285,6 +308,16 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
       finishReason: res.finishReason,
       budget: res.budget,
     }
-    patch((m) => [...m, { kind: "agent", text: res.reply, meta }])
+    // FINALIZE: if the reply streamed live, reconcile that in-flight message to the
+    // AUTHORITATIVE res.reply (correct even if the live deltas were coarse/absent), stamp meta,
+    // clear `streaming` (drops the cursor; keeps the thinking block). Otherwise (non-streaming
+    // provider, or an error short-circuit) append the reply as a fresh row — the unchanged path.
+    patch((m) => {
+      const last = m[m.length - 1]
+      if (last?.kind === "agent" && last.streaming === true) {
+        return [...m.slice(0, -1), { ...last, text: res.reply, meta, streaming: false }]
+      }
+      return [...m, { kind: "agent", text: res.reply, meta }]
+    })
   }),
 )
