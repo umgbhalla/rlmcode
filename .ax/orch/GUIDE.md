@@ -13,25 +13,25 @@ Three tools:
 
 ---
 
-## When to orchestrate (and when NOT)
+## Decision guide — single turn vs `orchestrate` vs `run_orch_script` vs `run_rlm`
 
-**DO orchestrate when:**
+Pick the SMALLEST thing that does the job. In order of preference:
 
-1. The task **splits into independent parts** that don't depend on each other's
-   output → fan them out (`orchestrate` with distinct `subtasks`).
-2. You want the **best of N** attempts, or to **verify** an answer → `judge` /
-   `best_of_n` (best-of-N), or `verify` (skeptics vote).
-3. A **big blob** (long file, pasted log, whole concatenated module) won't fit the
-   window → `run_rlm`.
+| do this …                | when …                                                                 |
+| ------------------------ | ---------------------------------------------------------------------- |
+| **a single turn (you)**  | the work is trivial, or strictly sequential (`read → edit → test`), or one investigation. **Default.** Use your own file/shell tools. |
+| **`orchestrate`**        | the work splits into INDEPENDENT parts (distinct `subtasks` — division of labour), OR you want best-of-N (`judge`/`best_of_n`) or a verified answer (`verify`), OR you want a planner to auto-decompose (`plan`). The 5 fixed strategies cover most fan-outs. |
+| **`run_orch_script`**    | you need a SHAPED flow the fixed strategies don't express — a typed multi-stage `pipeline`, a `loopUntilDry`, a gated adversarial `verifiedStep`, per-stage model routing. `write_file` the script to `.ax/orch/<name>.ts`, then run it by name. |
+| **`run_rlm`**            | the CONTEXT is a BIG blob (a 12k-line bundle, a giant log, a whole concatenated module) that won't fit a node's prompt window. The blob is loaded into a code runtime; a sub-LM writes JS to mine it. |
 
 **DON'T orchestrate when:**
 
-- The task is **trivial or strictly sequential** — do it directly with your own
-  file/shell tools. `read → edit → test` is **one node's task** (yours).
-- Do **not** fan out a one-liner. Do **not** spin a node up to read one file or run
-  one command. Orchestration is for INDEPENDENT work or N-way redundancy.
+- The task is **trivial or strictly sequential** — do it directly. `read → edit → test`
+  is **one node's task** (yours), not a fan-out.
+- Do **not** fan out a one-liner. Do **not** spin a node up to read one file or run one
+  command. Orchestration is for INDEPENDENT work or N-way redundancy.
 - **Scale to what's asked**: don't request more `branches` than the task has distinct
-  parts.
+  parts. One distinct part ⇒ no fan-out at all.
 
 ---
 
@@ -61,6 +61,15 @@ orchestrate({ task: 'refactor the auth module', strategy: 'plan' })
 // route nodes to a stronger engine + thinking level
 orchestrate({ subtasks: ['…','…'], model: 'glm', effort: 'high' })
 ```
+
+Each strategy ships as a runnable reference script you can read or `/run` directly:
+
+| strategy   | shipped script              | run it                                              |
+| ---------- | --------------------------- | --------------------------------------------------- |
+| `parallel` | `.ax/orch/fanout.ts`        | `run_orch_script({ name: 'fanout' })`               |
+| `judge`    | `.ax/orch/judge.ts`         | `run_orch_script({ name: 'judge', message: '…' })`  |
+| `verify`   | `.ax/orch/verify.ts`        | `run_orch_script({ name: 'verify', message: '…' })` |
+| pipeline   | `.ax/orch/pipeline.ts`, `.ax/orch/structured-pipe.ts` | `run_orch_script({ name: 'pipeline', message: '…' })` |
 
 ---
 
@@ -225,16 +234,69 @@ export const orchestrate = async (ctx: OrchLoadCtx, prims: OrchPrims) => {
 }
 ```
 
+### Template — `loopUntilDry` (refine until it converges)
+
+```ts
+// .ax/orch/refine.ts  →  run_orch_script({ name: 'refine', message: '…' })
+import type { OrchLoadCtx, OrchPrims } from "../../src/orch-load.ts"
+
+export const orchestrate = async (ctx: OrchLoadCtx, prims: OrchPrims) => {
+  const { message, rootId, ai, budget, onEvent, optsFor, usageOf } = ctx
+  const { runNode, loopUntilDry, gen } = prims
+
+  const draft = gen("message:string -> reply:string", "Improve the answer; return your best current version.")
+  let round = 0
+  // Re-run the body until two consecutive outputs are (nearly) the same length, OR the
+  // SOFT budget is crossed (never infinite — overSoft() is the early-out, max=6 is the cap).
+  const final = await loopUntilDry(
+    async () => {
+      if (budget.overSoft()) return "(stopped: over soft budget)"
+      const nodeId = `${rootId}/round-${round++}`
+      const out = await runNode(
+        { nodeId, parentId: rootId, gen: draft, opts: optsFor(), onEvent, budget, usageOf: (g) => usageOf(g) },
+        ai,
+        { message },
+      )
+      return (out as { reply?: string }).reply ?? ""
+    },
+    (prev, next) => Math.abs(prev.length - next.length) < 16, // "dry" = converged
+    6,
+  )
+  return { reply: final }
+}
+```
+
+### Template — `plan` (auto-decompose, then fan out)
+
+The `plan` STRATEGY of the `orchestrate` tool already does this — a planner node splits
+`task` into distinct subtasks, then fans out one node per subtask:
+`orchestrate({ task: 'refactor the auth module', strategy: 'plan' })`. Reach for a SCRIPT
+only when you need to post-process the plan (e.g. judge the per-subtask results). To
+hand-roll decomposition in a script: run one planner gen to produce a JSON subtask list,
+then `parallel()` over it (one forked-memory `runNode` per subtask) exactly like
+`.ax/orch/fanout.ts` but with the list coming from the planner instead of a constant.
+
 ### Budget-gated loops
 
 Once `budget.overSoft()`, stop adding rounds — never infinite. `verifiedStep` does this
 for you (returns `stoppedOnBudget`); in a hand-rolled `loopUntilDry`/`verifyHarden` loop,
-check `overSoft()` between rounds and return best-so-far. (See the prims table above for
-the full recipe list — `judge`, `loopUntilDry`, `adversarialVerify`, the verified-step
-trio, the journal trio, and the routing helpers.)
+check `overSoft()` between rounds and return best-so-far (see the `loopUntilDry` template
+above). (See the prims table above for the full recipe list — `judge`, `loopUntilDry`,
+`adversarialVerify`, the verified-step trio, the journal trio, and the routing helpers.)
 
-See `.ax/orch/example.ts` (parallel) and `.ax/orch/structured-pipe.ts` (typed pipeline)
-for working scripts.
+### Shipped reference scripts (read these, or `/run` them)
+
+| script                        | strategy / shape           | exercises                                            |
+| ----------------------------- | -------------------------- | ---------------------------------------------------- |
+| `.ax/orch/fanout.ts`          | `parallel` (DISTINCT work) | `parallel` + `runNode` over forked memories          |
+| `.ax/orch/judge.ts`           | best-of-N                  | `parallel` candidates + `judge` verbatim pick        |
+| `.ax/orch/verify.ts`          | adversarial verify         | `adversarialVerify` (produce once + N skeptics vote) |
+| `.ax/orch/pipeline.ts`        | 3-stage typed pipeline     | `structuredPipeline` (facts→outline→summary)         |
+| `.ax/orch/structured-pipe.ts` | 2-stage typed pipeline     | `structuredPipeline` (message→facts→summary)         |
+| `.ax/orch/example.ts`         | parallel best-effort       | `parallel` + `runNode`, first non-empty reply        |
+
+Every one of these LOADS + RUNS through `run_orch_script` (no invented API — they use only
+the real `ctx`/`prims`).
 
 ---
 
