@@ -12,7 +12,7 @@
 //       the buried fact (registerAuthRoute) comes back — the rlm node-kind works AS a prim.
 //
 // GATED behind AX2_LIVE=1 (costs nothing in normal lint). Run:
-//   AX2_LIVE=1 bun --env-file=.env scripts/workflow-live.test.ts   (or `bun run live:workflow`)
+//   AX2_LIVE=1 bun --env-file=.env scripts/workflow-live.test.ts   (or `bun run live`)
 import { ai, type AxAIService } from "@ax-llm/ax"
 import type { Activity } from "../src/core/activity.ts"
 import { WORKFLOW_TOOLS } from "../src/core/workflow.ts"
@@ -26,7 +26,7 @@ const buildLiveAi = (): AxAIService => {
   const apiKey = process.env.CLOUDFLARE_API_TOKEN
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID
   if (!apiKey || !accountId) {
-    throw new Error("live harness needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in .env (run via `bun run live:workflow`)")
+    throw new Error("live harness needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in .env (run via `bun run live`)")
   }
   const svc = ai({ name: "openai", apiKey, apiURL: `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`, config: { model: MODEL as never } })
   svc.setOptions({ rateLimiter })

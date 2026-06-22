@@ -18,8 +18,7 @@
     "debt": "bun scripts/ponytail-debt.ts",
     "test": "bun scripts/design-check.test.ts && bun scripts/ponytail-debt.test.ts && bun scripts/orch-core.test.ts && bun scripts/orch.test.ts && bun scripts/orch-cost.test.ts && bun scripts/orch-retry.test.ts && bun scripts/orch-route.test.ts && bun scripts/orch-tree-render.test.ts && bun scripts/toolui-diff.test.ts && bun scripts/tui/mock.test.ts",
     "test:tui": "bun scripts/tui/mock.test.ts && bun scripts/tui/smoke.test.ts && bun scripts/tui/focus.test.ts && bun scripts/tui/ime.test.ts && bun scripts/tui/layout.test.ts && bun scripts/tui/node-tree.test.ts && bun scripts/tui/thinking-streaming.test.ts && bun scripts/tui/tool-grouping.test.ts && bun scripts/tui/tool-grouping-steps.test.ts",
-    "live": "AX2_LIVE=1 bun --env-file=.env scripts/orch-live.test.ts",
-    "live:workflow": "AX2_LIVE=1 bun --env-file=.env scripts/workflow-live.test.ts",
+    "live": "AX2_LIVE=1 bun --env-file=.env scripts/workflow-live.test.ts",
     "live:focus": "AX2_FOCUS_LIVE=1 bun scripts/focus-live.test.ts",
     "lint": "bun run check && bun run test && bun run analyze && bun run debt",
     "prepare": "effect-language-service patch"
