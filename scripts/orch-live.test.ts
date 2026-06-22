@@ -16,7 +16,7 @@
 import { ai, type AxAIService, type AxFunction } from "@ax-llm/ax"
 import { ORCH_TOOLS } from "../src/orch-tools.ts"
 import { RLM_TOOLS, runRlm } from "../src/rlm-tool.ts"
-import { MODEL } from "../src/runtime.ts"
+import { MODEL, rateLimiter } from "../src/runtime.ts"
 
 // Build the CF-Kimi AxAIService EXACTLY like src/runtime.ts's `llm` (openai-shaped
 // Cloudflare Workers AI endpoint from .env). A standalone builder — not the shared
@@ -30,12 +30,16 @@ export const buildLiveAi = (): AxAIService => {
       "live harness needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in .env (run via `bun run live`, which passes --env-file=.env)",
     )
   }
-  return ai({
+  const svc = ai({
     name: "openai",
     apiKey,
     apiURL: `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`,
     config: { model: MODEL as never },
   })
+  // Attach the SAME service-level throttle the app uses (agent.ts) so the bounded fan-out
+  // gate exercises the real rate-limited path — concurrent forwards are min-interval spaced.
+  svc.setOptions({ rateLimiter })
+  return svc
 }
 
 // Drive the REAL orchestrate tool (ORCH_TOOLS[0]) — the same AxFunction the model
@@ -72,6 +76,25 @@ export const runDecomposeLive = async (
   const out = await orchestrateTool.func(
     { task, subtasks, strategy: "parallel" },
     { sessionId: "live-decompose", ai: liveAi, abortSignal: new AbortController().signal },
+  )
+  return String(out ?? "")
+}
+
+// (D) BOUNDED FAN-OUT: drive orchestrate with >4 DISTINCT subtasks (here 12) to prove the
+// raised branch cap (4 → 100) runs more than 4 sub-agents AND that bounded concurrency holds
+// — parallelLimit caps in-flight nodes (default ~8) and the service rateLimiter throttles the
+// real CF forwards, so 12 branches complete with real output and NO rate-limit blowup/crash.
+// Each subtask is a deterministic single-word transform so per-branch correctness is checkable.
+export const runFanOutLive = async (
+  subtasks: string[],
+  liveAi: AxAIService = buildLiveAi(),
+  task = "Work the listed subtasks; each sub-agent handles exactly one.",
+): Promise<string> => {
+  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
+  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
+  const out = await orchestrateTool.func(
+    { task, subtasks, strategy: "parallel" },
+    { sessionId: "live-fanout", ai: liveAi, abortSignal: new AbortController().signal },
   )
   return String(out ?? "")
 }
@@ -195,6 +218,46 @@ await (async () => {
   assert(
     expectedHits >= 2,
     `at least 2/3 subtasks produced their specific correct answer (etartsehcro / 6 / SUBTASK), got ${expectedHits}: ${JSON.stringify(decomposeReply.slice(0, 400))}`,
+  )
+
+  // (D) BOUNDED FAN-OUT gate: 12 DISTINCT subtasks (> the OLD cap of 4) → prove the raised
+  // branch cap runs MORE THAN 4 sub-agents, all complete with real output, and bounded
+  // concurrency holds (parallelLimit in-flight cap + service rateLimiter) — no rate-limit
+  // error, no crash. Each subtask is a deterministic single-word transform so we can verify
+  // real per-branch work landed. With strategy 'parallel' the tool returns the numbered
+  // join (#1..#12) of every branch's reply; we split it back and count distinct branches.
+  const fanWords = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet", "kilo", "lima"]
+  const fanSubtasks = fanWords.map((w) => `Uppercase the word '${w}' and reply with ONLY the uppercased word.`)
+  const fanReply = await runFanOutLive(fanSubtasks)
+
+  console.log("─".repeat(60))
+  console.log(`LIVE BOUNDED FAN-OUT REPLY (${fanSubtasks.length} branches, > old cap of 4):`)
+  console.log(fanReply)
+  console.log("─".repeat(60))
+
+  assert(isRealReply(fanReply), `fan-out reply is a real non-empty string (no rate-limit/crash sentinel), got: ${JSON.stringify(fanReply.slice(0, 200))}`)
+  const fanChunks = fanReply
+    .split(/(?=^#\d+:)/m)
+    .map((c) => c.replace(/^#\d+:\s*/, "").trim())
+    .filter((c) => c.length > 0)
+  // MORE THAN 4 branches ran — the core proof the cap was raised past the old 4. Real fan-out
+  // is mildly flaky per-branch, so require a clear majority (>=8 of 12) of branches to land,
+  // which is still strictly > 4 and proves bounded concurrency completed the large fan-out.
+  assert(
+    fanChunks.length > 4,
+    `bounded fan-out ran MORE THAN 4 branches (raised cap), got ${fanChunks.length} branch chunks: ${JSON.stringify(fanReply.slice(0, 300))}`,
+  )
+  assert(
+    fanChunks.length >= 8,
+    `most of the 12 branches completed (>=8), got ${fanChunks.length} — bounded concurrency holds without rate-limit drops`,
+  )
+  // Per-branch correctness: each branch's uppercase answer should appear. Require a strong
+  // majority (>=8/12) so a couple of flaky branches don't red the gate while still proving
+  // real distinct work across >4 concurrent sub-agents.
+  const fanHits = fanWords.filter((w) => new RegExp(`\\b${w.toUpperCase()}\\b`).test(fanReply)).length
+  assert(
+    fanHits >= 8,
+    `at least 8/12 fan-out branches produced their specific uppercased answer, got ${fanHits}: ${JSON.stringify(fanReply.slice(0, 400))}`,
   )
 
   // (C) RLM gate: a LONG context with a buried fact (like the proven /tmp smoke). The

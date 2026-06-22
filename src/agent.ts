@@ -17,7 +17,7 @@ import type { AnySpan } from "effect/Tracer"
 import * as Telemetry from "effect/unstable/ai/Telemetry"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
-import { BASE_PROMPT, limits, llm, MODEL, onEvent } from "./runtime.ts"
+import { BASE_PROMPT, limits, llm, MODEL, onEvent, rateLimiter } from "./runtime.ts"
 import { ORCH_TOOLS } from "./orch-tools.ts"
 import { RLM_TOOLS } from "./rlm-tool.ts"
 
@@ -188,7 +188,11 @@ const captureFetch = (async (input: any, init: any): Promise<Response> => {
 // debug enabled. Custom logger replaces ax's console printer -> no TUI spam.
 // fetch MUST be set in THIS same call: setOptions reassigns every field, so a
 // later bare setOptions would wipe a fetch passed only to ai().
-llm.setOptions({ debug: true, logger: liveLogger, fetch: captureFetch })
+// rateLimiter throttles concurrent forwards at the service level (min-interval, AX2_MAX_RPS)
+// — the second layer under parallelLimit's in-flight cap. MUST ride in THIS same setOptions
+// call: setOptions reassigns every field, so a later bare setOptions would wipe it (same
+// reason fetch is here).
+llm.setOptions({ debug: true, logger: liveLogger, fetch: captureFetch, rateLimiter })
 
 // Metrics -> OTLP /v1/metrics via the PeriodicExportingMetricReader.
 const turnsTotal = Metric.counter("chat_turns_total", { description: "completed chat turns" })

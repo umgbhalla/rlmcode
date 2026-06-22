@@ -3,11 +3,42 @@
 // orch-load.ts / orch-run.ts (the orchestration drivers) all pull the SAME model
 // id, AI service, budget ceilings, node-event sink and usage reader from a module
 // that imports NONE of them — breaking the old agent ⇄ orch-tools static cycle.
-import { ai } from "@ax-llm/ax"
+import { ai, type AxRateLimiterFunction } from "@ax-llm/ax"
 import * as Effect from "effect/Effect"
 import { type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
 
 export const MODEL = "@cf/moonshotai/kimi-k2.7-code"
+
+// SERVICE-LEVEL throttle: a min-interval (token-free) rate limiter attached to the CF-Kimi
+// service so even an unbounded `parallel` fan-out (or many concurrent turns) never fires
+// faster than AX2_MAX_RPS requests/second at the CF API. This is the SECOND throttle layer
+// under parallelLimit (orch-recipes.ts) — parallelLimit caps how many forwards are IN FLIGHT;
+// this caps how FAST they start. minIntervalRateLimiter serializes the start of each forward
+// behind a shared `next-allowed` clock: each reqFunc waits until at least 1/RPS seconds after
+// the previous one began, then runs. AxRateLimiterFunction must return the reqFunc's result
+// (Promise or stream) — we just delay, then call through. Default 12 RPS (sensible for CF
+// Workers AI); AX2_MAX_RPS overrides. Clamped to >= 0.1 so a bad env never divides by zero.
+const MAX_RPS = (() => {
+  const v = Number(process.env.AX2_MAX_RPS ?? 12)
+  return Number.isFinite(v) && v > 0 ? Math.max(0.1, v) : 12
+})()
+const minIntervalRateLimiter = (rps: number): AxRateLimiterFunction => {
+  const interval = 1000 / rps
+  let nextAllowed = 0
+  return async (reqFunc) => {
+    const now = Date.now()
+    const wait = Math.max(0, nextAllowed - now)
+    // Reserve this slot on the shared clock BEFORE awaiting, so concurrent callers each
+    // get a distinct, staggered start time (one forward begins every `interval` ms).
+    nextAllowed = Math.max(now, nextAllowed) + interval
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait))
+    return reqFunc()
+  }
+}
+// The shared limiter instance — attached in agent.ts's setOptions (the ONE setOptions call,
+// since setOptions reassigns every field). Exported so the live harness's standalone service
+// can attach the SAME throttle and the bounded-fan-out gate exercises the real limited path.
+export const rateLimiter: AxRateLimiterFunction = minIntervalRateLimiter(MAX_RPS)
 
 // The capable base system prompt shared by the MAIN agent (agent.ts re-exports it)
 // and every orchestration LEAF (orch-tools.ts leafGen). Lives HERE — the neutral

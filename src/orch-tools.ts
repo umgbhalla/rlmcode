@@ -19,7 +19,11 @@
 //      that did real work is ALWAYS returned, never discarded for crossing it. Only the
 //      HARD ceiling (AX2_ORCH_TOKEN_HARD, a very high runaway backstop) throws
 //      BudgetExhaustedError → a PARTIAL result string. maxSteps is the per-leaf hard stop.
-//   3. BRANCH cap: orchestrate clamps the model's requested branch count to <= 4.
+//   3. BRANCH cap: orchestrate clamps the model's requested branch count to 1..MAX_BRANCHES
+//      (100). The branches are NOT all fired at once — fanOut runs them via parallelLimit(n)
+//      at <= ORCH_CONCURRENCY in flight (the rest QUEUE), so a 100-branch request runs
+//      concurrency-at-a-time, never 100 simultaneous CF hits. The service-level rateLimiter
+//      (runtime.ts) is the second throttle. This keeps the cap high (real scale) yet bounded.
 //   4. abortSignal: extra.abortSignal threads into every LeafOpts, so a cancelled turn
 //      cancels the whole sub-run (ax honors it in forward()).
 //
@@ -31,7 +35,7 @@
 import { ax, AxMemory, type AxAIService, type AxFunction, type AxGen } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import { BASE_PROMPT, limits, llm, onEvent, readUsageOf } from "./runtime.ts"
-import { adversarialVerify, agent, judge, loopUntilDry } from "./orch-recipes.ts"
+import { adversarialVerify, agent, judge, loopUntilDry, MAX_CONCURRENCY, parallelLimit } from "./orch-recipes.ts"
 import { allocate, type Budget, BudgetExhaustedError, type LeafOpts } from "./orch.ts"
 import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
@@ -54,7 +58,19 @@ const ORCH_TOKEN_HARD = Number(process.env.AX2_ORCH_TOKEN_HARD ?? 20_000_000)
 // is fair.
 
 // BRANCH cap — hard upper bound on parallel leaves, regardless of what the model asks.
-const MAX_BRANCHES = 4
+// Raised from 4 to MAX_CONCURRENCY (100) for real fan-out scale: the model's request is
+// clamped to 1..MAX_BRANCHES, but the nodes are FANNED OUT via parallelLimit(nodes,
+// ORCH_CONCURRENCY) so at most ORCH_CONCURRENCY run at once — a 100-branch decompose runs
+// concurrency-at-a-time, the rest queue. So the cap is high (scale) but bounded (safe).
+const MAX_BRANCHES = MAX_CONCURRENCY
+
+// In-flight concurrency for a single orchestrate fan-out — at most this many sub-agent
+// nodes run simultaneously; the remaining requested branches QUEUE behind them
+// (parallelLimit). AX2_ORCH_CONCURRENCY overrides; default 8 (clamped 1..MAX_CONCURRENCY).
+const ORCH_CONCURRENCY = (() => {
+  const v = Number(process.env.AX2_ORCH_CONCURRENCY ?? 8)
+  return Number.isFinite(v) ? Math.min(MAX_CONCURRENCY, Math.max(1, Math.floor(v))) : 8
+})()
 
 const STRATEGIES = ["parallel", "judge", "verify", "best_of_n"] as const
 type Strategy = (typeof STRATEGIES)[number]
@@ -187,12 +203,17 @@ const runOrchestration = async ({
     // shared `task` (parallel-same fallback). subtaskFor keeps the judge/verify message
     // (the overall `task`) separate from per-branch work.
     const subtaskFor = (i: number): string => subtasks[i]?.trim() || task
+    // BOUNDED fan-out: build n worker thunks, run <= ORCH_CONCURRENCY at a time via
+    // parallelLimit (the rest QUEUE) so a large branch count never hits CF all at once.
+    // parallelLimit preserves input order and maps a failed slot to null; we coerce null
+    // → "" and drop empties, exactly like the old Promise.all(.catch("")).filter path.
     const fanOut = (n: number): Promise<string[]> =>
-      Promise.all(
+      parallelLimit(
         Array.from({ length: n }, (_, i) =>
-          worker({ ai, rootId, i, task: subtaskFor(i), persona: PERSONAS[i % PERSONAS.length]!, optsFor, budget }).catch(() => ""),
+          () => worker({ ai, rootId, i, task: subtaskFor(i), persona: PERSONAS[i % PERSONAS.length]!, optsFor, budget }),
         ),
-      ).then((rs) => rs.filter((r) => r.length > 0))
+        ORCH_CONCURRENCY,
+      ).then((rs) => rs.map((r) => r ?? "").filter((r) => r.length > 0))
 
     // parallel: fan out, return the joined replies (no judge/verify).
     if (strategy === "parallel") {
@@ -287,7 +308,7 @@ const runOrchestration = async ({
 const orchestrateTool: AxFunction = {
   name: "orchestrate",
   description:
-    "Decompose a task into DISTINCT subtasks and run each on its OWN parallel sub-agent (each with the file/shell tools) — real division of labour, not redundant attempts. PREFER passing `subtasks`: a list of DIFFERENT, independent pieces of the work (e.g. ['audit src/auth for bugs', 'check the tests cover edge cases', 'review error handling']); branch i works subtasks[i], `branches` follows the list length. If you only pass `task` (no subtasks), every branch runs the SAME task (parallel-same fallback — use only when you genuinely want N redundant attempts, e.g. best_of_n). strategy: 'parallel' (fan out, return all), 'judge' (fan out, pick the best), 'verify' (answer once, skeptics vote), 'best_of_n' (re-run fan-out until stable, then judge). branches caps at 4. Returns the synthesized result. Sub-agents CANNOT themselves orchestrate (one level deep).",
+    "Decompose a task into DISTINCT subtasks and run each on its OWN parallel sub-agent (each with the file/shell tools) — real division of labour, not redundant attempts. PREFER passing `subtasks`: a list of DIFFERENT, independent pieces of the work (e.g. ['audit src/auth for bugs', 'check the tests cover edge cases', 'review error handling']); branch i works subtasks[i], `branches` follows the list length. If you only pass `task` (no subtasks), every branch runs the SAME task (parallel-same fallback — use only when you genuinely want N redundant attempts, e.g. best_of_n). strategy: 'parallel' (fan out, return all), 'judge' (fan out, pick the best), 'verify' (answer once, skeptics vote), 'best_of_n' (re-run fan-out until stable, then judge). branches caps at 100 (at most ~8 run at once; the rest queue). Returns the synthesized result. Sub-agents CANNOT themselves orchestrate (one level deep).",
   parameters: {
     type: "object",
     properties: {
@@ -295,14 +316,14 @@ const orchestrateTool: AxFunction = {
       subtasks: {
         type: "array",
         items: { type: "string" },
-        description: "PREFERRED: a list of DISTINCT, independent subtasks (division of labour). Branch i gets subtasks[i]; the number of branches follows this list (capped at 4). Omit only when you want N redundant attempts at the same task.",
+        description: "PREFERRED: a list of DISTINCT, independent subtasks (division of labour). Branch i gets subtasks[i]; the number of branches follows this list (capped at 100; at most ~8 run at once, the rest queue). Omit only when you want N redundant attempts at the same task.",
       },
       strategy: {
         type: "string",
         enum: ["parallel", "judge", "verify", "best_of_n"],
         description: "how to combine the sub-agents (default 'parallel')",
       },
-      branches: { type: "number", description: "number of parallel sub-agents (1-4, default 2); ignored when subtasks is given (the list length wins)" },
+      branches: { type: "number", description: "number of parallel sub-agents (1-100, default 2; at most ~8 run at once, the rest queue); ignored when subtasks is given (the list length wins)" },
     },
     required: ["task"],
   },

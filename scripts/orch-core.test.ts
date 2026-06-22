@@ -7,7 +7,7 @@
 // asserts the NodeEvent stream and result shapes. This is the first exercise of the
 // orchestration engine off-LLM: it pins the verify-before-accept flow's contract.
 import type { AxAIService, AxGen } from "@ax-llm/ax"
-import { adversarialVerify, agent, type EmitSink } from "../src/orch-recipes.ts"
+import { adversarialVerify, agent, type EmitSink, MAX_CONCURRENCY, parallelLimit } from "../src/orch-recipes.ts"
 import { allocate, BudgetExhaustedError, type LeafOpts, type NodeEvent, parallel, pipeline } from "../src/orch.ts"
 
 let failed = 0
@@ -140,6 +140,59 @@ await (async () => {
     assert(raw.length === 3, `parallel keeps slot count, got ${raw.length}`)
     assert(raw[1] === null, "parallel maps a rejected slot to null")
     assert(raw.filter((r): r is string => r !== null).join("") === "ac", "parallel survivors are a,c")
+  }
+
+  // 5b) parallelLimit(): BOUNDED fan-out — same null-on-failure contract as parallel,
+  // but (a) preserves INPUT ORDER, (b) runs at most `n` thunks concurrently (the rest
+  // QUEUE), (c) clamps n to 1..MAX_CONCURRENCY. We instrument every thunk with a shared
+  // in-flight counter and assert the peak never exceeds n.
+  {
+    // ORDER + FAILURE→null: 6 thunks, the odd indices reject; results stay in input order.
+    const orderRaw = await parallelLimit<number>(
+      Array.from({ length: 6 }, (_, i) => () => (i % 2 === 1 ? Promise.reject(new Error("x")) : Promise.resolve(i))),
+      3,
+    )
+    assert(orderRaw.length === 6, `parallelLimit keeps slot count, got ${orderRaw.length}`)
+    assert(orderRaw.join(",") === "0,,2,,4,", `parallelLimit preserves input order + maps failures to null, got ${JSON.stringify(orderRaw)}`)
+
+    // NEVER MORE THAN n IN FLIGHT: 20 thunks, limit 4 — a shared counter tracks concurrent
+    // executions; the peak must be <= 4. Each thunk yields (await a macrotask) so the pool
+    // is genuinely saturated before any completes.
+    const N = 4
+    let inFlight = 0
+    let peak = 0
+    const slow = (i: number) => async (): Promise<number> => {
+      inFlight++
+      peak = Math.max(peak, inFlight)
+      await new Promise((r) => setTimeout(r, 5))
+      inFlight--
+      return i
+    }
+    const res = await parallelLimit<number>(Array.from({ length: 20 }, (_, i) => slow(i)), N)
+    assert(peak <= N, `parallelLimit never runs more than n=${N} in flight, peak was ${peak}`)
+    assert(peak === N, `parallelLimit saturates the pool to n=${N} (peak ${peak}) — proves it QUEUES the rest`)
+    assert(res.join(",") === Array.from({ length: 20 }, (_, i) => i).join(","), `parallelLimit returns all 20 in input order, got ${JSON.stringify(res)}`)
+
+    // CLAMP: an out-of-range n is clamped to 1..MAX_CONCURRENCY. n=1000 → still serializes
+    // at <= MAX_CONCURRENCY; n=0/NaN falls back to the default. We only assert it does not
+    // exceed the input length and preserves order (the clamp itself is exercised by peak<=n).
+    let highPeak = 0
+    let highInFlight = 0
+    const tracked = (i: number) => async (): Promise<number> => {
+      highInFlight++
+      highPeak = Math.max(highPeak, highInFlight)
+      await new Promise((r) => setTimeout(r, 1))
+      highInFlight--
+      return i
+    }
+    const clamped = await parallelLimit<number>(Array.from({ length: 10 }, (_, i) => tracked(i)), 1000)
+    assert(highPeak <= MAX_CONCURRENCY, `parallelLimit clamps n to <= MAX_CONCURRENCY (${MAX_CONCURRENCY}), peak ${highPeak}`)
+    assert(highPeak <= 10, `with 10 thunks the peak is bounded by the thunk count, got ${highPeak}`)
+    assert(clamped.join(",") === Array.from({ length: 10 }, (_, i) => i).join(","), "parallelLimit (clamped n) preserves order")
+
+    // n<=0 / non-finite falls back to the default (>=1) and still completes every slot in order.
+    const fallback = await parallelLimit<number>(Array.from({ length: 5 }, (_, i) => () => Promise.resolve(i)), 0)
+    assert(fallback.join(",") === "0,1,2,3,4", `parallelLimit with n=0 falls back to a sane default, got ${JSON.stringify(fallback)}`)
   }
 
   // 6) pipeline(): each item flows stage→stage independently (no barrier), values map.

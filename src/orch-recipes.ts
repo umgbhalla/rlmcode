@@ -3,7 +3,47 @@
 // these are reified into orch.ts: the engine stays exactly 5 prims. Promise-native,
 // like the combinators they call; Effect stays at the session boundary.
 import type { AxAIService, AxGen, AxGenIn, AxGenOut } from "@ax-llm/ax"
-import { type Budget, type BudgetUsage, leaf, type LeafOpts, type NodeEvent, parallel } from "./orch.ts"
+import { type Budget, type BudgetUsage, leaf, type LeafOpts, type NodeEvent } from "./orch.ts"
+
+// Hard upper bound on in-flight thunks for parallelLimit — the absolute concurrency
+// ceiling regardless of what a caller (or the model) asks for. A big fan-out (e.g. 100
+// nodes) must NEVER hit CF-Kimi all at once; parallelLimit caps simultaneous forwards
+// at <= n <= MAX_CONCURRENCY and QUEUES the rest. Pairs with the service-level
+// AxRateLimiterFunction (runtime.ts) as the second throttle layer.
+export const MAX_CONCURRENCY = 100
+
+// parallelLimit — BOUNDED fan-out: run at most `n` thunks concurrently, QUEUE the rest,
+// return results in INPUT ORDER (results[i] is thunks[i]'s outcome), and map a failed
+// slot to null — the SAME contract as the core `parallel` prim, just bounded. NOT a 6th
+// core primitive (orch.ts stays exactly 5): a userland helper over Promise plumbing. `n`
+// is clamped to 1..MAX_CONCURRENCY (a non-finite/<=0 n falls back to the default 8). A
+// fixed pool of `n` workers each pulls the next unclaimed index until the queue drains,
+// so order is preserved by writing into results[idx] (not by completion order).
+export const parallelLimit = async <T>(
+  thunks: ReadonlyArray<() => Promise<T>>,
+  n = 8,
+): Promise<Array<T | null>> => {
+  const limit = Number.isFinite(n) ? Math.min(MAX_CONCURRENCY, Math.max(1, Math.floor(n))) : 8
+  const results = new Array<T | null>(thunks.length).fill(null)
+  // Shared cursor: each worker claims the next unclaimed index and advances it. A holder
+  // object (not a bare `let next`) so the analyzer reads cursor.i on both the claim AND
+  // the advance — a bare post-increment `next++` reads as a dead final write to it.
+  const cursor = { i: 0 }
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const idx = cursor.i
+      cursor.i = idx + 1
+      if (idx >= thunks.length) return
+      try {
+        results[idx] = await thunks[idx]!()
+      } catch {
+        results[idx] = null
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, thunks.length) }, () => worker()))
+  return results
+}
 
 // A sink that records a NodeEvent. Promise-native recipes stay Effect-free: the
 // SESSION BOUNDARY (turn() in agent.ts) supplies this, running the real emit()
@@ -86,7 +126,7 @@ export const loopUntilDry = async <T>(
   return prev
 }
 
-// adversarialVerify — produce once, then fan the skeptics out via parallel() (failed
+// adversarialVerify — produce once, then fan the skeptics out via parallelLimit() (failed
 // skeptic → null, dropped), and let `accept` tally the boolean votes.
 // Adopted by orch-run.orchestrate() (skeptics vote on the judged answer).
 export const adversarialVerify = async <T>(
@@ -96,7 +136,10 @@ export const adversarialVerify = async <T>(
     votes.length > 0 && votes.filter(Boolean).length * 2 > votes.length,
 ): Promise<{ value: T; accepted: boolean; votes: ReadonlyArray<boolean> }> => {
   const value = await produce()
-  const raw = await parallel(skeptics.map((s) => () => s(value)))
+  // Bounded skeptic fan-out: at most MAX_CONCURRENCY (here the skeptic count is small,
+  // but using parallelLimit keeps every recipe fan-out site under the same cap as the
+  // orchestrate tool). Same null-on-failure contract as the unbounded parallel.
+  const raw = await parallelLimit(skeptics.map((s) => () => s(value)), skeptics.length)
   const votes = raw.filter((v): v is boolean => v !== null)
   return { value, accepted: accept(votes), votes }
 }
