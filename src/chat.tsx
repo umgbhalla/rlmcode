@@ -28,7 +28,7 @@ const inputKeys = [
 ] as any
 
 type ToolMsg = Extract<Msg, { kind: "tool" }>
-type Turn = { idx: number; user: string; steps: Msg[]; final: string | null; meta?: TurnMeta }
+type Turn = { idx: number; user: string; steps: Msg[]; final: string | null; meta?: TurnMeta | undefined }
 
 const oneLine = (s: string, n = 90) => {
   const t = s.replace(/\s+/g, " ").trim()

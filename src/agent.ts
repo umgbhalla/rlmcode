@@ -196,7 +196,7 @@ const turnsFailed = Metric.counter("chat_turns_failed", { description: "turns th
 const tokensTotal = Metric.counter("chat_tokens_total", { description: "total LLM tokens used" })
 const turnDuration = Metric.timer("chat_turn_duration", { description: "per-turn latency" })
 
-type Usage = { promptTokens?: number; completionTokens?: number; totalTokens?: number }
+type Usage = { promptTokens?: number | undefined; completionTokens?: number | undefined; totalTokens?: number | undefined }
 
 // Token usage off AxProgram.getUsage() (AxGen extends AxProgram) — a real, if
 // lightly-documented, API returning AxProgramUsage[] with .tokens per call. It's
@@ -230,7 +230,7 @@ const readResponseId = (gen: typeof chat): string | undefined => {
   return last?.remoteId ?? undefined
 }
 
-export type TurnResult = { reply: string; tokens?: number; finishReason?: string; budget: boolean }
+export type TurnResult = { reply: string; tokens?: number | undefined; finishReason?: string | undefined; budget: boolean }
 
 // One in-flight AbortController per session (overwritten each turn). abortTurn()
 // lets the UI cancel a running turn: ax honors abortSignal in forward() and

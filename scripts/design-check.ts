@@ -26,6 +26,10 @@ const ENTRY = new Set(["src/chat.tsx", "src/orch.ts", "src/orch-recipes.ts"])
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
 const NEST_BUDGET = 5 // block nesting depth per function
 const PARAM_BUDGET = 6 // parameters per function
+const LINE_BUDGET = 500 // source lines per file
+
+// Existing oversized files grandfathered in. New files must stay under LINE_BUDGET.
+const OVERSIZED_ALLOWLIST = new Set(["src/chat.tsx", "build-viz.ts"])
 
 // Dependencies that duplicate a Bun/modern-JS native. Curated (low false
 // positive) — flags the package, not "you wrote a manual loop".
@@ -92,9 +96,17 @@ const lineOf = (m: any, node: any): number => {
   return lo + 1
 }
 
+const countLines = (source: string): number => source.split(/\r?\n/).length
+
 export const analyze = (a: Analyzer): Finding[] => {
   const out: Finding[] = []
   for (const m of a.modules.values()) {
+    // file-size budget: 1000 lines per source file, with an allow-list for
+    // existing oversized files so the rule only blocks new growth.
+    if (!OVERSIZED_ALLOWLIST.has(m.path)) {
+      const lines = countLines(m.source)
+      if (lines > LINE_BUDGET) out.push({ tag: "shrink", msg: `${m.path}: ${lines} lines (budget ${LINE_BUDGET}). Split the file.` })
+    }
     // dead exports (cross-file). Skip entry roots + type-only (referencesOf undercounts type uses).
     if (!ENTRY.has(m.path)) {
       for (const s of m.symbols) {

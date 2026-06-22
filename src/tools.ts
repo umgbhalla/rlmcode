@@ -25,7 +25,7 @@ const readText = async (path: string) => {
   }
 }
 
-type RgOpts = { pattern: string; output_mode?: "content" | "files_with_matches" | "count"; glob?: string; context?: number; where: string }
+type RgOpts = { pattern: string; output_mode?: "content" | "files_with_matches" | "count"; glob?: string | undefined; context?: number | undefined; where: string }
 const buildRgArgs = ({ pattern, output_mode = "files_with_matches", glob, context, where }: RgOpts): string[] => {
   const args = ["--hidden", "--max-columns", "500"]
   if (output_mode === "files_with_matches") args.push("-l")

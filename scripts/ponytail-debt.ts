@@ -85,7 +85,7 @@ export const harvest = (path: string, text: string): DebtResult => {
 if (import.meta.main) {
   const BUDGET = Number(process.env.LOC_BUDGET ?? 0)
   const staged = process.argv.includes("--staged")
-  const SCAN_DIRS = ["src", "scripts"]
+  const SCAN_DIRS = ["src", "scripts", ".ax/orch"]
   const SCAN_FILES = ["build-viz.ts"]
 
   // As a pre-commit gate, only block on markers in STAGED files, so one agent's

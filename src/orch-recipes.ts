@@ -24,7 +24,7 @@ const noopSink: EmitSink = () => {}
 // genuine runaway (the HARD ceiling) or an explicit freeze() throws BudgetExhaustedError.
 export type AgentNode<I extends AxGenIn, O extends AxGenOut> = {
   nodeId: string
-  parentId?: string
+  parentId?: string | undefined
   gen: AxGen<I, O>
   opts: LeafOpts
   onEvent?: EmitSink

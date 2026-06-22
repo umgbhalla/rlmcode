@@ -42,6 +42,32 @@ Workflow: edit → `bun run check` (tight loop) → when done → `bun run lint`
 Budgets in `scripts/design-check.ts` (CC 18, nest 5, params 6) are tunable; raise only
 with a reason, not to silence a real smell.
 
+## tsconfig discipline
+
+Strict flags are non-negotiable: `strict`, `noUnusedLocals`,
+`noUnusedParameters`, `exactOptionalPropertyTypes`. Do not relax them to silence
+errors; fix the underlying type or add an explicit, locally justified assertion.
+
+## File-size budget
+
+Keep source files under 500 lines. If a file approaches that, split by concern
+(e.g. types, pure helpers, effects, UI) rather than growing it. Tests and
+auto-generated files are exempt. `src/chat.tsx` and `build-viz.ts` are
+grandfathered; new files must stay under the budget.
+
+## Extended ponytail scan
+
+`bun run debt` scans `src/`, `scripts/`, and `.ax/orch/` for `ponytail:`
+markers. Every marker must include an `Upgrade:` line describing the exit
+strategy. Markers without one fail the lint gate.
+
+## Architectural shortcuts and boundaries
+
+Any shortcut, boundary, or "temporary" architectural decision must reference
+either an ADR in `docs/adr/` or a named test that documents the intended
+behavior. If neither exists, write the ADR or test before committing the
+shortcut.
+
 ## Effect best practices
 
 Before writing Effect code, consult `../effect-solutions/packages/website/docs`
