@@ -8,6 +8,7 @@ import * as Tracer from "effect/Tracer"
 import * as Atom from "effect/unstable/reactivity/Atom"
 import { setActivitySink } from "./activity.ts"
 import { turn } from "./agent.ts"
+import { loadAndRunOrch } from "./orch-load.ts"
 import { orchestrate } from "./orch-run.ts"
 import { appRuntime } from "./otel.ts"
 import { sessionsRT } from "./sessions.ts"
@@ -254,6 +255,67 @@ export const orchestrateAtom = appRuntime.fn((message: string, get) =>
     const verdict = res.votes > 0 ? (res.accepted ? "accepted" : "rejected") : ""
     const meta: TurnMeta = {
       model: `${MODEL} · orchestrate(${res.candidates} cand${verdict ? `, ${verdict}` : ""})`,
+      ms: Date.now() - startedAt,
+      budget: false,
+    }
+    patch((m) => [...m, { kind: "agent", text: res.reply, meta }])
+  }),
+)
+
+/**
+ * Load + run a TRUSTED orchestration script (`/run <name>` in chat) from the scripts
+ * dir (.ax/orch/) for the active session. Mirrors orchestrateAtom exactly — same
+ * session root span (one trace per session), same activity sink, the loaded script
+ * forks its own AxMemory per concurrent branch (rt.mem untouched) — but dispatches
+ * loadAndRunOrch() (a runtime import() of the named script) instead of the fixed
+ * demo. The script's nodes render in the SAME OrchTree via the shared emit() path.
+ * `payload` is "<name>" or "<name> <message>" — the rest after the name is the input.
+ */
+export const runScriptAtom = appRuntime.fn((payload: string, get) =>
+  Effect.gen(function* () {
+    const trimmed = payload.trim()
+    const s = get(appAtom)
+    if (trimmed.length === 0 || s.activeId === null) return
+    const id = s.activeId
+    const rt = sessionsRT.get(id)
+    if (rt === undefined) return
+
+    const sp = trimmed.indexOf(" ")
+    const name = sp === -1 ? trimmed : trimmed.slice(0, sp)
+    const message = sp === -1 ? "" : trimmed.slice(sp + 1).trim()
+
+    const patch = (fn: (m: readonly Msg[]) => readonly Msg[]) => {
+      const cur = get(appAtom)
+      get.set(appAtom, {
+        ...cur,
+        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, messages: fn(x.messages) } : x)),
+      })
+    }
+    const orchPatch = (fn: (t: OrchTree) => OrchTree) => {
+      const cur = get(appAtom)
+      get.set(appAtom, {
+        ...cur,
+        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, orch: fn(x.orch ?? { nodes: {}, roots: [] }) } : x)),
+      })
+    }
+
+    patch((m) => [...m, { kind: "you", text: `/run ${trimmed}` }])
+    get.set(busyAtom, true)
+    installSink(patch, orchPatch)
+
+    const startedAt = Date.now()
+    const res = yield* loadAndRunOrch(rt.parent, id, name, message)().pipe(
+      Effect.catchCause((c) => {
+        const e = Cause.squash(c) as { cause?: { message?: string }; message?: string }
+        const raw = e?.cause?.message ?? e?.message ?? String(e)
+        return Effect.succeed({ reply: `⚠ ${raw.split("\n")[0]!.slice(0, 240)}`, detail: undefined })
+      }),
+    )
+
+    setActivitySink(null)
+    get.set(busyAtom, false)
+    const meta: TurnMeta = {
+      model: `${MODEL} · run(${name})`,
       ms: Date.now() - startedAt,
       budget: false,
     }

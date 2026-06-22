@@ -12,7 +12,7 @@ import { createCliRenderer, decodePasteBytes, SyntaxStyle } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { abortTurn, projectDocLoaded } from "./agent.ts"
-import { appAtom, busyAtom, type Msg, newSessionAtom, orchestrateAtom, type OrchNode, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
+import { appAtom, busyAtom, type Msg, newSessionAtom, orchestrateAtom, type OrchNode, type OrchTree, runScriptAtom, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
@@ -46,7 +46,7 @@ const fmtMeta = (m: TurnMeta): string => {
 
 const INDENT = 2 // single source of truth for transcript nesting
 
-const IDLE_HINT = "↑↓ history · tab focus · enter expand · ^o orchestrate · PgUp/PgDn scroll · ← / esc back"
+const IDLE_HINT = "↑↓ history · tab focus · enter expand · ^o orchestrate · /run <script> · PgUp/PgDn scroll · ← / esc back"
 // Right-side status text + tone for the bottom bar (busy/armed/transient note/idle).
 const statusBar = (busy: boolean, armed: boolean, note: string | null): { right: string; tone: string } => {
   if (armed) return { right: "esc again to interrupt", tone: "#f38ba8" }
@@ -333,6 +333,7 @@ function App() {
   const newSession = useAtomSet(newSessionAtom)
   const [, send] = useAtom(sendAtom)
   const [, orchestrate] = useAtom(orchestrateAtom)
+  const [, runScript] = useAtom(runScriptAtom)
   const { width, height } = useTerminalDimensions()
 
   const [text, setText] = useState("") // mirror of textarea content (for empty-detection)
@@ -442,6 +443,14 @@ function App() {
     draftRef.current = ""
     if (t.length === 0) return
     history.push(t)
+    // /run <name> [message] — load+run a TRUSTED orchestration script from .ax/orch/
+    // through loadAndRunOrch (dyn-load), rendering its nodes in the same live tree as
+    // ^o. Distinct from ^o (which runs the fixed demo orchestration).
+    const runMatch = /^\/run\s+(.+)$/.exec(t)
+    if (runMatch) {
+      if (busy) return
+      return void runScript(runMatch[1]!)
+    }
     send(t)
   }
 
