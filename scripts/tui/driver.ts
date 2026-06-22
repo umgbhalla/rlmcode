@@ -84,7 +84,10 @@ export const launchDriver = async (opts: LaunchDriverOptions = {}): Promise<Driv
     },
   })
 
-  const frame = (): Promise<string> => session.screen.text({ settleMs: 0, deadlineMs: 0 } as never).catch(() => session.screen.capture({ allowIncomplete: true, settleMs: 0, deadlineMs: 0 }).then((c) => c.text))
+  // Capture the current frame WITHOUT throwing on an unsettled grid (allowIncomplete) — a
+  // probe read, not a stability wait; callers gate on content via waitFor.
+  const frame = (): Promise<string> =>
+    session.screen.capture({ allowIncomplete: true, settleMs: 0, deadlineMs: 0 }).then((c) => c.text)
 
   const waitFor: Driver["waitFor"] = async (predicate, o = {}) => {
     const snap = await session.screen.waitUntil((s) => predicate(s.text), { timeoutMs: o.timeoutMs ?? 8000 }).catch((e) => {

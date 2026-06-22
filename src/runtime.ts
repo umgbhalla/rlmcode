@@ -3,7 +3,7 @@
 // orch-load.ts / orch-run.ts (the orchestration drivers) all pull the SAME model
 // id, AI service, budget ceilings, node-event sink and usage reader from a module
 // that imports NONE of them — breaking the old agent ⇄ rlm-workflow static cycle.
-import { ai, type AxRateLimiterFunction } from "@ax-llm/ax"
+import { ai, type AxAIService, type AxRateLimiterFunction } from "@ax-llm/ax"
 import * as Effect from "effect/Effect"
 import { type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
 import { makeMockAI } from "./mock-ai.ts"
@@ -81,8 +81,8 @@ const TOKEN_BUDGET = Number(process.env.AX2_TOKEN_BUDGET ?? 2_000_000)
 // service for the canned mock AI (mock-ai.ts — zero network). Without this, `ai({…})`
 // throws "OpenAI API key not set" at module load when the CF env is absent, so a headless
 // harness (no .env) can't even boot chat.tsx. Unset ⇒ the unchanged CF construction.
-export const llm = process.env.AX2_MOCK === "1"
-  ? (makeMockAI() as unknown as ReturnType<typeof ai>)
+export const llm: AxAIService = process.env.AX2_MOCK === "1"
+  ? makeMockAI()
   : ai({
       name: "openai",
       apiKey: process.env.CLOUDFLARE_API_TOKEN!,

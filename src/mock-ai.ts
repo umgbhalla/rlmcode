@@ -34,19 +34,34 @@ const MOCK_ORCH_TOOL = {
   type: "function" as const,
   function: { name: "mock_orch", params: JSON.stringify({}) },
 }
-const wantsOrch = (req: Readonly<AxChatRequest<unknown>>): boolean =>
-  req.chatPrompt.some((m) => m.role === "user" && typeof m.content === "string" && /orchestrate/i.test(m.content))
+// Route on the CURRENT turn's user message (the LAST user turn), not "any historical user
+// message" — a shared session memory retains prior turns, so matching any of them would make
+// every later turn orchestrate once one did. The last user message is this turn's request.
+const wantsOrch = (req: Readonly<AxChatRequest<unknown>>): boolean => {
+  const users = req.chatPrompt.filter((m) => m.role === "user")
+  const last = users[users.length - 1]
+  return last !== undefined && typeof last.content === "string" && /orchestrate/i.test(last.content)
+}
 
 // Fixed usage triple (prompt/completion/total + reasoning) so token meta + cost-meter
 // read deterministic numbers. reasoningTokens drives the THINKING attribution path.
 const MOCK_TOKENS = { promptTokens: 100, completionTokens: 40, totalTokens: 140, reasoningTokens: 25 }
 
-// The SCRIPTED chat() — ax calls chat() once per step: a turn with a prior tool result in
-// the prompt returns the final content + thought; otherwise it returns a functionCalls
-// step (ax executes the tool, appends the result to mem, calls again). Stateful by request
-// shape, not a module counter — deterministic and re-entrant (a fresh memory restarts it).
+// The SCRIPTED chat() — ax calls chat() once per step: a turn with a tool result for THIS
+// turn in the prompt returns the final content + thought; otherwise it returns a
+// functionCalls step (ax executes the tool, appends the result to mem, calls again).
+// Stateful by request SHAPE, not a module counter — deterministic and re-entrant.
+//
+// MULTI-TURN CORRECTNESS: a shared session memory (AxMemory) retains PRIOR turns' function
+// results, so "is there any function message?" wrongly fires on every later turn's FIRST
+// call — the mock would skip the tool step and never reach mock_orch. The right signal is a
+// function result for the CURRENT turn: a function message AFTER the LAST user message.
+const hasCurrentTurnToolResult = (req: Readonly<AxChatRequest<unknown>>): boolean => {
+  const lastUser = req.chatPrompt.map((m) => m.role).lastIndexOf("user")
+  return req.chatPrompt.slice(lastUser + 1).some((m) => m.role === "function")
+}
 const scriptedChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResponse> => {
-  const hasToolResult = req.chatPrompt.some((m) => m.role === "function")
+  const hasToolResult = hasCurrentTurnToolResult(req)
   const tool = wantsOrch(req) ? MOCK_ORCH_TOOL : MOCK_TOOL
   const result = hasToolResult
     ? { index: 0, content: MOCK_REPLY, thought: MOCK_THOUGHT, finishReason: "stop" as const }

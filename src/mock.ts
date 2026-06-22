@@ -30,11 +30,25 @@ export const MOCK_NODES: readonly NodeEvent[] = [
   { type: "done", nodeId: "judge", result: "picked auth", tokens: 500 },
 ]
 
+// CANNED PER-NODE TOOL FEED — a read/glob/grep CLUSTER plus one ERRORED tool, all owned by
+// the still-running `research` node (a running node stays expanded, so its owned tools show).
+// Routed by nodeId, these exercise the PER-NODE TOOL ROUTING (atoms patchNodeTools) + the
+// ToolView render under a node: the cluster lands as grouped tool rows, the errored one as a
+// red ✗ card. Each tool is a call (kind:"tool") then a result (kind:"result"); the error
+// carries isError:true so ToolView marks it ✗ red. NOT in production — replayed only here.
+const MOCK_NODE_TOOLS: ReadonlyArray<{ id: string; name: string; args: string; result: string; isError: boolean }> = [
+  { id: "mt_read", name: "read_file", args: JSON.stringify({ path: "src/auth.ts" }), result: "120 lines", isError: false },
+  { id: "mt_glob", name: "glob", args: JSON.stringify({ pattern: "src/**/*.ts" }), result: "found 18 files", isError: false },
+  { id: "mt_grep", name: "grep", args: JSON.stringify({ pattern: "login" }), result: "12 matches", isError: false },
+  { id: "mt_err", name: "bash", args: JSON.stringify({ command: "missing-bin" }), result: "exit 127: command not found", isError: true },
+]
+
 // Replay the canned NodeEvent feed through the REAL activity bus (kind:"node"). The atoms
 // sink (installed for the duration of the turn) folds these into the live OrchTree exactly
 // as real orch.emit() events would, so flatten() draws the velocity tree in the live UI.
 // Mapped to the bus shape: start carries parentId+detail(phase); done carries tokens; error
-// carries the cause as detail. Pure replay — no forward(), no network.
+// carries the cause as detail. Then the per-node tool cluster + error card replay under the
+// running `research` node. Pure replay — no forward(), no network.
 const feedMockNodes = (): void => {
   for (const e of MOCK_NODES) {
     if (e.type === "start")
@@ -42,6 +56,10 @@ const feedMockNodes = (): void => {
     else if (e.type === "done")
       emitActivity({ kind: "node", nodeId: e.nodeId, event: "done", detail: String(e.result), tokens: e.tokens })
     else if (e.type === "error") emitActivity({ kind: "node", nodeId: e.nodeId, event: "error", detail: String(e.cause) })
+  }
+  for (const t of MOCK_NODE_TOOLS) {
+    emitActivity({ kind: "tool", id: t.id, name: t.name, args: t.args, nodeId: "research" })
+    emitActivity({ kind: "result", id: t.id, result: t.result, isError: t.isError, nodeId: "research" })
   }
 }
 
