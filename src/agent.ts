@@ -43,30 +43,28 @@ export { BASE_PROMPT }
 // ORCH_TOOLS). A node gen is built from BASE_PROMPT (above) WITHOUT this overlay: it has
 // no orchestration tools, so telling it about orchestrate/run_orch_script would be a lie.
 const ORCH_OVERLAY = [
-  // Orchestration: this agent can run deterministic multi-node flows, not just single replies.
-  "Orchestration: beyond a single reply you can drive deterministic multi-node runs whose nodes render live in a tree.",
-  "SELF-orchestrate via tools: `orchestrate(task, subtasks?, strategy, branches?)` fans out sub-agents (each with the file tools only). USE it when a",
-  "task splits into independent parts: PASS `subtasks` — a list of DIFFERENT, independent pieces (division of labour) — and branch i works subtasks[i]",
-  "(e.g. orchestrate({ subtasks: ['audit auth.ts for bugs', 'check tests cover edge cases', 'review error handling'] })). Only omit subtasks and pass",
-  "`task` alone when you genuinely want N REDUNDANT attempts at the SAME task (e.g. with 'best_of_n'). strategy 'parallel' returns all, 'judge' picks the best of N,",
-  "'verify' answers once then skeptics vote accept/reject, 'best_of_n' re-runs until stable then judges. `run_orch_script(name, message)`",
-  "loads + runs a saved `.ax/orch/<name>` script — USE it after write_file-ing a custom `.ax/orch/<name>.ts` flow. BOUNDS (self-limit): sub-agent",
-  "nodes run with file tools only and canNOT themselves orchestrate (one level deep), a token budget caps each run, branches cap at 100 (at most ~8 run at once, the rest queue). Decompose at the top.",
-  "User-invoked triggers: `^o` runs a built-in fan-out over the current input; `/run <name> [message]` loads + runs a saved script.",
-  "To author a CUSTOM flow, write_file a script to `.ax/orch/<name>.ts` (trusted dir; paths escaping it are rejected) exporting",
-  "`orchestrate(ctx, prims)`, then tell the user to `/run <name>`. prims = { node, parallel, pipeline, emit, allocate, gen } plus recipes",
-  "{ runNode, judge, loopUntilDry, adversarialVerify, structuredPipeline }; ctx = { message, ai, budget, onEvent, optsFor(), usageOf }. The unit is a NODE: node(gen, opts) calls ax; runNode(spec, ai, input) runs ONE node. A dynamic orch script needs",
-  "NO runtime imports — gen() is an ambient prim factory that builds nodes inline: gen(signature, description?) returns an AxGen for node().",
-  "For a TYPED multi-step transform (each step's structured object feeds the next), use `structuredPipeline(stages, ai, input, onEvent, rootId)` where each",
-  "stage is { gen, opts } and the gen's signature carries real types (e.g. gen('text:string -> facts:json') then gen('facts:json -> summary:string')) —",
-  "stages thread STRUCTURED objects, not strings. See `.ax/orch/structured-pipe.ts`.",
-  "Compose ONLY through prims, so the engine core stays the 5 primitives. RULE: never share a mutating memory across concurrent branches — call",
-  "`ctx.optsFor()` for a fresh forked memory per parallel node. See `.ax/orch/example.ts` for the canonical pattern.",
-  // RLM: the right tool for a BIG context blob that won't fit the prompt window.
-  "Explore a LARGE context blob with `run_rlm(context, query)`: a Recursive Language Model loads the blob into a code runtime (NOT the prompt) and a",
-  "sub-LM writes JavaScript (slice/regex/sub-queries) to mine it, returning an answer + evidence. PREFER run_rlm over orchestrate when the context is",
-  "too big to fit the window and you need to FIND or SUMMARISE something buried inside (a long file, a pasted log, a whole concatenated module). The",
-  "RLM is single-level too: it cannot orchestrate or call file tools.",
+  // ── ORCHESTRATION GUIDANCE ────────────────────────────────────────────────────────
+  // Beyond a single reply you can drive deterministic multi-node runs (nodes render live
+  // in a tree). Three tools: orchestrate (fan out sub-agents), run_orch_script (run a
+  // saved .ax/orch/<name>.ts flow), run_rlm (mine a big blob in a code runtime). The unit
+  // everywhere is a NODE.
+  "## Orchestration",
+  "You can run deterministic multi-node flows, not just single replies. Tools: `orchestrate` (fan out sub-agents over distinct subtasks), `run_orch_script` (run a saved `.ax/orch/<name>.ts` flow), `run_rlm` (mine a huge blob in a code runtime). The unit is always a NODE.",
+  // WHEN to orchestrate.
+  "WHEN to orchestrate: (1) the task SPLITS into independent parts that don't depend on each other's output — fan them out (`orchestrate` with distinct `subtasks`); (2) you want the BEST of N attempts or to VERIFY an answer — use strategy `judge`/`best_of_n` (best-of-N) or `verify` (skeptics vote); (3) a BIG blob (long file, pasted log, whole concatenated module) won't fit the window — use `run_rlm`.",
+  // WHEN NOT.
+  "WHEN NOT: a trivial or strictly sequential task — DO IT DIRECTLY with your own file/shell tools. Do NOT fan out a one-liner. Do NOT spin up a node to read one file or run one command. Sequential steps (read → edit → test) are ONE node's task (yours): orchestration is for INDEPENDENT work or N-way redundancy, never to wrap a single linear chore.",
+  // The strategy menu — one line each.
+  "STRATEGY MENU (orchestrate's `strategy`, default `parallel`): `parallel` = fan DISTINCT subtasks, return all (division of labour); `judge` = run N, one judge picks the single best verbatim; `verify` = answer once, N skeptics vote accept/reject; `best_of_n` = re-run the fan-out until the survivor count is stable, then judge; `plan` = a planner node auto-decomposes `task` into distinct subtasks, then fans out one node per subtask.",
+  "Examples: `orchestrate({ subtasks: ['audit src/auth for bugs', 'check tests cover edge cases', 'review error handling'] })` (parallel division of labour); `orchestrate({ task: 'design a rate limiter', strategy: 'judge', branches: 3 })` (best of 3); `orchestrate({ task: 'is this migration safe?', strategy: 'verify', branches: 4 })` (answer + 3 skeptics); `orchestrate({ task: 'refactor the auth module', strategy: 'plan' })` (auto-decompose then fan out).",
+  // The hard rules.
+  "HARD RULES: (1) give DISTINCT subtasks, never N copies of the same string — pass `subtasks` for division of labour; only omit them (and pass `task` alone) when you genuinely want N REDUNDANT attempts (e.g. `best_of_n`). (2) In a custom script, FORK memory per branch — call `ctx.optsFor()` for a fresh AxMemory per parallel node; NEVER share a mutating memory across concurrent branches. (3) Stay BOUNDED — `branches` caps at 100 (~8 run at once, the rest queue); don't request more nodes than the task has distinct parts. (4) Pick MODEL + THINKING per node — pass `model` ('kimi' default | 'glm') and `effort` ('low'..'max') to route a node to a stronger/cheaper engine. (5) Sub-agent nodes carry the file/shell tools ONLY and canNOT themselves orchestrate (one level deep). (6) An RLM actor writes PURE JS in a sandbox — NEVER `require`/`import`; the data is already a runtime variable.",
+  // Custom scripts (run_orch_script).
+  "CUSTOM FLOWS: for a reusable or shaped flow (typed pipeline, loop-until-dry, gated verify), write_file a script to `.ax/orch/<name>.ts` (trusted dir; escaping paths are rejected) exporting `orchestrate(ctx, prims)`, then call `run_orch_script({ name })`. A script needs NO runtime imports — `gen(signature, description?)` is an ambient factory that builds nodes inline. prims = { node, parallel, pipeline, emit, allocate (5 core), gen (factory), runNode, judge, loopUntilDry, adversarialVerify, structuredPipeline (basic recipes), untilGate, verifyHarden, verifiedStep (verified-step: produce→gate→harden, budget-bounded), journaledNode, loadJournal, saveJournal (opt-in crash-resume, OFF by default), resolveModel, MODELS (model routing) }; ctx = { message, ai, budget, onEvent, optsFor(choice?), usageOf }. See `.ax/orch/GUIDE.md` for the full prims/recipes reference. The unit is a NODE: `node(gen, opts)` calls ax; `runNode(spec, ai, input)` runs ONE node bracketed by lifecycle events. For a TYPED multi-step transform use `structuredPipeline(stages, ai, input, onEvent, rootId)` where each gen carries real types (e.g. `gen('text:string -> facts:json')` then `gen('facts:json -> summary:string')`) — stages thread STRUCTURED objects, not strings.",
+  // Pointer to the full doc.
+  "For full runnable templates, anti-patterns, and the prims/recipes reference, see `.ax/orch/GUIDE.md` (and `.ax/orch/example.ts`, `.ax/orch/structured-pipe.ts`).",
+  // User-invoked triggers.
+  "User triggers: `^o` runs a built-in fan-out over the current input; `/run <name> [message]` loads + runs a saved script.",
 ].join(" ")
 
 // Like Claude Code loading CLAUDE.md: if launched in a repo with project

@@ -176,7 +176,10 @@ export const runRlm = async (
 const runRlmTool: AxFunction = {
   name: "run_rlm",
   description:
-    "Explore a LARGE blob of context (a long file, a pasted log, a whole concatenated module) with a Recursive Language Model: the context is loaded into a code runtime (NOT the prompt) and a sub-LM writes JavaScript (slice / regex / sub-queries) to mine it, then answers your query with evidence. Use this — NOT orchestrate — when the context is too big to fit the prompt window and you need to FIND or SUMMARISE something buried inside it. Params: context (the big text blob), query (what to find/answer). Returns the answer plus supporting evidence. Single level: the RLM cannot itself orchestrate or call file tools.",
+    "Mine a LARGE blob of context (a long file, a pasted log, a whole concatenated module) with a Recursive Language Model: the blob is loaded into a code runtime (NOT the prompt) and a sub-LM writes JavaScript (slice / regex / sub-queries / llmQuery) to explore it, then answers your query with evidence. WHEN TO USE: the context is too big to fit the prompt window and you need to FIND or SUMMARISE something buried inside it — prefer this over `orchestrate` (a fan-out node would pull the whole blob into its prompt; the RLM keeps it in the runtime). WHEN NOT: a small context that already fits — just read/reason over it directly. " +
+    "EXAMPLE: run_rlm({ context: <the entire 12k-line bundle.js>, query: 'which function registers the /auth route and what middleware does it apply?' }) — the actor greps/slices the blob in JS and returns the answer + the matching line ranges as evidence. " +
+    "PARAMS: context (the big text blob, kept out of the prompt, loaded into the code runtime); query (what to find or answer). Returns the answer plus supporting evidence. " +
+    "Single level: the RLM cannot itself orchestrate or call file tools, and its actor writes PURE sandboxed JS — NEVER require/import (the data is already a runtime variable). See .ax/orch/GUIDE.md for when to pick run_rlm vs orchestrate.",
   parameters: {
     type: "object",
     properties: {
