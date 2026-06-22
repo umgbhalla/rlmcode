@@ -792,7 +792,11 @@ function App() {
           </box>
         )}
       </scrollbox>
-      <box style={{ paddingLeft: 1, paddingRight: 1, paddingTop: 1, width: "100%" }}>
+      {/* COMPOSER + STATUS are flexShrink:0 — they ALWAYS reserve their height so the
+          scrollbox (flexGrow:1) absorbs the slack and CLIPS its transcript instead of
+          bleeding over the input. Without this the transcript text overlapped the input
+          box when the transcript filled or the textarea grew (maxHeight 8). */}
+      <box style={{ paddingLeft: 1, paddingRight: 1, paddingTop: 1, width: "100%", flexShrink: 0 }}>
         <box
           border={["left"]}
           borderColor={armed ? "#f38ba8" : busy ? "#ffd166" : "#66aaff"}
@@ -815,7 +819,7 @@ function App() {
           />
         </box>
       </box>
-      <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1, paddingBottom: 1 }}>
+      <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1, paddingBottom: 1, flexShrink: 0 }}>
         <text fg="#7f849c">{statusLeft}</text>
         <text fg={status.tone}>{status.right}</text>
       </box>
