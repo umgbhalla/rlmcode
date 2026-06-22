@@ -100,6 +100,33 @@ function toTurns(messages: readonly Msg[]): Turn[] {
   return turns
 }
 
+// TOOL GROUPING (P1): a run of consecutive read/glob/grep ("explore") tool steps collapses
+// into ONE "explored N" row instead of N near-identical lines (the flat-rendering fix). A lone
+// explore tool, an error, or any other tool renders normally. Presentational only — Msg is
+// unchanged; this groups at render time.
+const EXPLORE_TOOLS = new Set(["read_file", "glob", "grep"])
+type StepItem = { readonly kind: "one"; readonly m: Msg } | { readonly kind: "group"; readonly tools: ToolMsg[] }
+const groupSteps = (steps: Msg[]): StepItem[] => {
+  const out: StepItem[] = []
+  for (const s of steps) {
+    if (s.kind === "tool" && EXPLORE_TOOLS.has(s.name) && s.status !== "error") {
+      const last = out[out.length - 1]
+      if (last?.kind === "group") last.tools.push(s)
+      else out.push({ kind: "group", tools: [s] })
+    } else out.push({ kind: "one", m: s })
+  }
+  // a "group" of one isn't worth collapsing — unwrap so a single read still renders in full.
+  return out.map((it) => (it.kind === "group" && it.tools.length === 1 ? { kind: "one", m: it.tools[0]! } : it))
+}
+// One-line summary for a collapsed explore group: "explored 5 (3 read · 2 grep)".
+const groupSummary = (tools: readonly ToolMsg[]): string => {
+  const by: Record<string, number> = {}
+  for (const t of tools) by[t.name] = (by[t.name] ?? 0) + 1
+  const verb: Record<string, string> = { read_file: "read", glob: "glob", grep: "grep" }
+  const parts = Object.entries(by).map(([n, c]) => `${c} ${verb[n] ?? n}`)
+  return `explored ${tools.length} (${parts.join(" · ")})`
+}
+
 const toolsUsed = (steps: Msg[]) =>
   [...new Set(steps.filter((s): s is ToolMsg => s.kind === "tool").map((s) => toolLabel(s.name, s.args).split("(")[0]!))].join(", ")
 
@@ -242,21 +269,23 @@ function TurnView({
           </text>
           {expanded && (
             <box flexDirection="column" style={{ paddingLeft: INDENT }}>
-              {t.steps.map((s, i) =>
-                s.kind === "tool" ? (
-                  <ToolView
-                    key={s.id}
-                    m={s}
-                    expanded={expTools.has(s.id)}
-                    focused={focusedKey === `tool:${s.id}`}
-                    cols={cols}
-                    frame={frame}
-                    onToggle={() => onToggleTool(s.id)}
-                  />
-                ) : (
-                  <text key={i} fg="#9399b2">{`· ${oneLine(s.text)}`}</text>
-                ),
-              )}
+              {groupSteps(t.steps).map((it, i) => {
+                if (it.kind === "group") return <text key={`g${i}`} fg="#6c7086">{`⊙ ${groupSummary(it.tools)}`}</text>
+                const s = it.m
+                if (s.kind === "tool")
+                  return (
+                    <ToolView
+                      key={s.id}
+                      m={s}
+                      expanded={expTools.has(s.id)}
+                      focused={focusedKey === `tool:${s.id}`}
+                      cols={cols}
+                      frame={frame}
+                      onToggle={() => onToggleTool(s.id)}
+                    />
+                  )
+                return <text key={i} fg="#9399b2">{`· ${oneLine(s.text)}`}</text>
+              })}
             </box>
           )}
         </box>
