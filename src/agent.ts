@@ -6,7 +6,8 @@
 import { ai, ax, type AxLoggerFunction, AxMemory } from "@ax-llm/ax"
 import { existsSync, readFileSync } from "node:fs"
 import { emitActivity } from "./activity.ts"
-import { leaf } from "./orch.ts"
+import { emit, type NodeEvent } from "./orch.ts"
+import { agent as agentNode } from "./orch-recipes.ts"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import * as Cause from "effect/Cause"
@@ -193,6 +194,13 @@ const readResponseId = (gen: typeof chat): string | undefined => {
   return last?.remoteId ?? undefined
 }
 
+// Node-lifecycle sink handed to the agent() recipe. emit() is Effect<void> (an
+// Effect.sync body: bus push + active-OTel-span addEvent). We run it synchronously
+// at the session boundary — the recipe stays Promise-native and never touches
+// Effect. agentNode() runs inside otelContext.with(traceContext), so getActiveSpan()
+// inside emit() resolves to the live chat.turn span (not a forked/empty context).
+const onEvent = (event: NodeEvent): void => Effect.runSync(emit(event))
+
 export type TurnResult = { reply: string; tokens?: number; finishReason?: string; budget: boolean }
 
 // One in-flight AbortController per session (overwritten each turn). abortTurn()
@@ -249,9 +257,18 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
         Effect.tryPromise({
           try: () =>
             otelContext.with(traceContext, () =>
-              // leaf() is the ONLY thing that calls ax.forward — behavior-identical
-              // wrapper threading the exact turn opts bag through.
-              leaf(gen, { mem, sessionId, tracer, traceContext, maxSteps: MAX_STEPS, stream: false, abortSignal: aborter.signal })(llm, { message: msg }),
+              // agent() brackets the leaf in start→done|error node events; the opts
+              // bag is threaded through unchanged (behavior-identical to a bare leaf).
+              agentNode(
+                {
+                  nodeId: `turn:${sessionId}`,
+                  gen,
+                  opts: { mem, sessionId, tracer, traceContext, maxSteps: MAX_STEPS, stream: false, abortSignal: aborter.signal },
+                  onEvent,
+                },
+                llm,
+                { message: msg },
+              ),
             ),
           catch: (e) => new ChatError(e),
         })
