@@ -5,16 +5,59 @@ Bun + TypeScript. Effect v4 core, opentui (React) UI, real OpenTelemetry → loc
 
 ## Files (`src/`)
 
-    otel.ts      NodeSdk 3-signal (traces/logs/metrics) → motel; global OTel
-                 context manager; re-surfaced tracer provider; appRuntime (Atom.runtime)
-    agent.ts     ax + tools; turn() = Effect.fn span (chat.turn → ax gen_ai);
-                 native logger → activity bus; budget-exhaustion recovery; AGENTS/CLAUDE.md load
-    tools.ts     AxFunctions: bash, read_file, write_file, edit_file, glob, grep (unsandboxed)
-    toolui.ts    per-tool label / summary / preview (Claude-Code style)
-    activity.ts  live activity bus (ax logger → UI)
-    atoms.ts     app state + session actions (appRuntime.fn); Msg = you | agent | tool
-    sessions.ts  per-session AxMemory + root span (not serializable → module Map)
+The tree is split into three layers. The **only** importable module across the layer
+boundary is the SDK barrel `src/core/sdk.ts` — `package.json` `"exports"` points `.` at
+it, and the `crosscore` analyze rule fails any module *outside* `src/core/` and the
+`src/app/` composition layer that deep-imports a non-barrel `src/core/*` module (type-only
+imports count). The TUI consumes the engine ONLY through the barrel + the app handle.
+
+### `src/core/` — the engine (Effect-backed, never imported directly except via the barrel)
+
+    sdk.ts       PUBLIC SDK BARREL (≤300 lines, zero logic): createAgent(options) → Agent
+                 (runTurn async-gen / abort / closeSession / info) + the serializable public
+                 types (TurnEvent, TurnResult, TurnOptions, StopReason, TokenUsage, TurnError,
+                 AgentOptions/Info, LogLine) + the AxAIService/AxFunction type re-exports.
+                 Effect / Cause / AxMemory / AxSpan / ChatError / OtelTracerProvider NEVER cross it.
+    run.ts       makeRunTurn(driver): drives turn() on the app runtime and yields the FLAT
+                 serializable TurnEvent stream (terminal {type:'reply'} always last) +
+                 normalizes the internal result into the public TurnResult.
+    agent.ts     createAgent factory (pure DI: inject AxAIService + model + tools/limits);
+                 turn() = Effect.fn span (chat.turn → ax gen_ai); per-turn live logger;
+                 budget-exhaustion recovery; abortTurn. Internal readUsage feeds usage.* (ponytail).
+    sessions.ts  per-session AxMemory + root span (not serializable → module Map); deleteSession
+    activity.ts  internal Activity union + the PER-TURN live-logger factories (makeLiveLogger /
+                 makeNodeLogger over a per-turn `emit` closure). No global sink.
+    tools.ts     AxFunctions: bash, read_file, write_file, edit_file, glob, grep (unsandboxed).
+                 BASE_TOOLS (file/shell) vs CHAT_TOOLS (+ the `workflow` self-orchestration tool)
+    orch*.ts     orchestration: node tree, recipes, resilience/retry, cost-meter spans
+    workflow*.ts the in-process `workflow` self-orchestration tool + its primitives
+    rlm-node.ts  single-level RLM node (distiller→executor) bridged into the node-event tree
+    runtime.ts   per-session turn emit/context Map; generic getUsage probe for orch budgeting
+    mock-ai.ts   canned AxAIService + mock_orch tool (off in prod; `AX2_MOCK=1`)
+    models.ts    model ids + limits
+    otel.ts      (`src/otel.ts`) NodeSdk 3-signal → motel; global OTel context; appRuntime
+
+### `src/app/` — composition layer (the only non-core place allowed to deep-import core)
+
+    default-agent.ts  owns defaultAgent + the AX2_MOCK env branch + CF `llm` construction.
+                      Exports the app's pre-wired surface: runTurn (= makeRunTurn(defaultAgent)),
+                      abortTurn, projectDocLoaded, sessionsRT/deleteSession. This is where env
+                      coupling lives — SDK consumers inject their OWN AxAIService instead.
+
+### `src/tui/` — the opentui app (consumes the engine via the barrel + the app handle)
+
+    atoms.ts     app state + session actions; reduces the runTurn TurnEvent stream into appState
+                 (incl. node events → OrchTree). Imports the agent surface from src/app and the
+                 public types from src/core/sdk.ts — the ONLY ../core/* import is the barrel.
     chat.tsx     opentui UI: session list, collapsible transcript, per-tool views, markdown
+    toolui.ts    per-tool label / summary / preview (Claude-Code style) — pure presentation
+    orch-tree.ts OrchTree render model; history.ts / clipboard.ts / theme.ts UI helpers
+
+### `examples/` — the SDK regression gate
+
+    sdk-usage.ts  barrel-ONLY headless consumer (imports only ../src/core/sdk.ts + @ax-llm/ax):
+                  createAgent over a mock AxAIService, for-await runTurn, assert reply/usage/
+                  stopReason. Run via `bun run sdk:smoke` — zero network, the SDK seam regression gate.
 
 ## Run
 
@@ -22,11 +65,12 @@ Bun + TypeScript. Effect v4 core, opentui (React) UI, real OpenTelemetry → loc
 
     bun run motel        # local motel ingest (127.0.0.1:27686) — NOT npm @kitlangton/motel (broken)
     bun run motel:tui    # motel TUI
-    bun run chat         # the agent
+    bun run chat         # the agent (src/tui/chat.tsx)
     bun run emit         # headless trace smoke
-    bun run lint         # check + analyze + debt + test (run before commit)
+    bun run sdk:smoke    # barrel-only SDK consumer (examples/sdk-usage.ts) — the SDK seam gate
+    bun run lint         # check + test + analyze + debt (run before commit)
     bun run check        # tsc --noEmit + Effect LS (Effect anti-patterns)
-    bun run analyze      # yuku semantic design analysis
+    bun run analyze      # yuku semantic design analysis (incl. the crosscore boundary rule)
     bun run debt         # ponytail debt ledger
     bun run test:tui     # HEADLESS TUI GATE — see below (needs the termctrl binary + a PTY)
 
@@ -34,7 +78,7 @@ Bun + TypeScript. Effect v4 core, opentui (React) UI, real OpenTelemetry → loc
 
 | command | what it checks | run it when |
 |---|---|---|
-| `bun run check` | `tsc` + `@effect/language-service` — types + Effect anti-patterns (floating effects, missing service deps, error-channel bugs) | after **any** edit to `.ts`/`.tsx`, especially Effect code (`agent.ts`, `atoms.ts`, `otel.ts`, `sessions.ts`). The fast inner loop. |
+| `bun run check` | `tsc` + `@effect/language-service` — types + Effect anti-patterns (floating effects, missing service deps, error-channel bugs) | after **any** edit to `.ts`/`.tsx`, especially Effect code (`core/agent.ts`, `core/run.ts`, `tui/atoms.ts`, `otel.ts`, `core/sessions.ts`). The fast inner loop. |
 | `bun run analyze` | `yuku-analyzer` — dead exports, unused imports, circular deps, per-function cyclomatic/nesting/param budgets | after adding/removing exports or modules, or when a function grows branchy. Before committing structural changes. |
 | `bun run debt` | `ponytail:` marker ledger — fails on any marker with no `Upgrade:` line | after adding a `ponytail:` shortcut comment; it forces every shortcut to name its upgrade path. |
 | `bun run lint` | `check` + `analyze` + `debt` (all of the above) | **before every commit**, and in CI. One gate. Must be green to ship. |
