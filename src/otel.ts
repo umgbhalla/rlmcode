@@ -20,6 +20,7 @@ import { SimpleLogRecordProcessor } from "@opentelemetry/sdk-logs"
 import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics"
 import { SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base"
 import * as Layer from "effect/Layer"
+import * as ManagedRuntime from "effect/ManagedRuntime"
 import * as Atom from "effect/unstable/reactivity/Atom"
 
 export const SERVICE_NAME = "ax2-chat"
@@ -84,3 +85,10 @@ export const TracingLive = Layer.mergeAll(SdkLive, ProviderLive)
 
 // Reusable Effect runtime bound to tracing. appRuntime.fn(...) effects run here.
 export const appRuntime = Atom.runtime(TracingLive)
+
+// HEADLESS boundary runtime — the SAME TracingLive layer (one NodeSdk build, memoized) made
+// runnable OUTSIDE an Atom registry, so src/core/run.ts can drive turn()'s Effect (which needs
+// OtelTracerProvider) from a PLAIN async-gen with NO @effect/atom dependency. This is the
+// session boundary for the headless engine; the TUI keeps using appRuntime (the atom-bound
+// runtime) for its reactive actions. Both share TracingLive, so the trace pipeline is one.
+export const coreRuntime = ManagedRuntime.make(TracingLive)
