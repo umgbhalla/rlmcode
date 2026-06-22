@@ -17,7 +17,7 @@
 // DETERMINISM: the key is hashed from a STABLE serialization (object keys sorted) of the
 // input + an explicit allowlist of opts fields — NO Date.now / random / wall-clock in the
 // key, so the SAME (nodeId, input, opts) always resolves to the SAME entry across restarts.
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
+import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { resolve as resolvePath } from "node:path"
 import type { AxAIService, AxGen, AxGenIn, AxGenOut } from "@ax-llm/ax"
 import { type NodeOpts, node } from "./orch.ts"
@@ -117,30 +117,93 @@ export const loadJournal = async (sessionId: string): Promise<Journal> => {
   }
 }
 
+// ADVISORY LOCKING (upgrade of the old single-writer ponytail). Two layers guard a save:
+//   1. IN-PROCESS: a per-sessionId promise chain serializes saves of the SAME journal within
+//      this process, so two overlapping saveJournal() awaits never interleave their read-merge-
+//      write. (allSettled-style: a failed save still lets the next one run.)
+//   2. CROSS-PROCESS: an exclusive lockfile (open with 'wx' — atomic create-or-fail) around
+//      the read-merge-write-rename, with bounded retry. While locked, the save MERGES any
+//      records another process already wrote to disk into its own set before writing, so two
+//      processes journaling the same sessionId UNION their records instead of last-writer-wins
+//      clobbering. A stale lock (a crashed holder) is broken after LOCK_STALE_MS.
+const saveChains = new Map<string, Promise<unknown>>()
+const LOCK_RETRY_MS = 25
+const LOCK_MAX_TRIES = 40 // ~1s total before giving up the lock attempt
+const LOCK_STALE_MS = 10_000 // a lockfile older than this is assumed abandoned (crashed holder)
+const lockPath = (finalPath: string): string => `${finalPath}.lock`
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+// Acquire the exclusive lockfile, breaking a stale one. Returns true once held.
+const acquireLock = async (lock: string): Promise<boolean> => {
+  for (let i = 0; i < LOCK_MAX_TRIES; i++) {
+    try {
+      const fh = await open(lock, "wx")
+      await fh.writeFile(`${process.pid}:${Date.now()}`)
+      await fh.close()
+      return true
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code !== "EEXIST") throw e
+      // Break a stale lock left by a crashed holder, then retry immediately.
+      try {
+        const body = await readFile(lock, "utf8")
+        const ts = Number(body.split(":")[1] ?? 0)
+        if (Number.isFinite(ts) && Date.now() - ts > LOCK_STALE_MS) {
+          await rm(lock, { force: true })
+          continue
+        }
+      } catch {
+        /* the holder released it between our open and read — just retry */
+      }
+      await sleep(LOCK_RETRY_MS)
+    }
+  }
+  return false
+}
+
 // saveJournal — persist the in-memory journal so it survives a process crash. ATOMIC:
 // write the full JSON to a temp sibling, then rename() over the real path — a crash mid-
 // write leaves the OLD journal intact (rename is atomic on POSIX), never a half-written
 // file. No-op when not dirty (nothing new to record). Clears the dirty flag on success.
-//
-// ponytail: single-writer atomic-rename only — NO file lock / advisory locking. Two
-// processes journaling the SAME sessionId concurrently could last-writer-wins clobber
-// each other (each holds a full in-memory copy and rename()s its own). Acceptable today:
-// one run owns one sessionId. Upgrade: an OS advisory lock (flock / proper-lockfile) around
-// the load→record→save cycle, or an append-only log compacted on load, for true multi-writer.
+// SERIALIZED + LOCKED: in-process saves of the same sessionId chain; cross-process saves
+// take an advisory lockfile and MERGE on-disk records before writing (see above).
 export const saveJournal = async (journal: Journal): Promise<void> => {
+  // Chain on the per-session promise so two in-process saves never overlap; clear the
+  // chain slot once it settles so the Map doesn't grow unbounded.
+  const prev = saveChains.get(journal.sessionId) ?? Promise.resolve()
+  const run = prev.catch(() => {}).then(() => saveJournalLocked(journal))
+  saveChains.set(journal.sessionId, run)
+  try {
+    await run
+  } finally {
+    if (saveChains.get(journal.sessionId) === run) saveChains.delete(journal.sessionId)
+  }
+}
+
+const saveJournalLocked = async (journal: Journal): Promise<void> => {
   if (!journal.dirty) return
   await mkdir(JOURNAL_DIR, { recursive: true })
-  const file: JournalFile = {
-    version: 1,
-    sessionId: journal.sessionId,
-    entries: Object.fromEntries(journal.entries),
-  }
   const finalPath = journalPath(journal.sessionId)
-  // A unique-ish temp name so two saves of the SAME journal in this process don't collide.
-  const tmpPath = `${finalPath}.${process.pid}.${journal.entries.size}.tmp`
-  await writeFile(tmpPath, JSON.stringify(file, null, 2), "utf8")
-  await rename(tmpPath, finalPath)
-  journal.dirty = false
+  const lock = lockPath(finalPath)
+  const held = await acquireLock(lock)
+  try {
+    // CROSS-PROCESS MERGE: fold any records ANOTHER process wrote since we loaded into our
+    // own set first, so concurrent writers UNION rather than clobber. Our newer in-memory
+    // entry wins on a key collision (the result is deterministic for a key anyway).
+    const onDisk = await loadJournal(journal.sessionId)
+    for (const [k, v] of onDisk.entries) if (!journal.entries.has(k)) journal.entries.set(k, v)
+    const file: JournalFile = {
+      version: 1,
+      sessionId: journal.sessionId,
+      entries: Object.fromEntries(journal.entries),
+    }
+    // A unique-ish temp name so two saves of the SAME journal don't collide.
+    const tmpPath = `${finalPath}.${process.pid}.${journal.entries.size}.tmp`
+    await writeFile(tmpPath, JSON.stringify(file, null, 2), "utf8")
+    await rename(tmpPath, finalPath)
+    journal.dirty = false
+  } finally {
+    if (held) await rm(lock, { force: true }).catch(() => {})
+  }
 }
 
 // record — fold a completed node's result into the journal (marks it dirty so the next

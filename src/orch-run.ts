@@ -27,26 +27,38 @@ import { allocate, type Budget, type NodeOpts, parallel } from "./orch.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 
 // Tool-free single-shot gens: the demo proves orchestration, not tool loops — the
-// nodes answer straight from the prompt.
+// nodes answer straight from the prompt. EACH node gets a FRESH AxGen per call (upgrade of
+// the orch-run.ts:231 ponytail): two candidate / two skeptic nodes run concurrently under
+// parallel(), and getUsage() reads a gen's LAST forward — sharing ONE instance per persona
+// made the per-node Budget charge fuzzy when concurrent forwards interleaved. A fresh gen
+// per node gives each its OWN getUsage(), so charging is 1:1 with the node.
 const candidate = (persona: string) => {
   const g = ax("message:string -> reply:string")
   g.setDescription(`${persona} Answer the user's message directly and concisely in GitHub-flavored markdown.`)
   return g
 }
-const candidateGens = [
-  candidate("You are a terse, no-nonsense senior engineer."),
-  candidate("You are a thorough, explanatory teacher."),
+// The two candidate PERSONAS (stable identity). A fresh gen is built PER persona PER
+// fan-out (fanOut maps over this), never a shared module singleton.
+const CANDIDATE_PERSONAS = [
+  "You are a terse, no-nonsense senior engineer.",
+  "You are a thorough, explanatory teacher.",
 ] as const
 
-const judgeGen = ax("message:string, candidates:string -> reply:string")
-judgeGen.setDescription(
-  "You are an impartial judge. Given the user's message and several candidate answers (numbered), pick the single best answer and return it VERBATIM as your reply — do not blend or rewrite.",
-)
+const judgeGenFor = () => {
+  const g = ax("message:string, candidates:string -> reply:string")
+  g.setDescription(
+    "You are an impartial judge. Given the user's message and several candidate answers (numbered), pick the single best answer and return it VERBATIM as your reply — do not blend or rewrite.",
+  )
+  return g
+}
 
-const skepticGen = ax("message:string, answer:string -> verdict:string")
-skepticGen.setDescription(
-  "You are a skeptical reviewer. Decide whether the answer actually addresses the message. Reply with exactly one word: 'accept' or 'reject'.",
-)
+const skepticGenFor = () => {
+  const g = ax("message:string, answer:string -> verdict:string")
+  g.setDescription(
+    "You are a skeptical reviewer. Decide whether the answer actually addresses the message. Reply with exactly one word: 'accept' or 'reject'.",
+  )
+  return g
+}
 
 export type OrchestrateResult = { reply: string; candidates: number; accepted: boolean; votes: number }
 
@@ -140,6 +152,8 @@ const run = async (
     onEvent({ type: "start", nodeId: `${rootId}/judge`, parentId: rootId, phase: "judge" })
     let best: string
     try {
+      // Fresh judge gen for THIS run so its getUsage() is its own (no cross-run carry).
+      const judgeGen = judgeGenFor()
       const judged = await judge(
         llm,
         survivors,
@@ -199,8 +213,11 @@ const fanOut = async (
   budget: Budget,
 ): Promise<string[]> => {
   const raw = await parallel(
-    candidateGens.map((gen, i) => () => {
+    CANDIDATE_PERSONAS.map((persona, i) => () => {
       const nodeId = `${rootId}/cand-${i}`
+      // FRESH gen per candidate node (upgrade orch-run.ts:231): each concurrent branch owns
+      // its AxGen, so getUsage()/budget charging is 1:1 — no shared-instance interleave.
+      const gen = candidate(persona)
       // Establish the edge first so the live tree nests this under the root even if
       // runNode()'s own (parentId-less) start lands second; atoms preserves parentId.
       onEvent({ type: "start", nodeId, parentId: rootId, phase: `candidate ${i + 1}` })
@@ -222,18 +239,18 @@ const skeptic = async (
 ): Promise<boolean> => {
   const nodeId = `${rootId}/skeptic-${i}`
   onEvent({ type: "start", nodeId, parentId: rootId, phase: `skeptic ${i + 1}` })
-  const out = await runNodeAt(nodeId, skepticGen, opts, budget, { message, answer })
+  // FRESH gen per skeptic node (upgrade orch-run.ts:231): the two skeptics vote in parallel,
+  // so each owns its AxGen and getUsage()/budget charging is 1:1 — no shared-instance fuzz.
+  const out = await runNodeAt(nodeId, skepticGenFor(), opts, budget, { message, answer })
   return /accept/i.test(String((out as { verdict?: string }).verdict ?? ""))
 }
 
 // Thin wrapper over the runNode() recipe: same nodeId so its done/error updates the
-// edge node in place, with budget charging wired (usageOf reads the node's usage).
-// ponytail: the two candidate / two skeptic nodes share ONE AxGen instance each and
-// run concurrently under parallel(); usageOf reads that gen's LAST getUsage() entry,
-// so the Budget charge is approximate when concurrent forwards interleave (memory is
-// still correctly forked per branch — only token attribution is fuzzy). Ceiling:
-// over/under-charge by up to one node's usage under contention. Upgrade: construct a
-// fresh AxGen per branch (one instance per concurrent forward) so getUsage() is 1:1.
+// edge node in place, with budget charging wired (usageOf reads the node's usage). Each
+// caller now passes a FRESH AxGen per node (candidate()/skepticGenFor()/judgeGenFor()), so
+// the gen's getUsage() reflects exactly ONE forward — budget charging is 1:1 even when the
+// candidate/skeptic nodes forward concurrently under parallel() (memory was already forked
+// per branch; this closes the last fuzzy-attribution gap).
 const runNodeAt = <I extends AxGenIn, O extends AxGenOut>(
   nodeId: string,
   gen: AxGen<I, O>,
