@@ -15,7 +15,33 @@
 // logic leaves a runnable check.
 import { Analyzer, SymbolFlags } from "yuku-analyzer"
 
-export type Finding = { tag: "broken" | "delete" | "native" | "cycle" | "shrink" | "yagni" | "mutate" | "capture"; msg: string }
+export type Finding = { tag: "broken" | "crosscore" | "delete" | "native" | "cycle" | "shrink" | "yagni" | "mutate" | "capture"; msg: string }
+
+// CROSS-CORE BOUNDARY: src/core/* is the engine; its ONLY public seam is the src/core/sdk.ts
+// barrel (package.json "exports" points there). A file OUTSIDE the trusted layers below that
+// deep-imports any core module other than the barrel has reached past the SDK seam — flagged.
+// Trusted layers (may import core internals): src/core/ itself, and src/app/ (the app composition
+// layer that wires the default agent over a concrete AxAIService). Pure presentation (src/tui/*)
+// and any external consumer must go through src/core/sdk.ts.
+const CORE_DIR = "src/core/"
+const CORE_BARREL = "src/core/sdk.ts"
+const isTrustedCoreImporter = (path: string): boolean => path.startsWith(CORE_DIR) || path.startsWith("src/app/")
+
+// Resolve an import specifier to a src/-relative module path (for the crosscore check). Prefer the
+// linker's resolvedModule; fall back to normalizing a relative specifier against the importer dir
+// so the rule still fires on a deep import the linker couldn't fully resolve.
+const resolveCoreTarget = (importerPath: string, specifier: string, resolved?: string): string | null => {
+  if (resolved && resolved.startsWith(CORE_DIR)) return resolved
+  if (!specifier.startsWith(".")) return null
+  const dir = importerPath.split("/").slice(0, -1)
+  for (const part of specifier.split("/")) {
+    if (part === "." || part === "") continue
+    if (part === "..") dir.pop()
+    else dir.push(part)
+  }
+  const p = dir.join("/")
+  return p.startsWith(CORE_DIR) ? p : null
+}
 
 // Reachability roots: their exports are public API / entrypoints, not dead.
 // chat.tsx = app entry; orch.ts = orchestration-core library surface; orch-recipes.ts
@@ -140,10 +166,18 @@ export const analyze = (a: Analyzer): Finding[] => {
         if (a.referencesOf(s).length === 0) out.push({ tag: "delete", msg: `${m.path}: dead export "${s.name}". Referenced nowhere — drop it.` })
       }
     }
-    // unused imports + native-duplicating dependencies.
+    // unused imports + native-duplicating dependencies + the cross-core boundary.
     for (const imp of m.imports) {
       const root = pkgRoot(imp.specifier)
       if (root && NATIVE_DUPES[root]) out.push({ tag: "native", msg: `${m.path}: "${root}" duplicates a native — use ${NATIVE_DUPES[root]}.` })
+      // CROSS-CORE: an importer outside the trusted layers reaching into a core module other than
+      // the sdk.ts barrel has gone past the public seam. (type-only imports count too — even a type
+      // dependency on a core internal couples the consumer to the engine's private shapes.)
+      if (!isTrustedCoreImporter(m.path)) {
+        const target = resolveCoreTarget(m.path, imp.specifier, imp.resolvedModule?.path)
+        if (target !== null && target !== CORE_BARREL)
+          out.push({ tag: "crosscore", msg: `${m.path}: deep import of core module "${target}" (via "${imp.specifier}"). Cross-core deep import — go through the ${CORE_BARREL} barrel.` })
+      }
       if (imp.isSideEffect || imp.typeOnly || !imp.local) continue
       if (imp.local.references.length === 0) out.push({ tag: "delete", msg: `${m.path}: unused import "${imp.local.name}". Remove it.` })
     }
@@ -281,7 +315,7 @@ if (import.meta.main) {
     console.log("design-check: lean. ✓")
     process.exit(0)
   }
-  const order = { broken: 0, delete: 1, native: 2, cycle: 3, shrink: 4, yagni: 5, mutate: 6, capture: 7 }
+  const order = { broken: 0, crosscore: 1, delete: 2, native: 3, cycle: 4, shrink: 5, yagni: 6, mutate: 7, capture: 8 }
   const blocking = out.filter(blocks)
   for (const f of out.sort((x, y) => order[x.tag] - order[y.tag])) {
     const tag = stage && !blocks(f) ? `${f.tag}*` : f.tag // * = other file, not blocking this commit

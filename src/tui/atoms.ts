@@ -5,10 +5,9 @@ import { AxMemory } from "@ax-llm/ax"
 import * as Effect from "effect/Effect"
 import * as Tracer from "effect/Tracer"
 import * as Atom from "effect/unstable/reactivity/Atom"
-import { abortTurn } from "../core/agent.ts"
-import { runTurn, type TurnEvent, type TurnResult } from "../core/run.ts"
+import { abortTurn, deleteSession, runTurn, sessionsRT } from "../app/default-agent.ts"
+import type { TurnEvent, TurnResult } from "../core/sdk.ts"
 import { appRuntime } from "../otel.ts"
-import { deleteSession, sessionsRT } from "../core/sessions.ts"
 
 const MODEL = "@cf/moonshotai/kimi-k2.7-code"
 

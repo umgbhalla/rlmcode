@@ -18,9 +18,8 @@ import * as Telemetry from "effect/unstable/ai/Telemetry"
 import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 import { setNodeSpanTracer, setTurnContext } from "./orch-spans.ts"
-import { BASE_PROMPT, limits, llm, makeOnEvent, MODEL, rateLimiter, setTurnEmit } from "./runtime.ts"
-import { makeMockAI, MOCK_MODEL, setMockEmit } from "./mock-ai.ts"
-import { MOCK_ORCH_TOOL } from "./mock.ts"
+import { BASE_PROMPT, limits, makeOnEvent, rateLimiter, setTurnEmit } from "./runtime.ts"
+import { setMockEmit } from "./mock-ai.ts"
 import { WORKFLOW_TOOLS } from "./workflow.ts"
 
 // Step/token ceilings default to today's app values (limits, from runtime.ts): maxSteps is
@@ -463,20 +462,11 @@ export const createAgent = (config: AxAgentConfig) => {
 // The injectable agent surface. turn() STAYS Effect-returning (the Effect.fn span +
 // budget recovery + metrics + OTel annotations live INSIDE the closure exactly as
 // before, just sourced from config). Derived from createAgent's inferred shape so
-// turn()'s exact Effect type (error+context channels) is preserved for callers (atoms.ts).
+// turn()'s exact Effect type (error+context channels) is preserved for callers (run.ts).
 export type AxAgentSDK = ReturnType<typeof createAgent>
 
-// The DEFAULT app agent — constructed ONCE over the CF-Kimi `llm` (runtime.ts) at the
-// app's default model. This is the single construction site every importer pulls from;
-// re-exporting turn/abortTurn keeps atoms.ts / chat.tsx byte-identical.
-//
-// NARROW TEST-ONLY SEAM (off in prod): AX2_MOCK=1 swaps the CF service for the canned mock
-// AI (mock-ai.ts — zero network), so a headless harness drives the REAL turn loop with no
-// Cloudflare env. The flag is read ONCE here; unset ⇒ the unchanged CF path. mock-ai.ts
-// imports nothing from this module, so the seam introduces no init cycle.
-export const defaultAgent: AxAgentSDK =
-  process.env.AX2_MOCK === "1"
-    ? createAgent({ ai: makeMockAI(process.env.AX2_MOCK_STREAM === "1"), model: MOCK_MODEL, tools: [...BASE_TOOLS, MOCK_ORCH_TOOL] })
-    : createAgent({ ai: llm, model: MODEL })
-export const turn = defaultAgent.turn
-export const abortTurn = defaultAgent.abortTurn
+// NB: the DEFAULT app agent (the AX2_MOCK env branch + the CF-`llm` construction) is NOT built
+// here anymore — env coupling is APP wiring, moved to src/app/default-agent.ts (hide #6). This
+// module is pure DI: it exports the createAgent FACTORY; the app picks the concrete service.
+// The test-only mock SEAM that turn() still reads (setMockEmit, gated on AX2_MOCK) stays — it is
+// a per-turn sink rebind, not a service-construction branch.

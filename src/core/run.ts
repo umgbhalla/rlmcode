@@ -14,18 +14,18 @@
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import type { Activity } from "./activity.ts"
-import { abortTurn as defaultAbort, type AxAgentSDK, turn as defaultTurn, type TurnResult as RawTurnResult } from "./agent.ts"
+import type { AxAgentSDK, TurnResult as RawTurnResult } from "./agent.ts"
 import { coreRuntime } from "../otel.ts"
 import { ensureSession } from "./sessions.ts"
 
 // A turn DRIVER — the two agent capabilities runTurn needs, decoupled from any one construction
-// site. The TUI uses the module default agent; src/core/sdk.ts builds a fresh agent per
-// createAgent() and supplies its own driver (its createAgent output IS this shape). `turn`
-// returns the INTERNAL Effect (Effect/ChatError never escape — runTurn drives it on coreRuntime);
-// `abortTurn` wraps the agent's per-session abort.
+// site. src/core/sdk.ts builds a fresh agent per createAgent() and supplies its own driver (its
+// internal createAgent output IS this shape); src/app/default-agent.ts wires the app default the
+// same way. `turn` returns the INTERNAL Effect (Effect/ChatError never escape — runTurn drives it
+// on coreRuntime); `abortTurn` wraps the agent's per-session abort. NB: this module no longer
+// constructs a default driver / a default runTurn — that env-coupled wiring moved to the app
+// (hide #6); core exports only the makeRunTurn FACTORY.
 export type TurnDriver = Pick<AxAgentSDK, "turn" | "abortTurn">
-
-const defaultDriver: TurnDriver = { turn: defaultTurn, abortTurn: defaultAbort }
 
 // ── PUBLIC, FULLY SERIALIZABLE event vocabulary ─────────────────────────────────────────
 // Every field is string|number|boolean|undefined — NO AxMemory / AxSpan / Effect / Cause. The
@@ -231,9 +231,3 @@ export const makeRunTurn =
     // TERMINAL: the one and only reply, always, even on error/abort.
     yield { type: "reply", result: await replyPromise }
   }
-
-/**
- * The DEFAULT-agent turn boundary (used by the TUI's sendAtom). A serializable AsyncGenerator
- * over the module default agent; src/core/sdk.ts builds per-agent runTurns via makeRunTurn.
- */
-export const runTurn = makeRunTurn(defaultDriver)

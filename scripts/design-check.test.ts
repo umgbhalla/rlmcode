@@ -58,6 +58,22 @@ assert(
   "mutable capture not flagged",
 )
 
+// crosscore: a presentation file (src/tui/*) deep-importing a core module other than the
+// src/core/sdk.ts barrel is flagged — even a type-only import couples it to engine internals.
+const crosscoreFixture = [
+  { path: "src/core/agent.ts", source: "export const x = 1" },
+  { path: "src/core/run.ts", source: "export type T = number" },
+  { path: "src/core/sdk.ts", source: "export const s = 1" },
+  { path: "src/tui/bad.ts", source: 'import { x } from "../core/agent.ts"\nimport type { T } from "../core/run.ts"\nexport const y: T = x' },
+  { path: "src/tui/good.ts", source: 'import { s } from "../core/sdk.ts"\nexport const z = s' },
+  { path: "src/app/wire.ts", source: 'import { x } from "../core/agent.ts"\nexport const w = x' },
+]
+const cc = an(crosscoreFixture)
+assert(has(cc, "crosscore", 'src/tui/bad.ts: deep import of core module "src/core/agent.ts"'), "crosscore value deep-import not flagged")
+assert(has(cc, "crosscore", 'src/tui/bad.ts: deep import of core module "src/core/run.ts"'), "crosscore type-only deep-import not flagged")
+assert(!cc.some((f) => f.tag === "crosscore" && f.msg.startsWith("src/tui/good.ts")), "barrel import false-flagged as crosscore")
+assert(!cc.some((f) => f.tag === "crosscore" && f.msg.startsWith("src/app/wire.ts")), "trusted app-layer core import false-flagged as crosscore")
+
 // broken: ambiguous re-export (same name via two `export *`) is a link error.
 assert(
   has(

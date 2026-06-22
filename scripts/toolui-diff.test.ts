@@ -2,7 +2,7 @@
 // Self-check for the LCS line diff (toolui.lcsDiffLines) — the non-trivial logic behind the
 // edit-tool diff preview. Plain asserts, no framework (ax2 style). Pins that a small change
 // renders as context + minimal -/+, NOT a whole-block rewrite (the bug the LCS replaced).
-import { lcsDiffLines } from "../src/core/toolui.ts"
+import { lcsDiffLines } from "../src/tui/toolui.ts"
 
 let failed = 0
 const eq = (got: string, want: string, msg: string) => {
