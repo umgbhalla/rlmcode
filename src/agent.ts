@@ -17,6 +17,7 @@ import type { AnySpan } from "effect/Tracer"
 import * as Telemetry from "effect/unstable/ai/Telemetry"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
+import { setNodeSpanTracer } from "./orch-spans.ts"
 import { BASE_PROMPT, limits, llm, MODEL, onEvent, rateLimiter } from "./runtime.ts"
 import { ORCH_TOOLS } from "./orch-tools.ts"
 import { RLM_TOOLS } from "./rlm-tool.ts"
@@ -92,7 +93,12 @@ export const projectDocLoaded = (["AGENTS.md", "CLAUDE.md"] as const).find((f) =
 // node physically cannot re-orchestrate: the structural one-level recursion guard.
 const CHAT_TOOLS = [...BASE_TOOLS, ...ORCH_TOOLS, ...RLM_TOOLS]
 const chat = ax("message:string -> reply:string", { functions: CHAT_TOOLS })
-chat.setDescription(`${BASE_PROMPT} ${ORCH_OVERLAY}${loadProjectDoc()}`)
+// PROMPT SIZE (telemetry leap 2): the assembled system prompt (BASE_PROMPT + ORCH_OVERLAY +
+// projectDoc) is sent on EVERY turn. Record its char count so prompt bloat is visible on the
+// span — an 8000-char projectDoc + full overlay every turn is a real latency lever.
+const SYSTEM_PROMPT = `${BASE_PROMPT} ${ORCH_OVERLAY}${loadProjectDoc()}`
+export const SYSTEM_PROMPT_CHARS = SYSTEM_PROMPT.length
+chat.setDescription(SYSTEM_PROMPT)
 
 // The main chat gen's registered tool names — handed to finalizeOnMaxSteps so the in-loop
 // step hook strips exactly these on the final permitted step (GRACEFUL max-steps ceiling).
@@ -184,7 +190,20 @@ const turnsFailed = Metric.counter("chat_turns_failed", { description: "turns th
 const tokensTotal = Metric.counter("chat_tokens_total", { description: "total LLM tokens used" })
 const turnDuration = Metric.timer("chat_turn_duration", { description: "per-turn latency" })
 
-type Usage = { promptTokens?: number | undefined; completionTokens?: number | undefined; totalTokens?: number | undefined }
+// REASONING TOKENS (telemetry leap 1): Kimi K2.7 (and GLM) are THINKING models — they
+// emit reasoning_content before the reply, so most of a slow turn is REASONING, invisible
+// in prompt/completion alone. ax's openai-compat provider maps the OpenAI
+// completion_tokens_details.reasoning_tokens field onto AxTokenUsage.reasoningTokens (and
+// the Gemini-style thoughtsTokens), confirmed in @ax-llm/ax/index.js. We surface BOTH so a
+// 25s "hi" turn is attributable to thinking, not just opaque latency. thoughtsTokens prefers
+// reasoningTokens (CF/openai) and falls back to thoughtsTokens (Gemini-shaped).
+type Usage = {
+  promptTokens?: number | undefined
+  completionTokens?: number | undefined
+  totalTokens?: number | undefined
+  reasoningTokens?: number | undefined
+  thoughtsTokens?: number | undefined
+}
 
 // Token usage off AxProgram.getUsage() (AxGen extends AxProgram) — a real, if
 // lightly-documented, API returning AxProgramUsage[] with .tokens per call. It's
@@ -195,6 +214,12 @@ const readUsage = (gen: typeof chat): Usage | undefined => {
   const last = Array.isArray(u) ? u[u.length - 1] : u
   return last?.tokens ?? last
 }
+
+// The reasoning-token count from a usage triple: prefer reasoningTokens (CF/openai
+// completion_tokens_details.reasoning_tokens), else thoughtsTokens (Gemini usageMetadata).
+// Undefined when neither is present (a non-thinking turn / provider that omits it).
+const reasoningOf = (u: Usage | undefined): number | undefined =>
+  u === undefined ? undefined : (u.reasoningTokens ?? u.thoughtsTokens)
 
 
 // ponytail: provider response id read off ax's getChatLog() (remoteId). ax doesn't
@@ -207,7 +232,7 @@ const readResponseId = (gen: typeof chat): string | undefined => {
   return last?.remoteId ?? undefined
 }
 
-export type TurnResult = { reply: string; tokens?: number | undefined; finishReason?: string | undefined; budget: boolean }
+export type TurnResult = { reply: string; tokens?: number | undefined; reasoningTokens?: number | undefined; finishReason?: string | undefined; budget: boolean }
 
 // One in-flight AbortController per session (overwritten each turn). abortTurn()
 // lets the UI cancel a running turn: ax honors abortSignal in forward() and
@@ -246,6 +271,11 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       // ax's gen_ai child nests under chat.turn deterministically.
       const otelSpan = yield* OtelTracer.currentOtelSpan
       const traceContext = otelTrace.setSpan(otelContext.active(), otelSpan)
+      // SPAN GRANULARITY (telemetry 2b): wire the node-span minter to THIS turn's exporting
+      // tracer so every orchestration/RLM NodeEvent fired mid-turn mints a REAL child span
+      // nested under chat.turn — the trace mirrors the live tree. Turns are serialized
+      // (busyAtom), so this module-global set is race-free across turns.
+      setNodeSpanTracer(tracer)
 
       finishReasonState.last = undefined // reset the captureFetch latch for this turn
       const aborter = new AbortController()
@@ -261,6 +291,19 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       yield* Effect.logInfo("turn.start").pipe(
         Effect.annotateLogs({ "session.id": sessionId, "message.chars": message.length }),
       )
+
+      // TIMING BREAKDOWN (telemetry leap 3) + PROMPT SIZE (leap 2): stamp the span with
+      // events that split the turn's wall-clock into assemble vs model vs parse. The system
+      // prompt is assembled at module load (SYSTEM_PROMPT_CHARS) and re-sent verbatim each
+      // turn, so 'prompt.assembled' carries the system+user char size; 'forward.sent'/
+      // 'forward.received' bracket the model fetch (stream:false ⇒ one round trip). Even
+      // though assemble is trivial here, separating it proves the time is in the MODEL, not
+      // our plumbing — the key signal for a slow "hi" being all reasoning.
+      const promptChars = SYSTEM_PROMPT_CHARS + message.length
+      yield* Effect.annotateCurrentSpan({ "chat.prompt.system_chars": SYSTEM_PROMPT_CHARS, "chat.prompt.total_chars": promptChars })
+      // Timing events go on the RAW OTel span (otelSpan, already resolved above) — Effect v4
+      // exposes no addEventToCurrentSpan, and the OTel span carries timestamps natively.
+      otelSpan.addEvent("prompt.assembled", { "chat.prompt.system_chars": SYSTEM_PROMPT_CHARS, "chat.prompt.total_chars": promptChars })
 
       // GRACEFUL MAX-STEPS (claude_code ceiling): instead of letting ax throw
       // "max steps reached" and recovering with a SEPARATE no-tools gen (the old
@@ -309,7 +352,13 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
           catch: (e) => new ChatError(e),
         })
 
+      // TIMING BREAKDOWN (telemetry 3): bracket the model fetch with span events. stream:false
+      // ⇒ one round trip, so 'forward.sent' → 'forward.received' IS the model wall-clock (where
+      // a slow thinking-model turn spends its time); 'parsed' marks ax's response parse done.
+      // These are emitted on the raw OTel span so motel's span view shows the split.
+      otelSpan.addEvent("forward.sent")
       const res = yield* runForward(message).pipe(
+        (eff) => Effect.tap(eff, () => Effect.sync(() => otelSpan.addEvent("forward.received"))),
         // Token budget breach is a HARD failure: annotate the span with the typed
         // error's spent/total, then re-fail. (Max-steps no longer throws — it is
         // handled gracefully in-loop above — so this only catches a real runaway.)
@@ -337,6 +386,8 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       // response.id = provider completion id (from ax's chat log) so a turn can be
       // cross-referenced with provider-side logs.
       const span = yield* Effect.currentSpan
+      // 'parsed' — ax has parsed the response into the structured reply + usage by now.
+      otelSpan.addEvent("parsed")
       Telemetry.addGenAIAnnotations(span, {
         system: PROVIDER as any,
         operation: { name: "chat" },
@@ -354,6 +405,17 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
         Telemetry.addGenAIAnnotations(span, {
           usage: { inputTokens: usage.promptTokens, outputTokens: usage.completionTokens },
         })
+        // REASONING TOKENS (telemetry 1): Effect's addGenAIAnnotations has no reasoning slot,
+        // so stamp the canonical gen_ai.usage.thoughts_tokens key directly (the same key ax
+        // uses on its own gen_ai span: LLM_USAGE_THOUGHTS_TOKENS). This is what makes a slow
+        // "hi" attributable to THINKING — most of the latency on a thinking model is reasoning.
+        const reasoning = reasoningOf(usage)
+        if (typeof reasoning === "number") {
+          yield* Effect.annotateCurrentSpan({
+            "gen_ai.usage.thoughts_tokens": reasoning,
+            "gen_ai.usage.reasoning_tokens": reasoning,
+          })
+        }
         if (typeof usage.totalTokens === "number") yield* Metric.update(tokensTotal, usage.totalTokens)
       }
 
@@ -371,11 +433,24 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
         "chat.budget_exhausted": budgetExhausted,
       })
 
+      const reasoningTokens = reasoningOf(usage)
       yield* Metric.update(turnsTotal, 1)
-      yield* Effect.logInfo("turn.done").pipe(Effect.annotateLogs({ "reply.chars": reply.length }))
+      // turn.done log now carries the ATTRIBUTION signal: reply size, total + reasoning tokens,
+      // and prompt size — so the logs tab shows whether a slow "hi" was thinking vs prompt bloat.
+      yield* Effect.logInfo("turn.done").pipe(
+        Effect.annotateLogs({
+          "reply.chars": reply.length,
+          "tokens.total": usage?.totalTokens ?? 0,
+          "tokens.prompt": usage?.promptTokens ?? 0,
+          "tokens.completion": usage?.completionTokens ?? 0,
+          "tokens.reasoning": reasoningTokens ?? 0,
+          "prompt.chars": promptChars,
+        }),
+      )
       const result: TurnResult = {
         reply,
         tokens: usage?.totalTokens,
+        reasoningTokens,
         finishReason: finishReasonState.last,
         budget: budgetExhausted,
       }

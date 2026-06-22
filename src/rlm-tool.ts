@@ -36,9 +36,11 @@ import {
   AxJSRuntimePermission,
   AxMemory,
 } from "@ax-llm/ax"
-import { context as otelContext } from "@opentelemetry/api"
+import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import { limits, llm, onEvent } from "./runtime.ts"
 import { allocate, BudgetExhaustedError } from "./orch.ts"
+import { setNodeSpanTracer } from "./orch-spans.ts"
+import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 
 // Per-RLM SOFT token ceiling (advisory nudge line). An RLM explores a big context across
 // many executor turns + sub-LM queries, so ~2M is a sane "this run is getting big" marker.
@@ -76,6 +78,15 @@ export const runRlm = async (
   signal: AbortSignal,
 ): Promise<{ answer: string; evidence: string[]; turns: number; callbacks: number }> => {
   const budget = allocate(RLM_TOKEN_BUDGET, RLM_TOKEN_HARD)
+  // SPAN GRANULARITY (telemetry 2b): the RLM's internal loop (distiller → executor turn 1..N
+  // → responder) was an opaque single span. Thread our exporting tracer + the ambient trace
+  // context INTO forward() so ax emits a gen_ai CHILD SPAN per internal stage nested under
+  // run_rlm — AND wire the node-span minter so each actorTurnCallback NodeEvent also mints a
+  // child span. Net: the trace mirrors the live tree instead of one black box. The live
+  // harness drives runRlm() directly (no turn()), so we set the minter HERE too.
+  const tracer = otelTrace.getTracer(SERVICE_NAME, SERVICE_VERSION)
+  const traceContext = otelContext.active()
+  setNodeSpanTracer(tracer)
   // Bridge counters surfaced to the caller so the smoke can assert callbacks fired.
   let turns = 0
   let callbacks = 0
@@ -150,10 +161,14 @@ export const runRlm = async (
 
   // forward() drives the whole distiller→executor→responder loop. abortSignal honours a
   // cancelled turn; mem is a FRESH AxMemory (forked — never the turn's shared history).
+  // tracer + traceContext thread into forward() so ax nests its internal gen_ai stage spans
+  // under run_rlm (the same way turn() hands them to the chat forward). They are turn-level
+  // extensions AxProgramForwardOptions tolerates but does not declare — cast through, like
+  // node() does in orch.ts (sound, not an `any`: a known structural superset).
   const out = (await rlm.forward(
     ai,
     { context, query },
-    { abortSignal: signal, mem: new AxMemory() },
+    { abortSignal: signal, mem: new AxMemory(), tracer, traceContext } as Parameters<typeof rlm.forward>[2],
   )) as { answer?: unknown; evidence?: unknown }
 
   // Reconcile any tail usage not seen by the per-turn callback (e.g. the responder stage),

@@ -12,6 +12,7 @@ import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxModelConfi
 import { type Context as OtelContext, type Tracer, trace as otelTrace } from "@opentelemetry/api"
 import * as Effect from "effect/Effect"
 import { emitActivity, type Activity } from "./activity.ts"
+import { endNodeSpan, errorNodeSpan, startNodeSpan } from "./orch-spans.ts"
 
 // The real forward() opts bag threaded by turn() (agent.ts). This is a STRUCTURAL
 // SUPERSET of AxProgramForwardOptions, NOT an alias: sessionId/tracer/traceContext
@@ -168,6 +169,14 @@ export const emit = (event: NodeEvent, _opts?: EmitOpts): Effect.Effect<void> =>
             ? { kind: "node", nodeId: event.nodeId, event: "error", parentId: undefined, detail: clip(event.cause) }
             : { kind: "node", nodeId: event.nodeId, event: "start", parentId: event.parentId, detail: event.phase }
     emitActivity(activity)
+
+    // 1b) SPAN GRANULARITY (telemetry 2b) — mirror this NodeEvent as a REAL child span so
+    // the trace shows per-node timing, not one opaque blob. start mints a child span (under
+    // its parentId's span / the ambient active span); done/error end it with tokens/result.
+    // Purely additive to the addEvent below — the live tree + point-events are unchanged.
+    if (event.type === "start") startNodeSpan(event.nodeId, event.parentId, event.phase)
+    else if (event.type === "done") endNodeSpan(event.nodeId, event.result, event.tokens)
+    else if (event.type === "error") errorNodeSpan(event.nodeId, event.cause)
 
     // 2) active OTel span — addEvent + structured attributes. getActiveSpan() returns
     // a non-recording no-op span when there is none, so this is always safe.

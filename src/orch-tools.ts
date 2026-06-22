@@ -38,6 +38,7 @@ import { BASE_PROMPT, estimatedCostOf, limits, llm, onEvent, readUsageOf } from 
 import { choiceFromArgs, type NodeModelChoice, nodeForwardOpts } from "./models.ts"
 import { adversarialVerify, finalizeOnMaxSteps, judge, loopUntilDry, MAX_CONCURRENCY, parallelLimit, runNode } from "./orch-recipes.ts"
 import { allocate, type Budget, BudgetExhaustedError, type LeafOpts } from "./orch.ts"
+import { setNodeSpanTracer } from "./orch-spans.ts"
 import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
 import { runPlanner } from "./orch-plan.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
@@ -103,6 +104,7 @@ const signalOf = (extra: { abortSignal?: AbortSignal } | undefined): AbortSignal
 const boundary = (sessionId: string, signal: AbortSignal, rootId: string) => {
   const tracer = otelTrace.getTracer(SERVICE_NAME, SERVICE_VERSION)
   const traceContext = otelContext.active()
+  setNodeSpanTracer(tracer) // telemetry 2b: node spans under the orchestrate root (live-harness path has no turn())
   // MULTI-MODEL: optsFor takes an OPTIONAL routing choice — nodeForwardOpts() spreads {model, modelConfig, thinkingTokenBudget} onto LeafOpts (absent ⇒ default Kimi).
   const optsFor = (choice?: NodeModelChoice): LeafOpts => ({
     mem: new AxMemory(),
@@ -126,12 +128,10 @@ const boundary = (sessionId: string, signal: AbortSignal, rootId: string) => {
 // physically cannot re-orchestrate. A fresh AxGen per call (never shared across
 // concurrent branches) so each node's getUsage() is its own, keeping budget charging
 // crisp. BASE_PROMPT is imported from runtime.ts (the neutral cycle-breaker module),
-// NOT agent.ts — so a node gets the main agent's capable prompt without re-introducing
-// the agent ⇄ orch-tools static init cycle.
-// Terse tool-scoping overlay for a node — mirrors claude_code's Explore agent prompt
-// (a short bulleted list of the node's tools + usage priorities). Appended AFTER the
-// persona so a node knows exactly what it has and how to use it, without bloating the
-// prompt. A node is one level deep: it canNOT orchestrate (BASE_TOOLS only, structural).
+// NOT agent.ts — so a node gets the main agent's prompt without the agent ⇄ orch-tools cycle.
+// Terse tool-scoping overlay for a node — mirrors claude_code's Explore agent prompt (a
+// short list of the node's tools + usage priorities). Appended AFTER the persona so a node
+// knows what it has, without bloating the prompt. One level deep: canNOT orchestrate.
 const LEAF_TOOL_SCOPE = [
   "Your tools: glob (find files by pattern), grep (search file contents), read_file (read a known path),",
   "write_file / edit_file (modify files), bash (run real commands), web_fetch (fetch a URL).",
