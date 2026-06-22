@@ -8,6 +8,9 @@
 // worker/task/job/unit/runner are forbidden as names for the unit.
 import type { AxAIService, AxGen, AxGenIn, AxGenOut, AxStepHooks } from "@ax-llm/ax"
 import { type Budget, type BudgetUsage, node, type LeafOpts, type NodeEvent, pipeline } from "./orch.ts"
+import { resilientNode } from "./orch-resilience.ts"
+// Re-export the resilience surface so callers/tests keep a single recipe import site.
+export { LEAF_TIMEOUT_MS, NodeTimeoutError, resilientNode, withRetry, withTimeout } from "./orch-resilience.ts"
 
 // Hard upper bound on in-flight thunks for parallelLimit — the absolute concurrency
 // ceiling regardless of what a caller (or the model) asks for. A big fan-out (e.g. 100
@@ -50,6 +53,7 @@ export const parallelLimit = async <T>(
   await Promise.all(Array.from({ length: Math.min(limit, thunks.length) }, () => pump()))
   return results
 }
+
 
 // A sink that records a NodeEvent. Promise-native recipes stay Effect-free: the
 // SESSION BOUNDARY (turn() in agent.ts) supplies this, running the real emit()
@@ -152,7 +156,12 @@ export const runNode = async <I extends AxGenIn, O extends AxGenOut>(
   const { nodeId, parentId, gen, opts, onEvent = noopSink, phase = "node", budget, usageOf } = spec
   onEvent({ type: "start", nodeId, parentId, phase })
   try {
-    let result = await node(gen, opts)(ai, input)
+    // TRANSIENT RESILIENCE on the node path: per-node timeout (abort a hang) + retry-with-
+    // backoff on transient (429/5xx/network/timeout) errors only — a logic error
+    // (AxFunctionError/budget) fails fast. A retry emits a delta so the live tree shows it.
+    let result = await resilientNode(gen, opts, nodeId, ai, input, (tryIndex, _err, delayMs) =>
+      onEvent({ type: "delta", nodeId, chunk: `⟳ transient failure — retry ${tryIndex + 1} in ${delayMs}ms` }),
+    )
     // GRACEFUL-FINALIZE CLEANER (orch-recipes.ts:77 Upgrade): if a stripped-tools finalize
     // returned kimi's RAW tool-call sentinel tokens as text (the degenerate maxSteps<=1 case),
     // run ONE no-tools nudge forward on the SAME mem (the tool results / prior context persist

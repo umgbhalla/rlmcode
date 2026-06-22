@@ -1,0 +1,184 @@
+// TRANSIENT RESILIENCE for the node path — USERLAND, not core (orch.ts stays exactly 5
+// prims). withRetry + a per-node timeout, composed over the `node` prim. Split out of
+// orch-recipes.ts to keep each file under the design-check line budget; runNode()
+// (orch-recipes.ts) wires resilientNode in on the node path.
+//
+// A node forward() can fail for two REASONS that must be handled OPPOSITELY:
+//   TRANSIENT — a hiccup that a retry can clear: rate-limit (HTTP 429), a 5xx from CF,
+//     a network drop, or a request timeout. ax surfaces these as AxAIServiceStatusError
+//     (.status), AxAIServiceNetworkError, AxAIServiceTimeoutError. We RETRY these with
+//     exponential backoff (so we don't hammer a struggling service) + a per-attempt
+//     stagger by INDEX (no Math.random — backoff varies by attempt i, deterministic and
+//     test-stable), capped at ~3 attempts.
+//   LOGIC — a real, deterministic failure a retry would only repeat: a tool/argument
+//     error (AxFunctionError) or a budget breach (BudgetExhaustedError). These are NEVER
+//     retried — re-running yields the same error and burns tokens/time.
+// Default = NOT transient (fail fast). Only the known-transient shapes opt INTO a retry.
+import { AxFunctionError, type AxAIService, type AxGen, type AxGenIn, type AxGenOut } from "@ax-llm/ax"
+import { BudgetExhaustedError, type LeafOpts, node } from "./orch.ts"
+
+// Max forward attempts for a transient failure (the first try + retries). Env override
+// AX2_NODE_RETRIES (a RETRY count; attempts = retries + 1). Clamped 1..5, default 3 attempts.
+const NODE_ATTEMPTS = (() => {
+  const v = Number(process.env.AX2_NODE_RETRIES ?? 2) + 1
+  return Number.isFinite(v) ? Math.min(5, Math.max(1, Math.floor(v))) : 3
+})()
+
+// Base backoff (ms) for the FIRST retry; doubles each subsequent retry. AX2_NODE_BACKOFF_MS
+// overrides. Clamped >= 0 so a bad env can't go negative.
+const NODE_BACKOFF_MS = (() => {
+  const v = Number(process.env.AX2_NODE_BACKOFF_MS ?? 250)
+  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 250
+})()
+
+// Per-node TIMEOUT (ms): a node that runs longer than this is ABORTED and counts as a
+// failure (fanOut maps it to null), so one hung node never stalls the whole fan-out.
+// AX2_LEAF_TIMEOUT_MS overrides (legacy "leaf" env name kept for stability). Clamped to
+// a sane floor; default 120s (a real exploration node can run minutes — but a HANG is
+// unbounded, and this is the backstop, not the common case).
+export const LEAF_TIMEOUT_MS = (() => {
+  const v = Number(process.env.AX2_LEAF_TIMEOUT_MS ?? 120_000)
+  return Number.isFinite(v) && v > 0 ? Math.max(1_000, Math.floor(v)) : 120_000
+})()
+
+// Thrown when a node exceeds LEAF_TIMEOUT_MS — distinct from a budget/logic error so a
+// boundary catch can tell "hung node" apart from "ran out of budget". A node timeout is
+// a FAILURE (the slot → null in fanOut), never a retry target (the node was making no
+// progress; re-running the same hang wastes the same wall-clock).
+export class NodeTimeoutError extends Error {
+  readonly _tag = "NodeTimeoutError"
+  constructor(readonly nodeId: string, readonly timeoutMs: number) {
+    super(`node ${nodeId} timed out after ${timeoutMs}ms`)
+    this.name = "NodeTimeoutError"
+  }
+}
+
+// Classify a forward() error: is it a TRANSIENT hiccup worth retrying? We match on the
+// real ax error SHAPES (read off node_modules/@ax-llm/ax): AxAIServiceStatusError carries
+// a numeric `status` (retry 429 + any 5xx); AxAIServiceNetworkError/AxAIServiceTimeoutError
+// are named transient classes. We deliberately DO NOT instanceof those network/timeout
+// classes (importing the whole error taxonomy is brittle across ax minors) — we name-match
+// the constructor + duck-type the status, which is stable. AxFunctionError + BudgetExhausted
+// are explicitly NOT transient (a retry repeats them), so they fall through to `false`.
+const isTransient = (err: unknown): boolean => {
+  // LOGIC errors — NEVER retry (a retry yields the same deterministic failure).
+  if (err instanceof AxFunctionError) return false
+  if (err instanceof BudgetExhaustedError) return false
+  if (err instanceof NodeTimeoutError) return false
+  if (err == null || typeof err !== "object") return false
+  // HTTP status — 429 (rate-limit) or any 5xx (server error) is transient.
+  const status = (err as { status?: unknown }).status
+  if (typeof status === "number" && (status === 429 || (status >= 500 && status < 600))) return true
+  // ax's named transient error classes (network drop / request timeout) — match by the
+  // constructor name so we don't depend on importing every error subclass.
+  const name = (err as { name?: unknown; constructor?: { name?: unknown } }).name ?? (err as { constructor?: { name?: unknown } }).constructor?.name
+  if (typeof name === "string" && /Network|Timeout|StreamTerminated/i.test(name)) return true
+  return false
+}
+
+// Sleep that ALSO respects an abort signal — a cancelled turn cuts the backoff wait short
+// (rejects) instead of stalling the full delay before honoring the cancel.
+const sleep = (ms: number, signal: AbortSignal): Promise<void> =>
+  new Promise<void>((resolve, reject) => {
+    if (signal.aborted) return reject(new Error("aborted"))
+    const t = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(t)
+      reject(new Error("aborted"))
+    }
+    signal.addEventListener("abort", onAbort, { once: true })
+  })
+
+// withRetry — run `attempt()` up to NODE_ATTEMPTS times, retrying ONLY on a transient
+// error (isTransient). Backoff between retries is exponential (NODE_BACKOFF_MS * 2^i)
+// with a per-attempt stagger by INDEX (no Math.random): retry i waits base*2^i + i*step,
+// so concurrent nodes that all failed at once don't re-fire in lockstep (deterministic,
+// test-stable jitter). A logic error (AxFunctionError/budget) throws on the FIRST failure.
+// `signal` (the turn's abortSignal) cuts the backoff short on cancellation.
+export const withRetry = async <T>(
+  attempt: (tryIndex: number) => Promise<T>,
+  signal: AbortSignal,
+  onRetry: (tryIndex: number, err: unknown, delayMs: number) => void = () => {},
+): Promise<T> => {
+  let lastErr: unknown
+  for (let i = 0; i < NODE_ATTEMPTS; i++) {
+    try {
+      return await attempt(i)
+    } catch (err) {
+      lastErr = err
+      // Last attempt, or a non-transient (logic) error → give up immediately.
+      if (i === NODE_ATTEMPTS - 1 || !isTransient(err)) throw err
+      // Exponential backoff + jitter-by-INDEX (NOT Math.random): later retries wait
+      // longer AND are staggered by their own index so a wave of simultaneous failures
+      // doesn't re-fire in perfect lockstep.
+      const delayMs = NODE_BACKOFF_MS * 2 ** i + i * (NODE_BACKOFF_MS >> 2)
+      onRetry(i, err, delayMs)
+      await sleep(delayMs, signal)
+    }
+  }
+  throw lastErr
+}
+
+// withTimeout — race `run(signal)` against a `timeoutMs` deadline. We fork a child
+// AbortController off the turn's `parentSignal` (so a cancelled turn STILL aborts the
+// node), and ALSO abort it when the timer fires — so a hung forward() (which honors
+// opts.abortSignal) is cut loose and the race rejects with NodeTimeoutError. The node's
+// LeafOpts.abortSignal must be the forked signal so ax actually aborts the in-flight HTTP.
+export const withTimeout = <T>(
+  nodeId: string,
+  timeoutMs: number,
+  parentSignal: AbortSignal,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> => {
+  const ctrl = new AbortController()
+  // A missing parent signal (a bare-stub LeafOpts in a test, or a caller that didn't thread
+  // one) falls back to a never-aborted signal — so the timeout still works and cancellation
+  // is simply a no-op, never a crash.
+  const parent = parentSignal ?? new AbortController().signal
+  // Thread the parent (turn) abort INTO the child: cancelling the turn aborts the node.
+  const onParentAbort = () => ctrl.abort()
+  if (parent.aborted) ctrl.abort()
+  else parent.addEventListener("abort", onParentAbort, { once: true })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      ctrl.abort() // abort the in-flight forward so it stops working, not just rejected.
+      reject(new NodeTimeoutError(nodeId, timeoutMs))
+    }, timeoutMs)
+  })
+  return Promise.race([run(ctrl.signal), timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer)
+    parent.removeEventListener("abort", onParentAbort)
+  })
+}
+
+// resilientNode — the node path with TRANSIENT RESILIENCE: wrap node(gen, opts)(ai, input)
+// in withTimeout (per-node deadline + abort-on-hang) AND withRetry (backoff on transient
+// failures only). The forked timeout signal REPLACES opts.abortSignal so ax aborts the
+// real HTTP on timeout/cancel. A logic error (AxFunctionError/budget) is NOT retried; a
+// hang aborts + surfaces NodeTimeoutError (the caller's fanOut maps it to a null slot).
+export const resilientNode = <I extends AxGenIn, O extends AxGenOut>(
+  gen: AxGen<I, O>,
+  opts: LeafOpts,
+  nodeId: string,
+  ai: AxAIService,
+  input: I,
+  onRetry: (tryIndex: number, err: unknown, delayMs: number) => void = () => {},
+): Promise<O> => {
+  // A bare-stub LeafOpts (tests) or a caller that didn't thread one falls back to a never-
+  // aborted signal — resilience still works, cancellation is just a no-op.
+  const signal = opts.abortSignal ?? new AbortController().signal
+  return withRetry(
+    () =>
+      withTimeout(nodeId, LEAF_TIMEOUT_MS, signal, (nodeSignal) =>
+        // The forked signal is the node's abortSignal: ax honors it in forward(), so a
+        // timeout/cancel actually stops the in-flight request (not just rejects the race).
+        node(gen, { ...opts, abortSignal: nodeSignal })(ai, input),
+      ),
+    signal,
+    onRetry,
+  )
+}
