@@ -21,7 +21,6 @@ import { setNodeSpanTracer } from "./orch-spans.ts"
 import { BASE_PROMPT, limits, llm, MODEL, onEvent, rateLimiter } from "./runtime.ts"
 import { makeMockAI, MOCK_MODEL } from "./mock-ai.ts"
 import { MOCK_ORCH_TOOL } from "./mock.ts"
-import { RLM_WORKFLOW_TOOLS } from "./rlm-workflow.ts"
 import { WORKFLOW_TOOLS } from "./workflow.ts"
 
 // Step/token ceilings default to today's app values (limits, from runtime.ts): maxSteps is
@@ -46,25 +45,20 @@ export { BASE_PROMPT }
 const RLM_WORKFLOW_OVERLAY = [
   // ── ORCHESTRATION GUIDANCE ────────────────────────────────────────────────────────
   // Beyond a single reply you can drive deterministic multi-node runs (nodes render live
-  // in a tree). ONE tool: rlm_workflow — fan out sub-agents, OR strategy 'rlm' to mine a
-  // big blob in a code runtime. The unit everywhere is a NODE.
+  // in a tree). ONE tool: workflow({ script }) — author a JS orchestration script. The unit
+  // everywhere is a NODE. (rlm_workflow's fixed strategies are now just a few lines of script.)
   "## Orchestration",
-  "You can run deterministic multi-node flows, not just single replies. ONE tool: `rlm_workflow` — fan out sub-agents over distinct subtasks, OR (strategy `rlm`) mine a huge blob in a code runtime. The unit is always a NODE.",
+  "You can run deterministic multi-node flows, not just single replies. ONE tool: `workflow({ script })` — AUTHOR a JS orchestration script the engine runs. The unit is always a NODE.",
   // WHEN to orchestrate.
-  "WHEN to orchestrate: (1) the task SPLITS into independent parts that don't depend on each other's output — fan them out (`rlm_workflow` with distinct `subtasks`); (2) you want the BEST of N attempts or to VERIFY an answer — use strategy `judge`/`best_of_n` (best-of-N) or `verify` (skeptics vote); (3) a BIG blob (long file, pasted log, whole concatenated module) won't fit the window — use `rlm_workflow` with strategy `rlm` + the `context` arg.",
+  "WHEN to orchestrate: (1) the task SPLITS into independent parts that don't depend on each other's output — fan them out with `parallel`; (2) you want the BEST of N attempts or to VERIFY an answer — generate N and `judge`, or run N skeptics and vote; (3) a BIG blob (long file, pasted log, whole concatenated module) won't fit the window — mine it with the `rlm` prim.",
   // WHEN NOT.
   "WHEN NOT: a trivial or strictly sequential task — DO IT DIRECTLY with your own file/shell tools. Do NOT fan out a one-liner. Do NOT spin up a node to read one file or run one command. Sequential steps (read → edit → test) are ONE node's task (yours): orchestration is for INDEPENDENT work or N-way redundancy, never to wrap a single linear chore.",
-  // The strategy menu — one line each.
-  "STRATEGY MENU (rlm_workflow's `strategy`, default `parallel`): `parallel` = fan DISTINCT subtasks, return all (division of labour); `judge` = run N, one judge picks the single best verbatim; `verify` = answer once, N skeptics vote accept/reject; `best_of_n` = re-run the fan-out until the survivor count is stable, then judge; `plan` = a planner node auto-decomposes `task` into distinct subtasks, then fans out one node per subtask.",
-  "Examples: `rlm_workflow({ subtasks: ['audit src/auth for bugs', 'check tests cover edge cases', 'review error handling'] })` (parallel division of labour); `rlm_workflow({ task: 'design a rate limiter', strategy: 'judge', branches: 3 })` (best of 3); `rlm_workflow({ task: 'is this migration safe?', strategy: 'verify', branches: 4 })` (answer + 3 skeptics); `rlm_workflow({ task: 'refactor the auth module', strategy: 'plan' })` (auto-decompose then fan out).",
+  // The prims.
+  "`workflow({ script })`: the script body sees ONLY these prims: `phase(title)` groups the nodes that follow under a live tree heading; `log(msg)` narrates; `agent(prompt, {label?, model?, effort?, schema?})` spawns ONE sub-agent NODE (file/shell tools) → its text (or a validated object with schema, or null if it dies); `parallel(thunks)` is a BARRIER (all concurrent, ≤8 at once, a throwing thunk → null — `.filter(Boolean)`); `pipeline(items, ...stages)` flows each item through every stage with NO barrier (`stage(prev, item, i)`); `judge(candidates, criteria?)` picks the best verbatim; `rlm(context, query)` mines a BIG blob in a code runtime kept OUT of the prompt (the RLM node-kind — just a prim); `budget` is `{total, spent(), remaining()}`. `return <value>` is what comes back to you.",
+  // Patterns as scripts (replacing the old fixed strategy menu).
+  "PATTERNS (write the strategy as a script): division of labour — `phase('audit'); const rs = await parallel([()=>agent('audit src/auth for bugs'),()=>agent('check tests cover edge cases'),()=>agent('review error handling')]); return rs.filter(Boolean).join('\\n');`. Best of N + judge — `const c = await parallel([0,1,2].map(()=>()=>agent('design a rate limiter'))); return await judge(c.filter(Boolean));`. Verify (2-vote) — `const v = (await parallel([0,1].map(i=>()=>agent('refute: '+claim, {schema: VERDICT, label: 'vote:'+i})))).filter(Boolean); const ok = v.length>=2 && v.every(x=>!x.refuted);`. Survey-loop (the workhorse) — `for (let r=1;r<=12;r++){ phase('survey'); const s = await agent('scan -> total', {schema: S}); if (s.total===0) break; await pipeline(frontier, fix, verify, apply); }`. Mine a blob — `return await rlm(BIG_BLOB, 'which function registers the /auth route?');`.",
   // The hard rules.
-  "HARD RULES: (1) give DISTINCT subtasks, never N copies of the same string — pass `subtasks` for division of labour; only omit them (and pass `task` alone) when you genuinely want N REDUNDANT attempts (e.g. `best_of_n`). (2) Stay BOUNDED — `branches` caps at 100 (~8 run at once, the rest queue); don't request more nodes than the task has distinct parts. (3) Pick MODEL + THINKING per node — pass `model` ('kimi' default | 'glm') and `effort` ('low'..'max') to route a node to a stronger/cheaper engine. (4) Sub-agent nodes carry the file/shell tools ONLY and canNOT themselves orchestrate (one level deep). (5) An RLM actor writes PURE JS in a sandbox — NEVER `require`/`import`; the data is already a runtime variable.",
-  // ── SCRIPTED WORKFLOW (the PRIMARY self-orchestration tool) ──────────────────────────
-  // Beyond the fixed-strategy `rlm_workflow`, you can AUTHOR a JS script and the engine runs it
-  // in-process. This is the flexible path — loops, conditionals, free nesting of nodes.
-  "PREFERRED — `workflow({ script })`: AUTHOR a JS orchestration script (not a fixed strategy). The script body sees ONLY these prims: `phase(title)` groups the nodes that follow under a live tree heading; `log(msg)` narrates; `agent(prompt, {label?, model?, effort?, schema?})` spawns ONE sub-agent NODE (file/shell tools) → its text (or a validated object with schema, or null if it dies); `parallel(thunks)` is a BARRIER (all concurrent, ≤8 at once, a throwing thunk → null — `.filter(Boolean)`); `pipeline(items, ...stages)` flows each item through every stage with NO barrier (`stage(prev, item, i)`); `judge(candidates, criteria?)` picks the best verbatim; `rlm(context, query)` mines a BIG blob in a code runtime kept OUT of the prompt (the RLM node-kind — just a prim); `budget` is `{total, spent(), remaining()}`. `return <value>` is what comes back to you.",
-  "Example (fan out + judge): `workflow({ script: \"phase('audit'); const rs = await parallel([()=>agent('audit src/auth for bugs'),()=>agent('check tests cover edge cases'),()=>agent('review error handling')]); return await judge(rs.filter(Boolean));\" })`. Example (mine a blob): `workflow({ script: \"return await rlm(BIG_BLOB, 'which function registers the /auth route?');\" })`. Example (pipeline): `workflow({ script: \"const outs = await pipeline(files, (p,f)=>agent('summarize '+f)); return outs.filter(Boolean).join('\\n');\" })`.",
-  "Use `workflow` when the flow has loops/conditionals or you want to compose nodes freely; use `rlm_workflow` for a quick fixed strategy. Script sub-agent nodes are ONE LEVEL deep (file/shell tools only — a script canNOT spawn a script).",
+  "HARD RULES: (1) give DISTINCT work per node, never N copies of the same string — only run N redundant attempts when you genuinely want best-of-N. (2) Stay BOUNDED — `parallel` runs ≤8 at once, the rest queue; don't fan out more nodes than the task has distinct parts. (3) Route per node — pass `model` ('kimi' default | 'glm') and `effort` ('low'..'max') to send a node to a stronger/cheaper engine. (4) Sub-agent nodes carry the file/shell tools ONLY and canNOT themselves orchestrate (one level deep — a script canNOT spawn a script). (5) The `rlm` actor writes PURE JS in a sandbox — NEVER `require`/`import`; the data is already a runtime variable.",
 ].join(" ")
 
 // Like Claude Code loading CLAUDE.md: if launched in a repo with project
@@ -85,14 +79,15 @@ const loadProjectDoc = (): string => {
 
 export const projectDocLoaded = (["AGENTS.md", "CLAUDE.md"] as const).find((f) => existsSync(f)) ?? null
 
-// The MAIN chat gen's DEFAULT toolset: BASE_TOOLS + RLM_WORKFLOW_TOOLS — it alone may
-// self-orchestrate. Every orchestration sub-run NODE (rlm-workflow.ts) is built with
-// BASE_TOOLS only, so a node physically cannot re-orchestrate: the structural one-level
-// recursion guard. This is the default `tools` for createAgent(); a caller may inject its
-// own (e.g. [] for a headless smoke). The full system prompt (BASE_PROMPT +
+// The MAIN chat gen's DEFAULT toolset: BASE_TOOLS + WORKFLOW_TOOLS — it alone may
+// self-orchestrate (the single `workflow` tool; `rlm_workflow` was dropped as a redundant
+// fixed-strategy wrapper — its strategies are now scripts). Every orchestration sub-run NODE
+// is built with BASE_TOOLS only, so a node physically cannot re-orchestrate: the structural
+// one-level recursion guard. This is the default `tools` for createAgent(); a caller may
+// inject its own (e.g. [] for a headless smoke). The full system prompt (BASE_PROMPT +
 // RLM_WORKFLOW_OVERLAY + projectDoc) is assembled inside createAgent so the prompt always
 // matches whatever gen the factory constructs.
-export const CHAT_TOOLS: AxFunction[] = [...BASE_TOOLS, ...WORKFLOW_TOOLS, ...RLM_WORKFLOW_TOOLS]
+export const CHAT_TOOLS: AxFunction[] = [...BASE_TOOLS, ...WORKFLOW_TOOLS]
 
 // The assembled system prompt (BASE_PROMPT + RLM_WORKFLOW_OVERLAY + projectDoc) — sent on
 // EVERY turn. Built once here for the DEFAULT agent; createAgent re-assembles the identical
