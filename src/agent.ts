@@ -3,7 +3,7 @@
 // emits canonical gen_ai.* child spans (token usage, finish reasons, message
 // events). Effect's own Telemetry.addGenAIAnnotations stamps the semconv
 // attributes on our span. Metrics + correlated logs come along automatically.
-import { ax, AxMemory } from "@ax-llm/ax"
+import { ax, type AxAIService, type AxFunction, type AxGen, type AxLoggerFunction, AxMemory } from "@ax-llm/ax"
 import { existsSync, readFileSync } from "node:fs"
 import { liveLogger } from "./activity.ts"
 import { allocate, BudgetExhaustedError, type BudgetUsage } from "./orch.ts"
@@ -21,13 +21,11 @@ import { setNodeSpanTracer } from "./orch-spans.ts"
 import { BASE_PROMPT, limits, llm, MODEL, onEvent, rateLimiter } from "./runtime.ts"
 import { RLM_WORKFLOW_TOOLS } from "./rlm-workflow.ts"
 
-const MAX_STEPS = limits.maxSteps // max tool-call iterations per turn — the HARD per-turn stop
-// Per-turn SOFT TOKEN ceiling (advisory), tracked by orch's Budget (charged after each
-// node from the forward result's usage). allocate() with no hard arg is pure-advisory:
-// charge() NEVER throws for crossing it — a turn that did real work is never discarded.
-// MAX_STEPS (tool-call iterations, recovered by turn() below) is the real per-turn stop;
-// the token tally is a tracking/backstop signal. Only an explicit freeze() throws.
-const TOKEN_BUDGET = limits.tokenBudget
+// Step/token ceilings default to today's app values (limits, from runtime.ts): maxSteps is
+// the HARD per-turn stop (tool-call iterations, handled gracefully in-loop by stepHooks); the
+// token budget is an ADVISORY soft ceiling charged after each node, NEVER discarding a turn
+// that did real work (only an explicit freeze() throws). Both are now createAgent inputs
+// (config.maxSteps / config.tokenBudget) so a caller can override per agent.
 
 const PROVIDER = "cloudflare.workers-ai"
 
@@ -78,21 +76,23 @@ const loadProjectDoc = (): string => {
 
 export const projectDocLoaded = (["AGENTS.md", "CLAUDE.md"] as const).find((f) => existsSync(f)) ?? null
 
-// The MAIN chat gen gets BASE_TOOLS + RLM_WORKFLOW_TOOLS — it alone may self-orchestrate.
-// Every orchestration sub-run NODE (rlm-workflow.ts) is built with BASE_TOOLS only, so a
-// node physically cannot re-orchestrate: the structural one-level recursion guard.
-const CHAT_TOOLS = [...BASE_TOOLS, ...RLM_WORKFLOW_TOOLS]
-const chat = ax("message:string -> reply:string", { functions: CHAT_TOOLS })
-// PROMPT SIZE (telemetry leap 2): the assembled system prompt (BASE_PROMPT + RLM_WORKFLOW_OVERLAY +
-// projectDoc) is sent on EVERY turn. Record its char count so prompt bloat is visible on the
-// span — an 8000-char projectDoc + full overlay every turn is a real latency lever.
-const SYSTEM_PROMPT = `${BASE_PROMPT} ${RLM_WORKFLOW_OVERLAY}${loadProjectDoc()}`
-export const SYSTEM_PROMPT_CHARS = SYSTEM_PROMPT.length
-chat.setDescription(SYSTEM_PROMPT)
+// The MAIN chat gen's DEFAULT toolset: BASE_TOOLS + RLM_WORKFLOW_TOOLS — it alone may
+// self-orchestrate. Every orchestration sub-run NODE (rlm-workflow.ts) is built with
+// BASE_TOOLS only, so a node physically cannot re-orchestrate: the structural one-level
+// recursion guard. This is the default `tools` for createAgent(); a caller may inject its
+// own (e.g. [] for a headless smoke). The full system prompt (BASE_PROMPT +
+// RLM_WORKFLOW_OVERLAY + projectDoc) is assembled inside createAgent so the prompt always
+// matches whatever gen the factory constructs.
+export const CHAT_TOOLS: AxFunction[] = [...BASE_TOOLS, ...RLM_WORKFLOW_TOOLS]
 
-// The main chat gen's registered tool names — handed to finalizeOnMaxSteps so the in-loop
-// step hook strips exactly these on the final permitted step (GRACEFUL max-steps ceiling).
-const CHAT_TOOL_NAMES = CHAT_TOOLS.map((f) => f.name)
+// The assembled system prompt (BASE_PROMPT + RLM_WORKFLOW_OVERLAY + projectDoc) — sent on
+// EVERY turn. Built once here for the DEFAULT agent; createAgent re-assembles the identical
+// string per factory so each agent's prompt matches its gen.
+const buildSystemPrompt = (): string => `${BASE_PROMPT} ${RLM_WORKFLOW_OVERLAY}${loadProjectDoc()}`
+// PROMPT SIZE (telemetry leap 2): record the DEFAULT prompt's char count so prompt bloat is
+// visible on the span — an 8000-char projectDoc + full overlay every turn is a real latency
+// lever. Exported (atoms.ts/chat.tsx-stable); turn() reads its OWN agent's prompt size.
+export const SYSTEM_PROMPT_CHARS = buildSystemPrompt().length
 
 class ChatError {
   readonly _tag = "ChatError"
@@ -109,33 +109,30 @@ const asBudgetExhausted = (e: unknown): BudgetExhaustedError | undefined =>
 // but finish_reason lives only on ax's internal gen_ai child-span event). The
 // only no-ax-patch way to read it is the raw /chat/completions JSON, so we wrap
 // fetch and skim choices[0].finish_reason off a clone (ax still consumes the
-// real body). Turns are serialized (busyAtom), so a module-level latch is safe;
-// turn() resets it before each forward and reads it after.
-const finishReasonState: { last: string | undefined } = { last: undefined }
+// real body).
+//
+// PER-TURN (concurrency-safe): the finish-reason latch is NOT a module global any
+// more — it lives in a TurnContext allocated per turn() invocation, and the fetch
+// wrapper is a per-turn closure (makeCaptureFetch) threaded into THIS turn's forward
+// opts (ax accepts a per-call `fetch` — AxProgramForwardOptions extends
+// AxAIServiceOptions, which carries `fetch?`). So two concurrent/injected turns each
+// skim into their OWN ctx; no shared `let` a second agent could corrupt.
+type TurnContext = { finishReason?: string }
 // Cast: Bun's `typeof fetch` carries a `.preconnect` member ax never calls.
-const captureFetch = (async (input: any, init: any): Promise<Response> => {
-  const res = await fetch(input, init)
-  try {
-    if (res.ok) {
-      const j: any = await res.clone().json()
-      const fr = j?.choices?.[0]?.finish_reason
-      if (typeof fr === "string") finishReasonState.last = fr
+const makeCaptureFetch = (ctx: TurnContext): typeof fetch =>
+  (async (input: any, init: any): Promise<Response> => {
+    const res = await fetch(input, init)
+    try {
+      if (res.ok) {
+        const j: any = await res.clone().json()
+        const fr = j?.choices?.[0]?.finish_reason
+        if (typeof fr === "string") ctx.finishReason = fr
+      }
+    } catch {
+      /* non-JSON / streaming / error body — ignore, finish_reason just stays unset */
     }
-  } catch {
-    /* non-JSON / streaming / error body — ignore, finish_reason just stays unset */
-  }
-  return res
-}) as typeof fetch
-
-// The logger lives on the AI service (not forward opts) and only fires with
-// debug enabled. Custom logger replaces ax's console printer -> no TUI spam.
-// fetch MUST be set in THIS same call: setOptions reassigns every field, so a
-// later bare setOptions would wipe a fetch passed only to ai().
-// rateLimiter throttles concurrent forwards at the service level (min-interval, AX2_MAX_RPS)
-// — the second layer under parallelLimit's in-flight cap. MUST ride in THIS same setOptions
-// call: setOptions reassigns every field, so a later bare setOptions would wipe it (same
-// reason fetch is here).
-llm.setOptions({ debug: true, logger: liveLogger, fetch: captureFetch, rateLimiter })
+    return res
+  }) as typeof fetch
 
 // Metrics -> OTLP /v1/metrics via the PeriodicExportingMetricReader.
 const turnsTotal = Metric.counter("chat_turns_total", { description: "completed chat turns" })
@@ -162,7 +159,7 @@ type Usage = {
 // lightly-documented, API returning AxProgramUsage[] with .tokens per call. It's
 // the source for gen_ai.usage.* + the token metric (ax's own span carries usage
 // only as an event). Guarded: yields nothing if ax changes the shape (non-fatal).
-const readUsage = (gen: typeof chat): Usage | undefined => {
+const readUsage = (gen: AxGen): Usage | undefined => {
   const u = (gen as any).getUsage?.()
   const last = Array.isArray(u) ? u[u.length - 1] : u
   return last?.tokens ?? last
@@ -179,7 +176,7 @@ const reasoningOf = (u: Usage | undefined): number | undefined =>
 // expose finish_reason publicly (it's on ax's own gen_ai child span already), so
 // we only surface the id here. Ceiling: yields nothing if ax changes the log shape.
 // Upgrade: ax public response-metadata API (id + finish_reason).
-const readResponseId = (gen: typeof chat): string | undefined => {
+const readResponseId = (gen: AxGen): string | undefined => {
   const log = (gen as any).getChatLog?.()
   const last = Array.isArray(log) ? log[log.length - 1] : undefined
   return last?.remoteId ?? undefined
@@ -187,59 +184,104 @@ const readResponseId = (gen: typeof chat): string | undefined => {
 
 export type TurnResult = { reply: string; tokens?: number | undefined; reasoningTokens?: number | undefined; finishReason?: string | undefined; budget: boolean }
 
-// One in-flight AbortController per session (overwritten each turn). abortTurn()
-// lets the UI cancel a running turn: ax honors abortSignal in forward() and
-// throws AxAIServiceAbortedError, which surfaces as a normal turn failure.
-const turnAborters = new Map<string, AbortController>()
-export const abortTurn = (sessionId: string): boolean => {
-  const c = turnAborters.get(sessionId)
-  if (!c || c.signal.aborted) return false
-  c.abort()
-  return true
+// ── DI: createAgent — the injectable factory ───────────────────────────────────
+// The THREE things that used to be module singletons (the AI service, the chat gen,
+// and the step/token limits) are now factory inputs. `ai` + `model` are required; the
+// rest default to today's app values (CHAT_TOOLS / limits.maxSteps / limits.tokenBudget /
+// liveLogger) so the DEFAULT agent (constructed at module load below over the CF `llm`)
+// behaves BYTE-FOR-BYTE as before. An external caller can inject their OWN AxAIService
+// (OpenAI, Ollama, a stub) + tools/model/limits and run turns with NO Cloudflare env.
+export type AxAgentConfig = {
+  readonly ai: AxAIService
+  readonly model: string
+  readonly maxSteps?: number | undefined
+  readonly tokenBudget?: number | undefined
+  readonly tools?: AxFunction[] | undefined
+  readonly logger?: AxLoggerFunction | undefined
 }
 
-/**
- * Build a traced turn for a session. `chat.turn` (our Effect.fn span, kind=client,
- * gen_ai semconv) parents the ax gen_ai child; the whole thing parents the
- * session root span -> one trace per session.
- */
-export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
-  Effect.fn("chat.turn", {
-    kind: "client",
-    // Parent to the session root (ExternalSpan) via span options -> all turns of
-    // a session share one trace. (Do NOT use withParentSpan as a trailing combi:
-    // it wipes the fn's own span context.)
-    parent,
-    attributes: {
-      "gen_ai.operation.name": "chat",
-      "gen_ai.provider.name": PROVIDER,
-      "gen_ai.request.model": MODEL,
-      "session.id": sessionId,
-    },
-  })(
-    function* (message: string) {
-      const provider = yield* OtelTracer.OtelTracerProvider
-      const tracer = provider.getTracer(SERVICE_NAME, SERVICE_VERSION)
-      // Active OTel span = our chat.turn span; pass it as ax's parent context so
-      // ax's gen_ai child nests under chat.turn deterministically.
-      const otelSpan = yield* OtelTracer.currentOtelSpan
-      const traceContext = otelTrace.setSpan(otelContext.active(), otelSpan)
-      // SPAN GRANULARITY (telemetry 2b): wire the node-span minter to THIS turn's exporting
-      // tracer so every orchestration/RLM NodeEvent fired mid-turn mints a REAL child span
-      // nested under chat.turn — the trace mirrors the live tree. Turns are serialized
-      // (busyAtom), so this module-global set is race-free across turns.
-      setNodeSpanTracer(tracer)
+export const createAgent = (config: AxAgentConfig) => {
+  const { ai: service, model } = config
+  const maxSteps = config.maxSteps ?? limits.maxSteps
+  const tokenBudget = config.tokenBudget ?? limits.tokenBudget
+  const logger = config.logger ?? liveLogger
 
-      finishReasonState.last = undefined // reset the captureFetch latch for this turn
-      const aborter = new AbortController()
+  // The chat gen — built ONCE per createAgent call (closure-scoped, not module-scoped).
+  // The full system prompt (BASE_PROMPT + RLM_WORKFLOW_OVERLAY + projectDoc) always matches
+  // the gen the factory constructs; the registered tool names feed finalizeOnMaxSteps.
+  const chatTools = config.tools ?? CHAT_TOOLS
+  const chat = ax("message:string -> reply:string", { functions: chatTools })
+  const systemPrompt = buildSystemPrompt()
+  // PROMPT SIZE (telemetry leap 2): this agent's actual assembled prompt char count, read by
+  // turn() below. The module-level SYSTEM_PROMPT_CHARS export tracks the DEFAULT agent.
+  const systemPromptChars = systemPrompt.length
+  chat.setDescription(systemPrompt)
+  // The registered tool names — handed to finalizeOnMaxSteps so the in-loop step hook strips
+  // exactly these on the final permitted step (GRACEFUL max-steps ceiling).
+  const chatToolNames = chatTools.map((f) => f.name)
+
+  // Bind debug + logger on the injected service (rateLimiter too, for the CF default).
+  // fetch is NO LONGER bound here — it is a per-turn forward option (makeCaptureFetch).
+  // setOptions reassigns every field; all three ride in this single call.
+  service.setOptions({ debug: true, logger, rateLimiter })
+
+  // One in-flight AbortController per session (overwritten each turn), scoped to THIS
+  // agent so two agents never collide on a sessionId. abortTurn() lets the UI cancel a
+  // running turn: ax honors abortSignal in forward() and throws AxAIServiceAbortedError,
+  // which surfaces as a normal turn failure.
+  const turnAborters = new Map<string, AbortController>()
+  const abortTurn = (sessionId: string): boolean => {
+    const c = turnAborters.get(sessionId)
+    if (!c || c.signal.aborted) return false
+    c.abort()
+    return true
+  }
+
+  /**
+   * Build a traced turn for a session. `chat.turn` (our Effect.fn span, kind=client,
+   * gen_ai semconv) parents the ax gen_ai child; the whole thing parents the
+   * session root span -> one trace per session.
+   */
+  const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
+    Effect.fn("chat.turn", {
+      kind: "client",
+      // Parent to the session root (ExternalSpan) via span options -> all turns of
+      // a session share one trace. (Do NOT use withParentSpan as a trailing combi:
+      // it wipes the fn's own span context.)
+      parent,
+      attributes: {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": PROVIDER,
+        "gen_ai.request.model": model,
+        "session.id": sessionId,
+      },
+    })(
+      function* (message: string) {
+        const provider = yield* OtelTracer.OtelTracerProvider
+        const tracer = provider.getTracer(SERVICE_NAME, SERVICE_VERSION)
+        // Active OTel span = our chat.turn span; pass it as ax's parent context so
+        // ax's gen_ai child nests under chat.turn deterministically.
+        const otelSpan = yield* OtelTracer.currentOtelSpan
+        const traceContext = otelTrace.setSpan(otelContext.active(), otelSpan)
+        // SPAN GRANULARITY (telemetry 2b): wire the node-span minter to THIS turn's exporting
+        // tracer so every orchestration/RLM NodeEvent fired mid-turn mints a REAL child span
+        // nested under chat.turn — the trace mirrors the live tree. Turns are serialized
+        // (busyAtom), so this module-global set is race-free across turns.
+        setNodeSpanTracer(tracer)
+
+        // Per-turn finish-reason context + its fetch wrapper (concurrency-safe — replaces
+        // the old module-global latch). The wrapper is threaded into THIS turn's forward
+        // opts below, so a concurrent/injected turn can never overwrite our finish reason.
+        const turnCtx: TurnContext = {}
+        const aborter = new AbortController()
       turnAborters.set(sessionId, aborter)
       // One ADVISORY token budget for the whole turn. runNode() charges it from the forward
       // result's usage; crossing the SOFT ceiling only nudges (a delta in the tree) — it NEVER
       // discards the turn. The hard per-turn stop is MAX_STEPS (now handled GRACEFULLY in-loop
       // by stepHooks below, not by a throw). The tapCause below stays for an explicit
       // freeze()/runaway, which is the only thing that throws BudgetExhaustedError.
-      const budget = allocate(TOKEN_BUDGET)
-      const usageOf = (gen: typeof chat): BudgetUsage | undefined => readUsage(gen)
+      const budget = allocate(tokenBudget)
+      const usageOf = (gen: AxGen): BudgetUsage | undefined => readUsage(gen)
 
       yield* Effect.logInfo("turn.start").pipe(
         Effect.annotateLogs({ "session.id": sessionId, "message.chars": message.length }),
@@ -252,11 +294,11 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       // 'forward.received' bracket the model fetch (stream:false ⇒ one round trip). Even
       // though assemble is trivial here, separating it proves the time is in the MODEL, not
       // our plumbing — the key signal for a slow "hi" being all reasoning.
-      const promptChars = SYSTEM_PROMPT_CHARS + message.length
-      yield* Effect.annotateCurrentSpan({ "chat.prompt.system_chars": SYSTEM_PROMPT_CHARS, "chat.prompt.total_chars": promptChars })
+      const promptChars = systemPromptChars + message.length
+      yield* Effect.annotateCurrentSpan({ "chat.prompt.system_chars": systemPromptChars, "chat.prompt.total_chars": promptChars })
       // Timing events go on the RAW OTel span (otelSpan, already resolved above) — Effect v4
       // exposes no addEventToCurrentSpan, and the OTel span carries timestamps natively.
-      otelSpan.addEvent("prompt.assembled", { "chat.prompt.system_chars": SYSTEM_PROMPT_CHARS, "chat.prompt.total_chars": promptChars })
+      otelSpan.addEvent("prompt.assembled", { "chat.prompt.system_chars": systemPromptChars, "chat.prompt.total_chars": promptChars })
 
       // GRACEFUL MAX-STEPS (claude_code ceiling): instead of letting ax throw
       // "max steps reached" and recovering with a SEPARATE no-tools gen (the old
@@ -266,7 +308,7 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       // the flag below so the turn is marked truncated-then-finalized (the session
       // AxMemory persists, so a follow-up turn resumes from where this one stopped).
       let budgetExhausted = false
-      const stepHooks = finalizeOnMaxSteps(CHAT_TOOL_NAMES, onEvent, `turn:${sessionId}`, () => {
+      const stepHooks = finalizeOnMaxSteps(chatToolNames, onEvent, `turn:${sessionId}`, () => {
         budgetExhausted = true
       })
 
@@ -289,16 +331,20 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
                     sessionId,
                     tracer,
                     traceContext,
-                    maxSteps: MAX_STEPS,
+                    maxSteps,
                     stream: false,
                     abortSignal: aborter.signal,
                     stepHooks,
+                    // PER-TURN finish-reason capture: skim choices[0].finish_reason off a
+                    // clone into turnCtx (no shared module latch). ax accepts a per-call
+                    // fetch (AxProgramForwardOptions extends AxAIServiceOptions.fetch?).
+                    fetch: makeCaptureFetch(turnCtx),
                   },
                   onEvent,
                   budget,
                   usageOf,
                 },
-                llm,
+                service,
                 { message: msg },
               ),
             ),
@@ -329,9 +375,9 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       )
 
       if (budgetExhausted) {
-        yield* Effect.annotateCurrentSpan({ "chat.budget_exhausted": true, "chat.max_steps": MAX_STEPS })
+        yield* Effect.annotateCurrentSpan({ "chat.budget_exhausted": true, "chat.max_steps": maxSteps })
         yield* Effect.logWarning("max steps reached -> finalized in-loop with tools disabled").pipe(
-          Effect.annotateLogs({ "session.id": sessionId, "chat.max_steps": MAX_STEPS }),
+          Effect.annotateLogs({ "session.id": sessionId, "chat.max_steps": maxSteps }),
         )
       }
 
@@ -344,11 +390,11 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
       Telemetry.addGenAIAnnotations(span, {
         system: PROVIDER as any,
         operation: { name: "chat" },
-        request: { model: MODEL },
+        request: { model },
         response: {
-          model: MODEL,
+          model,
           id: readResponseId(chat),
-          finishReasons: finishReasonState.last ? [finishReasonState.last] : undefined,
+          finishReasons: turnCtx.finishReason ? [turnCtx.finishReason] : undefined,
         },
       })
       // Single gen now (the in-loop finalize answers on the SAME chat gen/mem), so usage is
@@ -404,22 +450,38 @@ export const turn = (mem: AxMemory, parent: AnySpan, sessionId: string) =>
         reply,
         tokens: usage?.totalTokens,
         reasoningTokens,
-        finishReason: finishReasonState.last,
+        finishReason: turnCtx.finishReason,
         budget: budgetExhausted,
       }
       return result
     },
-    // Latency metric for the whole turn.
-    (eff) => Effect.trackDuration(eff, turnDuration),
-    // Record failures: withSpan already sets status=ERROR + recordException;
-    // this adds a correlated structured log line for motel's logs tab + a
-    // failure metric so the failed-turn rate is chartable alongside chat_turns_total.
-    (eff) =>
-      Effect.tapCause(eff, (cause) =>
-        Effect.flatMap(Metric.update(turnsFailed, 1), () =>
-          Effect.logError("turn.failed").pipe(
-            Effect.annotateLogs({ "session.id": sessionId, "exception.message": Cause.pretty(cause) }),
+      // Latency metric for the whole turn.
+      (eff) => Effect.trackDuration(eff, turnDuration),
+      // Record failures: withSpan already sets status=ERROR + recordException;
+      // this adds a correlated structured log line for motel's logs tab + a
+      // failure metric so the failed-turn rate is chartable alongside chat_turns_total.
+      (eff) =>
+        Effect.tapCause(eff, (cause) =>
+          Effect.flatMap(Metric.update(turnsFailed, 1), () =>
+            Effect.logError("turn.failed").pipe(
+              Effect.annotateLogs({ "session.id": sessionId, "exception.message": Cause.pretty(cause) }),
+            ),
           ),
         ),
-      ),
-  )
+    )
+
+  return { turn, abortTurn }
+}
+
+// The injectable agent surface. turn() STAYS Effect-returning (the Effect.fn span +
+// budget recovery + metrics + OTel annotations live INSIDE the closure exactly as
+// before, just sourced from config). Derived from createAgent's inferred shape so
+// turn()'s exact Effect type (error+context channels) is preserved for callers (atoms.ts).
+export type AxAgentSDK = ReturnType<typeof createAgent>
+
+// The DEFAULT app agent — constructed ONCE over the CF-Kimi `llm` (runtime.ts) at the
+// app's default model. This is the single construction site every importer pulls from;
+// re-exporting turn/abortTurn keeps atoms.ts / chat.tsx byte-identical.
+export const defaultAgent: AxAgentSDK = createAgent({ ai: llm, model: MODEL })
+export const turn = defaultAgent.turn
+export const abortTurn = defaultAgent.abortTurn

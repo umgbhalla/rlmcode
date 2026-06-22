@@ -71,8 +71,11 @@ const TOKEN_BUDGET = Number(process.env.AX2_TOKEN_BUDGET ?? 2_000_000)
 
 // The shared AI service. Exported so turn() (agent.ts) and the rlm-workflow driver
 // (rlm-workflow.ts) drive the SAME provider — one
-// client, one trace. agent.ts attaches the live logger + captureFetch via
-// setOptions at its module load (mutating this shared instance in place).
+// client, one trace. agent.ts attaches the live logger + rateLimiter via setOptions
+// (inside createAgent) when it builds the default agent (mutating this shared instance
+// in place). The finish-reason capture fetch is NO LONGER set here — it is now a
+// PER-TURN forward option (a per-turn capture wrapper threaded into each turn's
+// forward opts), so the latch is per-turn (concurrency-safe), not a service mutation.
 export const llm = ai({
   name: "openai",
   apiKey: process.env.CLOUDFLARE_API_TOKEN!,

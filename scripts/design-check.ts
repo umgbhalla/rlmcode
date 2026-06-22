@@ -22,7 +22,10 @@ export type Finding = { tag: "broken" | "delete" | "native" | "cycle" | "shrink"
 // = userland recipe surface (runNode() by turn(); judge/loopUntilDry/adversarialVerify
 // by orch-run.orchestrate()) — kept a root so the recipe library surface isn't pruned
 // to only its current callers.
-const ENTRY = new Set(["src/chat.tsx", "src/orch.ts", "src/orch-recipes.ts"])
+// sdk.ts = the public SDK re-export seam (the external entrypoint, consumed by
+// examples/sdk-usage.ts, outside the src/-only scan) — a root so its public-API
+// re-exports aren't flagged dead.
+const ENTRY = new Set(["src/chat.tsx", "src/orch.ts", "src/orch-recipes.ts", "src/sdk.ts"])
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
 const NEST_BUDGET = 5 // block nesting depth per function
 const PARAM_BUDGET = 6 // parameters per function

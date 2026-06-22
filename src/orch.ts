@@ -61,6 +61,12 @@ export type NodeOpts = {
   // service-level logger/debug (the main turn's untagged transcript logger), i.e. UNCHANGED.
   logger?: AxLoggerFunction | undefined
   debug?: boolean | undefined
+  // PER-CALL fetch override (finish-reason capture). A real ax forward option:
+  // AxProgramForwardOptions extends AxAIServiceOptions, which declares `fetch?`. turn()
+  // (agent.ts) threads a per-turn capture wrapper here instead of mutating the shared
+  // service, so the finish-reason latch is per-turn (concurrency-safe), not a module
+  // global. Omitted ⇒ the service's own fetch (UNCHANGED for nodes that don't set it).
+  fetch?: typeof fetch | undefined
 }
 
 // A node lifecycle event over the EXISTING activity bus + OTel span annotation —
