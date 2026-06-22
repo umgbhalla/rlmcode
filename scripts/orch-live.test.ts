@@ -96,6 +96,28 @@ await (async () => {
 
   assert(isRealReply(reply), `reply is a real non-empty string (not a failure/partial sentinel), got: ${JSON.stringify(reply.slice(0, 200))}`)
   assert(reply.includes("42"), `reply contains the correct answer 42, got: ${JSON.stringify(reply.slice(0, 200))}`)
+
+  // (A) leaf-real gate: a leaf is now built from the MAIN agent's BASE_PROMPT +
+  // BASE_TOOLS (persona only an overlay), so it must be able to do REAL agentic work —
+  // use its file/shell tools to inspect the repo and answer substantively, referencing
+  // real files. A single-branch parallel run is one real leaf with no judge/verify
+  // noise — the cleanest proof a leaf can stand on its own.
+  const repoTask =
+    "List the top-level files/directories of this repository (use your tools) and say in one or two sentences what this project is."
+  const repoReply = await runOrchestrateLive(repoTask, "parallel", 1)
+
+  console.log("─".repeat(60))
+  console.log("LIVE LEAF-REAL REPLY:")
+  console.log(repoReply)
+  console.log("─".repeat(60))
+
+  assert(isRealReply(repoReply), `leaf reply is a real non-empty string, got: ${JSON.stringify(repoReply.slice(0, 200))}`)
+  // The leaf must reference REAL repo files it could only know by running tools.
+  const realFiles = ["package.json", "src", "tsconfig", "CLAUDE.md", "node_modules", "scripts", ".env"]
+  assert(
+    realFiles.some((f) => repoReply.includes(f)),
+    `leaf reply references at least one real top-level file (${realFiles.join(", ")}), got: ${JSON.stringify(repoReply.slice(0, 400))}`,
+  )
 })()
 
 if (failed > 0) {

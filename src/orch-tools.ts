@@ -28,7 +28,7 @@
 // Effect boundary is needed here; we read the ambient tracer/context synchronously.
 import { ax, AxMemory, type AxAIService, type AxFunction, type AxGen } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { limits, llm, onEvent, readUsageOf } from "./runtime.ts"
+import { BASE_PROMPT, limits, llm, onEvent, readUsageOf } from "./runtime.ts"
 import { adversarialVerify, agent, judge, loopUntilDry } from "./orch-recipes.ts"
 import { allocate, type Budget, BudgetExhaustedError, type LeafOpts } from "./orch.ts"
 import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
@@ -77,12 +77,19 @@ const boundary = (sessionId: string, signal: AbortSignal, rootId: string) => {
   return { optsFor, budget, rootId }
 }
 
-// A sub-run leaf gen: the SAME signature as the chat gen, but carrying BASE_TOOLS ONLY —
-// the structural recursion guard. A fresh AxGen per call (never shared across concurrent
-// branches) so each leaf's getUsage() is its own, keeping budget charging crisp.
-const leafGen = (description: string): AxGen => {
+// A sub-run leaf gen — a REAL sub-agent: the SAME capable system prompt as the main
+// agent (BASE_PROMPT from runtime.ts) so a leaf is as capable as the main agent MINUS
+// orchestration, with the caller's `persona` appended as an OVERLAY (not the whole
+// prompt — the old thin one-line persona crippled leaves). It carries BASE_TOOLS ONLY
+// (NOT ORCH_TOOLS / no ORCH_OVERLAY) — the structural one-level recursion guard: a leaf
+// physically cannot re-orchestrate. A fresh AxGen per call (never shared across
+// concurrent branches) so each leaf's getUsage() is its own, keeping budget charging
+// crisp. BASE_PROMPT is imported from runtime.ts (the neutral cycle-breaker module),
+// NOT agent.ts — so a leaf gets the main agent's capable prompt without re-introducing
+// the agent ⇄ orch-tools static init cycle.
+const leafGen = (persona: string): AxGen => {
   const g = ax("message:string -> reply:string", { functions: BASE_TOOLS })
-  g.setDescription(description)
+  g.setDescription(`${BASE_PROMPT} ${persona}`)
   return g
 }
 
@@ -101,9 +108,10 @@ const worker = ({ ai, rootId, i, task, persona, optsFor, budget }: WorkerOpts): 
   const nodeId = `${rootId}/branch-${i}`
   // agent() emits the single start (with parentId+label) and the done/error — no
   // double-emit here, which previously overwrote the "branch N" label with "agent".
-  const gen = leafGen(
-    `${persona} You are a capable coding agent with file/shell tools (bash, read_file, write_file, edit_file, glob, grep, web_fetch). Use them to do real work before answering. Reply concisely in GitHub-flavored markdown.`,
-  )
+  // The persona is an OVERLAY on BASE_PROMPT (leafGen prepends the full main-agent
+  // system prompt); the leaf is already told it has the file tools, so the overlay
+  // is just a stance, not a re-statement of its capabilities.
+  const gen = leafGen(persona)
   return agent(
     { nodeId, parentId: rootId, phase: `branch ${i + 1}`, gen, opts: optsFor(), onEvent, budget, usageOf: (g) => readUsageOf(g) },
     ai,

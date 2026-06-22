@@ -17,7 +17,7 @@ import type { AnySpan } from "effect/Tracer"
 import * as Telemetry from "effect/unstable/ai/Telemetry"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
-import { limits, llm, MODEL, onEvent } from "./runtime.ts"
+import { BASE_PROMPT, limits, llm, MODEL, onEvent } from "./runtime.ts"
 import { ORCH_TOOLS } from "./orch-tools.ts"
 
 const MAX_STEPS = limits.maxSteps // max tool-call iterations per turn
@@ -32,12 +32,18 @@ const BUDGET_NUDGE =
 
 const PROVIDER = "cloudflare.workers-ai"
 
-const BASE_PROMPT = [
-  "You are a capable coding agent running inside a terminal, in the user's project directory.",
-  "Tools: bash, read_file, write_file, edit_file, glob, grep. When a request needs real work,",
-  "USE the tools to inspect/modify files and run commands BEFORE answering — don't guess.",
-  "Verify with a tool when unsure. Keep replies concise and concrete; show the result that matters.",
-  "Format replies in GitHub-flavored markdown (use `code`, lists, and ```fences``` where helpful).",
+// BASE_PROMPT (the capable base system prompt) lives in runtime.ts — the neutral
+// cycle-breaker module — so orchestration LEAF gens (orch-tools.ts) can import it
+// without re-introducing the agent ⇄ orch-tools static init cycle. Re-exported here
+// so callers that think of it as "the main agent's prompt" find it on agent.ts. A leaf
+// is built from BASE_PROMPT + a persona overlay (NOT this ORCH_OVERLAY): a leaf is the
+// main agent minus orchestration.
+export { BASE_PROMPT }
+
+// The orchestration paragraphs — appended to the MAIN chat gen ONLY (it alone carries
+// ORCH_TOOLS). A leaf gen is built from BASE_PROMPT (above) WITHOUT this overlay: it has
+// no orchestration tools, so telling it about orchestrate/run_orch_script would be a lie.
+const ORCH_OVERLAY = [
   // Orchestration: this agent can run deterministic multi-node flows, not just single replies.
   "Orchestration: beyond a single reply you can drive deterministic multi-node runs whose nodes render live in a tree.",
   "SELF-orchestrate via tools: `orchestrate(task, strategy, branches)` fans out sub-agents (each with the file tools only). USE it when a",
@@ -76,7 +82,7 @@ export const projectDocLoaded = (["AGENTS.md", "CLAUDE.md"] as const).find((f) =
 // Every orchestration sub-run LEAF (orch-tools.ts) is built with BASE_TOOLS only, so a
 // leaf physically cannot re-orchestrate: the structural one-level recursion guard.
 const chat = ax("message:string -> reply:string", { functions: [...BASE_TOOLS, ...ORCH_TOOLS] })
-chat.setDescription(BASE_PROMPT + loadProjectDoc())
+chat.setDescription(`${BASE_PROMPT} ${ORCH_OVERLAY}${loadProjectDoc()}`)
 
 // No-tools generator used to recover when the tool budget is exhausted: it
 // answers from the conversation/tool history already in memory.

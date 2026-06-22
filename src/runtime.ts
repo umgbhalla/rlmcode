@@ -9,6 +9,23 @@ import { type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
 
 export const MODEL = "@cf/moonshotai/kimi-k2.7-code"
 
+// The capable base system prompt shared by the MAIN agent (agent.ts re-exports it)
+// and every orchestration LEAF (orch-tools.ts leafGen). Lives HERE — the neutral
+// cycle-breaker module that imports neither agent.ts nor orch-tools.ts — so a leaf can
+// be as capable as the main agent MINUS orchestration without re-introducing the
+// agent ⇄ orch-tools static init cycle (orch-tools.ts importing BASE_PROMPT from
+// agent.ts deadlocked agent.ts's top-level `const chat = ax(...)` on ORCH_TOOLS). The
+// orchestration overlay (the orchestrate/run_orch_script paragraphs) is appended ONLY
+// to the main chat gen in agent.ts (ORCH_OVERLAY) — a leaf never sees it, since a leaf
+// carries BASE_TOOLS only and must not be told it can orchestrate.
+export const BASE_PROMPT = [
+  "You are a capable coding agent running inside a terminal, in the user's project directory.",
+  "Tools: bash, read_file, write_file, edit_file, glob, grep. When a request needs real work,",
+  "USE the tools to inspect/modify files and run commands BEFORE answering — don't guess.",
+  "Verify with a tool when unsure. Keep replies concise and concrete; show the result that matters.",
+  "Format replies in GitHub-flavored markdown (use `code`, lists, and ```fences``` where helpful).",
+].join(" ")
+
 const MAX_STEPS = Number(process.env.AX2_MAX_STEPS ?? 50) // max tool-call iterations per turn
 // Hard per-turn TOKEN ceiling, enforced by orch's Budget (charged after each leaf
 // from the forward result's usage). Distinct from MAX_STEPS (tool-call iterations,
