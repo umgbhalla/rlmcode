@@ -73,16 +73,52 @@ const scriptedChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResp
   })
 }
 
+// The reply split into a few literal pieces so the STREAMING variant yields incremental
+// `content` deltas (the same shape a real provider streams) — ax assembles them back into
+// MOCK_REPLY, so the resolved turn result is byte-identical to the non-streaming path.
+const REPLY_PIECES = ["Found **3 ", "matches** in ", "`src/`. Done."] as const
+
+// STREAMING variant of the FINAL reply step: a real `ReadableStream<AxChatResponse>` whose
+// chunks carry the cumulative `thought` (reasoning_content, sent first — the model reasons,
+// then answers) and then incremental `content` pieces. ax consumes this as a stream and
+// fires the per-chunk logger (ChatResponseStreamingResult) the activity bus turns into
+// thinkingDelta/replyDelta → the live thinking block + streamed reply cursor in chat.tsx.
+// NOT a fake: it is ax's documented streaming surface (chatResponse may return a
+// ReadableStream), exercising the SAME render path the real CF-Kimi stream drives.
+const streamReply = (): ReadableStream<AxChatResponse> => {
+  const usage = { ai: "mock", model: MOCK_MODEL, tokens: MOCK_TOKENS }
+  return new ReadableStream<AxChatResponse>({
+    start(c) {
+      // 1) reasoning_content first (cumulative thought, no content yet → thinking block).
+      c.enqueue({ remoteId: "mock-resp-1", results: [{ index: 0, content: "", thought: MOCK_THOUGHT }], modelUsage: usage })
+      // 2) the reply, piece by piece (each chunk is the incremental delta ax appends).
+      REPLY_PIECES.forEach((piece, i) => {
+        const last = i === REPLY_PIECES.length - 1
+        c.enqueue({ remoteId: "mock-resp-1", results: [{ index: 0, content: piece, ...(last ? { finishReason: "stop" as const } : {}) }], modelUsage: usage })
+      })
+      c.close()
+    },
+  })
+}
+
+// The streaming scriptedChat: the FINAL reply step (tool result present, non-orch turn)
+// streams; the tool-call step and orch turns stay plain (their reply is the orch tree, not
+// streamed prose). Returns a ReadableStream only where the live render is under test.
+const scriptedStreamChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResponse | ReadableStream<AxChatResponse>> =>
+  hasCurrentTurnToolResult(req) && !wantsOrch(req) ? Promise.resolve(streamReply()) : scriptedChat(req)
+
 // The canned AI service — ax's real AxMockAIService with our scripted chat. `functions:
-// true` so ax permits the tool-call path; `streaming: false` matches the app (stream:false
-// in agent.ts). Built fresh per call so two harnesses never share latch state.
-export const makeMockAI = (): AxMockAIService<string> =>
+// true` so ax permits the tool-call path. `streaming` toggles the live-delta variant (used
+// only by the streaming frame test via AX2_MOCK_STREAM); default false keeps direct
+// `ai.chat()` callers (mock.test) on the single-response contract. Built fresh per call so
+// two harnesses never share latch state.
+export const makeMockAI = (streaming = false): AxMockAIService<string> =>
   new AxMockAIService<string>({
     name: "mock",
     id: "mock-ai",
     modelInfo: { name: MOCK_MODEL, provider: "mock" },
-    features: { functions: true, streaming: false },
-    chatResponse: scriptedChat,
+    features: { functions: true, streaming },
+    chatResponse: streaming ? scriptedStreamChat : scriptedChat,
   })
 
 // The canned reply/thought/usage are re-exported so a headless test can assert the
