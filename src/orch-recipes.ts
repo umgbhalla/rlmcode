@@ -7,6 +7,7 @@
 // core `node` prim) bracketed by its start→done|error lifecycle events. leaf/agent/
 // worker/task/job/unit/runner are forbidden as names for the unit.
 import type { AxAIService, AxGen, AxGenIn, AxGenOut, AxStepHooks } from "@ax-llm/ax"
+import { makeNodeLogger } from "./activity.ts"
 import { type Budget, type BudgetUsage, node, type LeafOpts, type NodeEvent, pipeline, tokensOf } from "./orch.ts"
 import { resilientNode } from "./orch-resilience.ts"
 // Re-export the resilience surface so callers/tests keep a single recipe import site.
@@ -62,6 +63,16 @@ export const parallelLimit = async <T>(
 // a no-op so a recipe can run standalone (tests) without a boundary.
 export type EmitSink = (event: NodeEvent) => void
 const noopSink: EmitSink = () => {}
+
+// PER-NODE TOOL ROUTING: bind a node's forward to a logger tagged with its id, so the tools
+// it loops (bash/read/grep) emit tool/result activities carrying that nodeId — the atoms
+// reducer then attaches them to THIS node's OrchTree node, not the main transcript. The
+// single chokepoint: every TOOL-looping node runs through runNode()/structuredPipeline, both
+// of which call this before the forward. `debug:true` is set per-call so ax INVOKES the logger
+// even when the AI service has no service-level debug (forward opts win over service options).
+// A caller that already supplied a logger keeps it (never clobber an explicit override).
+const withNodeLogger = (opts: LeafOpts, nodeId: string): LeafOpts =>
+  opts.logger !== undefined ? opts : { ...opts, logger: makeNodeLogger(nodeId), debug: true }
 
 // GRACEFUL MAX-STEPS — a CEILING, not a cliff (claude_code model). ax runs the tool-calling
 // loop internally; when it would exceed maxSteps it otherwise throws "max steps reached" (a
@@ -153,7 +164,13 @@ export const runNode = async <I extends AxGenIn, O extends AxGenOut>(
   ai: AxAIService,
   input: I,
 ): Promise<O> => {
-  const { nodeId, parentId, gen, opts, onEvent = noopSink, phase = "node", budget, usageOf } = spec
+  const { nodeId, parentId, gen, onEvent = noopSink, phase = "node", budget, usageOf } = spec
+  // PER-NODE TOOL ROUTING: tag this node's forward with a nodeId-bound logger so its tools
+  // route under this node (not the main transcript). EXCEPTION: the MAIN turn (agent.ts) is
+  // also run through runNode but its tools must stay in the transcript (untagged), served by
+  // the service-level global logger — so it opts out. It is the ONLY node whose id starts with
+  // `turn:`; every orchestration node has an `orch`/rootId-prefixed id, so this is unambiguous.
+  const opts = nodeId.startsWith("turn:") ? spec.opts : withNodeLogger(spec.opts, nodeId)
   onEvent({ type: "start", nodeId, parentId, phase })
   try {
     // TRANSIENT RESILIENCE on the node path: per-node timeout (abort a hang) + retry-with-
@@ -377,7 +394,9 @@ export const structuredPipeline = async (
     const { gen, opts, nodeId = `${rootId}/stage-${i}`, phase = `stage ${i + 1}`, budget, usageOf } = stage
     onEvent({ type: "start", nodeId, parentId: rootId, phase })
     try {
-      const out = await node(gen, opts)(ai, prev as AxGenIn)
+      // PER-NODE TOOL ROUTING: tag the stage's forward so any tools it loops route under this
+      // stage's node (not the main transcript), same as runNode().
+      const out = await node(gen, withNodeLogger(opts, nodeId))(ai, prev as AxGenIn)
       // COST-METER: stamp this stage's per-node tokens on its done event (same as runNode).
       let stageTokens: number | undefined
       if (usageOf !== undefined) stageTokens = tokensOf(usageOf(gen))

@@ -42,6 +42,12 @@ export type OrchNode = {
   // COST-METER: this node's OWN token usage (from its done NodeEvent). undefined until
   // the node settles (or if it ran without budget/usage tracking).
   readonly tokens?: number | undefined
+  // PER-NODE TOOL ROUTING: this node's OWN ordered tool steps (a node is its own sub-agent —
+  // it OWNS the bash/read/grep it loops). Each step is a tool Msg (call → result, updated in
+  // place by id). Populated only for nodes whose forward ran a nodeId-tagged logger
+  // (makeNodeLogger). undefined for nodes that ran no tools / the main turn (whose tools live
+  // in the transcript). NodeView renders these under the node, reusing ToolView.
+  readonly tools?: readonly Extract<Msg, { kind: "tool" }>[]
 }
 // COST-METER: `totalTokens` is the live RUN TOTAL — the sum of every node's `tokens` as
 // done events land. Rendered in the tree footer; never decreases (recompute from nodes).
@@ -93,6 +99,22 @@ export const newSessionAtom = appRuntime.fn((_: void, get) =>
   }),
 )
 
+// PER-NODE TOOL ROUTING: apply `fn` to a node's OWN tools list within the OrchTree. The node's
+// `start` event always precedes its forward (runNode emits start, THEN forwards), so the node
+// exists by the time its tools fire; if a tool somehow lands first we synthesize a minimal
+// running node so the step is never dropped. Pure/immutable: returns a new tree.
+const patchNodeTools = (
+  t: OrchTree,
+  nodeId: string,
+  fn: (tools: readonly Extract<Msg, { kind: "tool" }>[]) => readonly Extract<Msg, { kind: "tool" }>[],
+): OrchTree => {
+  const prev = t.nodes[nodeId]
+  const base: OrchNode = prev ?? { id: nodeId, label: nodeId, phase: "", status: "running" }
+  const node: OrchNode = { ...base, tools: fn(base.tools ?? []) }
+  const roots = prev === undefined && node.parentId === undefined && !t.roots.includes(nodeId) ? [...t.roots, nodeId] : t.roots
+  return { ...t, nodes: { ...t.nodes, [nodeId]: node }, roots }
+}
+
 // Wire the activity bus to the live transcript for one in-flight turn/orchestration:
 // narration/tool/result rows patch messages; node events patch the orch tree. Shared
 // by sendAtom (single turn) and orchestrateAtom (multi-node demo) — identical sink.
@@ -105,14 +127,24 @@ const installSink = (
       case "text":
         patch((m) => [...m, { kind: "agent", text: a.text }])
         break
-      case "tool":
-        patch((m) => [...m, { kind: "tool", id: a.id, name: a.name, args: a.args, status: "running", result: "" }])
+      case "tool": {
+        const step: Msg = { kind: "tool", id: a.id, name: a.name, args: a.args, status: "running", result: "" }
+        // PER-NODE TOOL ROUTING: a tagged tool (nodeId set) belongs to that orchestration NODE —
+        // append it to the node's OWN tools list (NodeView renders it under the node). An untagged
+        // tool is the MAIN turn's — append to the transcript (unchanged default).
+        if (a.nodeId !== undefined) orchPatch((t) => patchNodeTools(t, a.nodeId!, (tools) => [...tools, step]))
+        else patch((m) => [...m, step])
         break
-      case "result":
-        patch((m) =>
-          m.map((x) => (x.kind === "tool" && x.id === a.id ? { ...x, status: a.isError ? "error" : "ok", result: a.result } : x)),
-        )
+      }
+      case "result": {
+        const settle = (x: Msg): Msg =>
+          x.kind === "tool" && x.id === a.id ? { ...x, status: a.isError ? "error" : "ok", result: a.result } : x
+        // Update the matching tool row in place — under the owning node when tagged, else in the
+        // transcript. (A result's nodeId mirrors the call's, set by the same per-node logger.)
+        if (a.nodeId !== undefined) orchPatch((t) => patchNodeTools(t, a.nodeId!, (tools) => tools.map(settle) as typeof tools))
+        else patch((m) => m.map(settle))
         break
+      }
       case "node":
         orchPatch((t) => {
           const prev = t.nodes[a.nodeId]
@@ -129,6 +161,9 @@ const installSink = (
               status: prev?.status ?? "running",
               ...(prev?.result !== undefined ? { result: prev.result } : {}),
               ...(prev?.tokens !== undefined ? { tokens: prev.tokens } : {}),
+              // PER-NODE TOOL ROUTING: preserve any tools already collected (a tool can land
+              // before/with the start event under concurrency) so the start never drops them.
+              ...(prev?.tools !== undefined ? { tools: prev.tools } : {}),
             }
             const isRoot = parentId === undefined
             return {

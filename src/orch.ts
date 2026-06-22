@@ -8,7 +8,7 @@
 // calls ax.forward() is `node` (below); the lifecycle-bracketed runner is runNode()
 // (orch-recipes.ts). leaf/agent/worker/task/job/unit/runner are FORBIDDEN as names for
 // the unit — they are all the SAME thing = a node. NodeEvent/NodeView already use it.
-import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxModelConfig, type AxProgramForwardOptions, type AxMemory, type AxStepHooks } from "@ax-llm/ax"
+import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxLoggerFunction, type AxModelConfig, type AxProgramForwardOptions, type AxMemory, type AxStepHooks } from "@ax-llm/ax"
 import { type Context as OtelContext, type Tracer, trace as otelTrace } from "@opentelemetry/api"
 import * as Effect from "effect/Effect"
 import { emitActivity, type Activity } from "./activity.ts"
@@ -51,6 +51,16 @@ export type LeafOpts = {
   model?: string | undefined
   modelConfig?: AxModelConfig | undefined
   thinkingTokenBudget?: "minimal" | "low" | "medium" | "high" | "highest" | "none" | undefined
+  // PER-NODE TOOL ROUTING: a per-forward logger bound to this node's id (makeNodeLogger).
+  // ax calls it during forward() as steps complete, so the node's tool/result activities are
+  // tagged with its nodeId and route to its OrchTree node (not the main transcript). A REAL
+  // ax forward option (AxAIServiceOptions.logger; AxProgramForwardOptions extends it) — node()
+  // casts the bag through. `debug` MUST be true for ax to INVOKE the logger; we set it per-call
+  // (forward opts win over the service's debug) so a node's logger fires even on a service
+  // without service-level debug (e.g. the live harness's standalone AI). Both omitted ⇒ ax's
+  // service-level logger/debug (the main turn's untagged transcript logger), i.e. UNCHANGED.
+  logger?: AxLoggerFunction | undefined
+  debug?: boolean | undefined
 }
 
 // A node lifecycle event over the EXISTING activity bus + OTel span annotation —

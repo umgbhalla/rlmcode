@@ -14,6 +14,7 @@
 // Run: AX2_LIVE=1 bun scripts/orch-live.test.ts   (or `bun run live`, which passes
 // --env-file=.env so CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID load).
 import { AxAgentClarificationError, ai, type AxAIService, type AxFunction } from "@ax-llm/ax"
+import { type Activity, setActivitySink } from "../src/activity.ts"
 import { ORCH_TOOLS } from "../src/orch-tools.ts"
 import { RLM_TOOLS, runRlm } from "../src/rlm-tool.ts"
 import { limits, MODEL, rateLimiter } from "../src/runtime.ts"
@@ -60,6 +61,43 @@ export const runOrchestrateLive = async (
     { sessionId: "live-smoke", ai: liveAi, abortSignal: new AbortController().signal },
   )
   return String(out ?? "")
+}
+
+// (I) PER-NODE TOOL ROUTING: drive a REAL parallel fan-out over DISTINCT repo subtasks (each
+// branch is a sub-agent that loops file tools) with an activity sink installed, capturing every
+// tool/result activity. Reproduces the atoms reducer's routing (tagged nodeId → that node's
+// tools; untagged → the main transcript) so we can ASSERT each branch's tools are attributed to
+// ITS OWN node and never interleave / leak to the transcript. Returns the captured routing.
+type CapturedTool = { id: string; name: string; status: string; nodeId?: string | undefined }
+export const runRoutingLive = async (
+  subtasks: string[],
+  liveAi: AxAIService = buildLiveAi(),
+): Promise<{ transcript: CapturedTool[]; nodeTools: Record<string, CapturedTool[]>; reply: string }> => {
+  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
+  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
+  const transcript: CapturedTool[] = []
+  const nodeTools: Record<string, CapturedTool[]> = {}
+  // The SAME tool/result routing the atoms reducer applies (installSink is module-private).
+  const sink = (a: Activity) => {
+    if (a.kind === "tool") {
+      const step: CapturedTool = { id: a.id, name: a.name, status: "running", nodeId: a.nodeId }
+      if (a.nodeId !== undefined) (nodeTools[a.nodeId] ??= []).push(step)
+      else transcript.push(step)
+    } else if (a.kind === "result") {
+      const list = a.nodeId !== undefined ? (nodeTools[a.nodeId] ?? []) : transcript
+      for (const s of list) if (s.id === a.id) s.status = a.isError ? "error" : "ok"
+    }
+  }
+  setActivitySink(sink)
+  try {
+    const out = await orchestrateTool.func(
+      { task: "Work the listed subtasks; each sub-agent handles exactly one.", subtasks, strategy: "parallel" },
+      { sessionId: "live-routing", ai: liveAi, abortSignal: new AbortController().signal },
+    )
+    return { transcript, nodeTools, reply: String(out ?? "") }
+  } finally {
+    setActivitySink(null)
+  }
 }
 
 // (H) MULTI-MODEL: drive the REAL orchestrate tool with an explicit { model, effort } so a
@@ -570,6 +608,46 @@ await (async () => {
   console.log(glmHigh)
   console.log("─".repeat(60))
   assert(isRealReply(glmHigh), `(c) glm + effort:'high' returns a real non-empty reply (thinking level passed to forward), got: ${JSON.stringify(glmHigh.slice(0, 200))}`)
+
+  // (I) PER-NODE TOOL ROUTING gate: a parallel fan-out of DISTINCT repo subtasks, each branch a
+  // sub-agent that MUST use file tools (grep/read/glob/bash). With the routing fix every tool a
+  // branch loops carries that branch's nodeId, so the reducer attaches it to THAT branch's node
+  // — never the main transcript, never another branch. We assert: (1) tools were captured at
+  // all (the branches really looped tools); (2) every captured tool is TAGGED with a branch
+  // nodeId (none leaked untagged into the transcript); (3) the tools are distributed across the
+  // branch nodes (each owning node id contains ITS own tools), proving no interleave into one
+  // stream. Tool-using sub-agents are mildly flaky, so the gate needs >=1 branch to have looped
+  // a tool and ALL captured tools to be correctly attributed.
+  const routeSubtasks = [
+    "Use your tools to find how many TypeScript files are under the src/ directory of this repo, and report the count.",
+    "Use your tools to read package.json in this repo and report the project name and one script name.",
+  ]
+  const routing = await runRoutingLive(routeSubtasks)
+  const ownerIds = Object.keys(routing.nodeTools).filter((id) => (routing.nodeTools[id] ?? []).length > 0)
+  const totalNodeTools = ownerIds.reduce((s, id) => s + (routing.nodeTools[id]?.length ?? 0), 0)
+
+  console.log("─".repeat(60))
+  console.log("LIVE PER-NODE TOOL ROUTING (2 distinct tool-using branches):")
+  console.log(`  reply: ${routing.reply.slice(0, 120).replace(/\n/g, " ")}…`)
+  console.log(`  transcript (untagged) tools: ${routing.transcript.length}`)
+  for (const id of ownerIds) console.log(`  node ${id}: ${(routing.nodeTools[id] ?? []).map((t) => t.name).join(", ")}`)
+  console.log("─".repeat(60))
+
+  assert(isRealReply(routing.reply), `routing run returned a real reply, got: ${JSON.stringify(routing.reply.slice(0, 150))}`)
+  // (1) the branches actually looped at least one tool (the whole point — a node OWNS tools).
+  assert(totalNodeTools >= 1, `at least one branch looped a file tool attributed to its node, got ${totalNodeTools} across nodes ${JSON.stringify(ownerIds)}`)
+  // (2) NOTHING leaked untagged into the main transcript — every tool a branch ran is tagged
+  // with that branch's nodeId (the exact bug this fix closes: branch tools rendering under the
+  // main outer agent's transcript).
+  assert(routing.transcript.length === 0, `no branch tool leaked UNTAGGED into the main transcript (the bug), got ${routing.transcript.length}: ${JSON.stringify(routing.transcript.slice(0, 4))}`)
+  // (3) every owning node id is a branch node of THIS run (not the root/judge) — tools are
+  // attributed to the sub-agent that owns them, and each node's tools carry ITS OWN id (no
+  // interleave: a tool's nodeId always equals the node bucket it landed in).
+  for (const id of ownerIds) {
+    const tools = routing.nodeTools[id] ?? []
+    assert(tools.every((t) => t.nodeId === id), `node ${id}'s tools are ALL tagged with its own id (no interleave), got: ${JSON.stringify(tools.map((t) => t.nodeId))}`)
+    assert(/\/branch-\d+$/.test(id), `tool-owning node ${id} is a branch sub-agent (its tools belong to it)`)
+  }
 })()
 
 if (failed > 0) {

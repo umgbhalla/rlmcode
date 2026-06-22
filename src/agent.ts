@@ -3,9 +3,9 @@
 // emits canonical gen_ai.* child spans (token usage, finish reasons, message
 // events). Effect's own Telemetry.addGenAIAnnotations stamps the semconv
 // attributes on our span. Metrics + correlated logs come along automatically.
-import { ax, type AxLoggerFunction, AxMemory } from "@ax-llm/ax"
+import { ax, AxMemory } from "@ax-llm/ax"
 import { existsSync, readFileSync } from "node:fs"
-import { emitActivity } from "./activity.ts"
+import { liveLogger } from "./activity.ts"
 import { allocate, BudgetExhaustedError, type BudgetUsage } from "./orch.ts"
 import { finalizeOnMaxSteps, runNode } from "./orch-recipes.ts"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
@@ -113,43 +113,6 @@ class ChatError {
 // runForward into a ChatError. Unwrap one level to surface it on the span.
 const asBudgetExhausted = (e: unknown): BudgetExhaustedError | undefined =>
   e instanceof ChatError && e.cause instanceof BudgetExhaustedError ? e.cause : undefined
-
-// Tool-call args as a string for the UI. No de-double needed: the only place ax
-// doubles params (mergeFunctionCalls, params += params) is the STREAMING done-cb
-// path; we run stream:false (see runForward), where ChatResponseResults carries
-// the provider's single tool_calls[].function.arguments verbatim. (A doubled
-// '{…}{…}' would also fail ax's own JSON.parse and never execute.)
-const argStr = (p: unknown) => (typeof p === "string" ? p : JSON.stringify(p ?? {}))
-
-// ax's NATIVE step feed. ax calls this during forward() as steps complete:
-// per-step agent narration, tool calls, tool results. We map them to UI
-// activity. id correlates a call with its result so the row updates in place.
-const liveLogger: AxLoggerFunction = (m) => {
-  const emitStep = (results: ReadonlyArray<{ content?: string; functionCalls?: ReadonlyArray<{ id: string; function: { name: string; params?: string | object } }> }>) => {
-    for (const r of results) {
-      const calls = r.functionCalls ?? []
-      // narration only for intermediate steps (steps that also call tools);
-      // the final step's text is the reply, appended once by sendAtom.
-      if (calls.length > 0 && r.content && r.content.trim()) emitActivity({ kind: "text", text: r.content.trim() })
-      for (const fc of calls) {
-        emitActivity({ kind: "tool", id: fc.id, name: fc.function.name, args: argStr(fc.function.params) })
-      }
-    }
-  }
-  switch (m.name) {
-    case "ChatResponseResults":
-      emitStep(m.value as any)
-      break
-    case "ChatResponseStreamingDoneResult":
-      emitStep([m.value as any])
-      break
-    case "FunctionResults":
-      for (const fr of m.value) emitActivity({ kind: "result", id: fr.functionId, result: String(fr.result).slice(0, 4000), isError: Boolean(fr.isError) })
-      break
-    default:
-      break
-  }
-}
 
 // gen_ai.response.finish_reason is the one signal ax exposes nowhere on its
 // public program API (getUsage gives tokens, getChatLog gives the response id,
