@@ -46,9 +46,11 @@ export { BASE_PROMPT }
 const ORCH_OVERLAY = [
   // Orchestration: this agent can run deterministic multi-node flows, not just single replies.
   "Orchestration: beyond a single reply you can drive deterministic multi-node runs whose nodes render live in a tree.",
-  "SELF-orchestrate via tools: `orchestrate(task, strategy, branches)` fans out sub-agents (each with the file tools only). USE it when a",
-  "task splits into independent parts (strategy 'parallel'), or needs best-of-N or a verify-before-accept ('judge' picks the best of N,",
-  "'verify' answers once then skeptics vote accept/reject, 'best_of_n' re-runs until stable then judges). `run_orch_script(name, message)`",
+  "SELF-orchestrate via tools: `orchestrate(task, subtasks?, strategy, branches?)` fans out sub-agents (each with the file tools only). USE it when a",
+  "task splits into independent parts: PASS `subtasks` — a list of DIFFERENT, independent pieces (division of labour) — and branch i works subtasks[i]",
+  "(e.g. orchestrate({ subtasks: ['audit auth.ts for bugs', 'check tests cover edge cases', 'review error handling'] })). Only omit subtasks and pass",
+  "`task` alone when you genuinely want N REDUNDANT attempts at the SAME task (e.g. with 'best_of_n'). strategy 'parallel' returns all, 'judge' picks the best of N,",
+  "'verify' answers once then skeptics vote accept/reject, 'best_of_n' re-runs until stable then judges. `run_orch_script(name, message)`",
   "loads + runs a saved `.ax/orch/<name>` script — USE it after write_file-ing a custom `.ax/orch/<name>.ts` flow. BOUNDS (self-limit): sub-agent",
   "leaves run with file tools only and canNOT themselves orchestrate (one level deep), a token budget caps each run, branches cap at 4. Decompose at the top.",
   "User-invoked triggers: `^o` runs a built-in fan-out over the current input; `/run <name> [message]` loads + runs a saved script.",

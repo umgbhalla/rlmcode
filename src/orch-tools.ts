@@ -111,9 +111,13 @@ const worker = ({ ai, rootId, i, task, persona, optsFor, budget }: WorkerOpts): 
   // The persona is an OVERLAY on BASE_PROMPT (leafGen prepends the full main-agent
   // system prompt); the leaf is already told it has the file tools, so the overlay
   // is just a stance, not a re-statement of its capabilities.
+  //
+  // The branch LABEL (phase) reflects this branch's OWN subtask (clipped), not a
+  // generic "branch N" — so the live tree shows the division of labour, and a
+  // decompose run reads as distinct work per node rather than N identical attempts.
   const gen = leafGen(persona)
   return agent(
-    { nodeId, parentId: rootId, phase: `branch ${i + 1}`, gen, opts: optsFor(), onEvent, budget, usageOf: (g) => readUsageOf(g) },
+    { nodeId, parentId: rootId, phase: `branch ${i + 1}: ${clip(task, 48)}`, gen, opts: optsFor(), onEvent, budget, usageOf: (g) => readUsageOf(g) },
     ai,
     { message: task },
   ).then((o) => String((o as { reply?: string }).reply ?? ""))
@@ -136,6 +140,10 @@ type OrchestrationOpts = {
   ai: AxAIService
   strategy: Strategy
   task: string
+  // DISTINCT subtasks (division of labour): branch i works subtasks[i]. Empty/absent
+  // ⇒ the parallel-same fallback — every branch gets `task` (redundant attempts). The
+  // model is told to PREFER distinct subtasks; same-task is the cheap default only.
+  subtasks: string[]
   branches: number
   optsFor: () => LeafOpts
   budget: Budget
@@ -145,6 +153,7 @@ const runOrchestration = async ({
   ai,
   strategy,
   task,
+  subtasks,
   branches,
   optsFor,
   budget,
@@ -152,10 +161,14 @@ const runOrchestration = async ({
 }: OrchestrationOpts): Promise<{ reply: string; branches: number; accepted?: boolean }> => {
   onEvent({ type: "start", nodeId: rootId, phase: `orchestrate:${strategy}` })
   try {
+    // Branch i's task: its OWN subtask if the model supplied a distinct list, else the
+    // shared `task` (parallel-same fallback). subtaskFor keeps the judge/verify message
+    // (the overall `task`) separate from per-branch work.
+    const subtaskFor = (i: number): string => subtasks[i]?.trim() || task
     const fanOut = (n: number): Promise<string[]> =>
       Promise.all(
         Array.from({ length: n }, (_, i) =>
-          worker({ ai, rootId, i, task, persona: PERSONAS[i % PERSONAS.length]!, optsFor, budget }).catch(() => ""),
+          worker({ ai, rootId, i, task: subtaskFor(i), persona: PERSONAS[i % PERSONAS.length]!, optsFor, budget }).catch(() => ""),
         ),
       ).then((rs) => rs.filter((r) => r.length > 0))
 
@@ -252,29 +265,49 @@ const runOrchestration = async ({
 const orchestrateTool: AxFunction = {
   name: "orchestrate",
   description:
-    "Decompose a sub-task and run it across multiple parallel sub-agents (each with the file/shell tools), then optionally judge or verify the results. Use for hard sub-problems where fanning out and comparing/judging beats a single attempt. strategy: 'parallel' (fan out, return all), 'judge' (fan out, pick the best), 'verify' (answer once, skeptics vote), 'best_of_n' (re-run fan-out until stable, then judge). branches caps at 4. Returns the synthesized result. Sub-agents CANNOT themselves orchestrate (one level deep).",
+    "Decompose a task into DISTINCT subtasks and run each on its OWN parallel sub-agent (each with the file/shell tools) — real division of labour, not redundant attempts. PREFER passing `subtasks`: a list of DIFFERENT, independent pieces of the work (e.g. ['audit src/auth for bugs', 'check the tests cover edge cases', 'review error handling']); branch i works subtasks[i], `branches` follows the list length. If you only pass `task` (no subtasks), every branch runs the SAME task (parallel-same fallback — use only when you genuinely want N redundant attempts, e.g. best_of_n). strategy: 'parallel' (fan out, return all), 'judge' (fan out, pick the best), 'verify' (answer once, skeptics vote), 'best_of_n' (re-run fan-out until stable, then judge). branches caps at 4. Returns the synthesized result. Sub-agents CANNOT themselves orchestrate (one level deep).",
   parameters: {
     type: "object",
     properties: {
-      task: { type: "string", description: "the sub-task for the sub-agents to work on" },
+      task: { type: "string", description: "the overall task; also the per-branch task in the parallel-same fallback when no subtasks are given" },
+      subtasks: {
+        type: "array",
+        items: { type: "string" },
+        description: "PREFERRED: a list of DISTINCT, independent subtasks (division of labour). Branch i gets subtasks[i]; the number of branches follows this list (capped at 4). Omit only when you want N redundant attempts at the same task.",
+      },
       strategy: {
         type: "string",
         enum: ["parallel", "judge", "verify", "best_of_n"],
         description: "how to combine the sub-agents (default 'parallel')",
       },
-      branches: { type: "number", description: "number of parallel sub-agents (1-4, default 2)" },
+      branches: { type: "number", description: "number of parallel sub-agents (1-4, default 2); ignored when subtasks is given (the list length wins)" },
     },
     required: ["task"],
   },
   func: async (
-    args: { task: string; strategy?: string; branches?: number },
+    args: { task: string; subtasks?: string[]; strategy?: string; branches?: number },
     extra?: Readonly<{ sessionId?: string; ai?: AxAIService; abortSignal?: AbortSignal }>,
   ) => {
     const task = String(args?.task ?? "").trim()
-    if (task.length === 0) return "error: orchestrate requires a non-empty task"
+    // DISTINCT subtasks (division of labour) — the preferred path. Coerce to strings,
+    // drop blanks. A non-empty list overrides the `task`-only parallel-same fallback
+    // and DRIVES the branch count (clamped to MAX_BRANCHES); branch i works subtasks[i].
+    const subtasks = (Array.isArray(args?.subtasks) ? args!.subtasks : [])
+      .map((s) => String(s ?? "").trim())
+      .filter((s) => s.length > 0)
+      .slice(0, MAX_BRANCHES)
+    // A non-empty task OR at least one subtask is required.
+    if (task.length === 0 && subtasks.length === 0) return "error: orchestrate requires a non-empty task or subtasks"
     const strategy: Strategy = STRATEGIES.includes(args?.strategy as Strategy) ? (args!.strategy as Strategy) : "parallel"
-    // BRANCH cap (guard 3): clamp the model's request to 1..MAX_BRANCHES.
-    const branches = Math.min(MAX_BRANCHES, Math.max(1, Math.floor(Number(args?.branches ?? 2)) || 2))
+    // BRANCH cap (guard 3): when subtasks are given, the list length wins (each branch
+    // its own subtask); otherwise clamp the model's `branches` request to 1..MAX_BRANCHES.
+    const branches =
+      subtasks.length > 0
+        ? subtasks.length
+        : Math.min(MAX_BRANCHES, Math.max(1, Math.floor(Number(args?.branches ?? 2)) || 2))
+    // The judge/verify message: the overall task, or — when only subtasks were given —
+    // a synthesized statement of the whole, so the judge/skeptics see the full intent.
+    const overall = task.length > 0 ? task : `Complete these subtasks: ${subtasks.map((s, i) => `(${i + 1}) ${s}`).join("; ")}`
     const ai = extra?.ai ?? llm
     const sessionId = extra?.sessionId ?? "tool"
     const signal = signalOf(extra)
@@ -282,7 +315,7 @@ const orchestrateTool: AxFunction = {
     const { optsFor, budget } = boundary(sessionId, signal, rootId)
     try {
       const out = await otelContext.with(otelContext.active(), () =>
-        runOrchestration({ ai, strategy, task, branches, optsFor, budget, rootId }),
+        runOrchestration({ ai, strategy, task: overall, subtasks, branches, optsFor, budget, rootId }),
       )
       return clip(out.reply)
     } catch (e) {

@@ -57,6 +57,24 @@ export const runOrchestrateLive = async (
   return String(out ?? "")
 }
 
+// (B) DECOMPOSE: drive orchestrate with DISTINCT subtasks (real division of labour).
+// Each branch gets subtasks[i]; with strategy 'parallel' the result is the numbered
+// join of every branch's reply, so a decompose run yields DISTINCT per-branch work —
+// not N redundant attempts. Returns the tool's verbatim string result.
+export const runDecomposeLive = async (
+  subtasks: string[],
+  liveAi: AxAIService = buildLiveAi(),
+  task = "Work the listed subtasks; each sub-agent handles exactly one.",
+): Promise<string> => {
+  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
+  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
+  const out = await orchestrateTool.func(
+    { task, subtasks, strategy: "parallel" },
+    { sessionId: "live-decompose", ai: liveAi, abortSignal: new AbortController().signal },
+  )
+  return String(out ?? "")
+}
+
 // A non-empty REAL reply = a string with actual content that is NOT one of the
 // handler's failure/partial sentinels (orch-tools.ts: "orchestration failed: …",
 // "partial: …", "error: …"). Those compile and return a string but mean the live
@@ -117,6 +135,53 @@ await (async () => {
   assert(
     realFiles.some((f) => repoReply.includes(f)),
     `leaf reply references at least one real top-level file (${realFiles.join(", ")}), got: ${JSON.stringify(repoReply.slice(0, 400))}`,
+  )
+
+  // (B) DECOMPOSE gate: 3 DISTINCT subtasks → each branch returns work for ITS OWN
+  // subtask. With strategy 'parallel' the tool returns the numbered join (#1/#2/#3) of
+  // each branch's reply, so we split on the "#N:" markers and assert: real non-empty,
+  // 2+ distinct branch outputs that are NOT identical to each other. The subtasks are
+  // small self-contained string transforms (deterministic, no repo state needed) so the
+  // distinctness is unambiguous: each branch's answer is specific to its own subtask.
+  const subtasks = [
+    "Reverse the word 'orchestrate' and reply with ONLY the reversed string.",
+    "Count the vowels in the word 'decomposition' and reply with ONLY that number.",
+    "Uppercase the word 'subtask' and reply with ONLY the uppercased word.",
+  ]
+  const decomposeReply = await runDecomposeLive(subtasks)
+
+  console.log("─".repeat(60))
+  console.log("LIVE DECOMPOSE REPLY (3 distinct subtasks):")
+  console.log(decomposeReply)
+  console.log("─".repeat(60))
+
+  assert(isRealReply(decomposeReply), `decompose reply is a real non-empty string, got: ${JSON.stringify(decomposeReply.slice(0, 200))}`)
+  // Split the numbered join back into per-branch chunks ("#1:\n…", "#2:\n…").
+  const chunks = decomposeReply
+    .split(/(?=^#\d+:)/m)
+    .map((c) => c.replace(/^#\d+:\s*/, "").trim())
+    .filter((c) => c.length > 0)
+  assert(chunks.length >= 2, `decompose produced 2+ branch chunks, got ${chunks.length}: ${JSON.stringify(decomposeReply.slice(0, 400))}`)
+  // DISTINCT: the branch outputs must not all collapse to one identical string (the
+  // exact failure of parallel-same — N redundant attempts). Real decomposition ⇒ each
+  // branch's reply is specific to its own subtask, so they differ.
+  const distinct = new Set(chunks.map((c) => c.toLowerCase()))
+  assert(
+    distinct.size >= 2,
+    `decompose branch outputs are DISTINCT (division of labour, not redundant), got ${distinct.size} unique of ${chunks.length}: ${JSON.stringify(chunks)}`,
+  )
+  // Each branch did ITS subtask: the expected per-subtask answers appear somewhere in
+  // the joined result (etartsehcro / 6 / SUBTASK — 'decomposition' has 6 vowels:
+  // e,o,o,i,i,o). At least 2 of 3 must land so a single flaky branch doesn't red the
+  // gate while still proving real per-subtask work.
+  const expectedHits = [
+    /etartsehcro/i.test(decomposeReply),
+    /\b6\b/.test(decomposeReply),
+    /SUBTASK/.test(decomposeReply),
+  ].filter(Boolean).length
+  assert(
+    expectedHits >= 2,
+    `at least 2/3 subtasks produced their specific correct answer (etartsehcro / 6 / SUBTASK), got ${expectedHits}: ${JSON.stringify(decomposeReply.slice(0, 400))}`,
   )
 })()
 
