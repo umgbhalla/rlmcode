@@ -87,6 +87,67 @@ await (async () => {
     assert((await budget.remaining()) === 70, `budget remaining 70, got ${await budget.remaining()}`)
   }
 
+  // 3b) runNode() GRACEFUL-FINALIZE CLEANER (the degenerate maxSteps<=1 case): when the
+  // first forward returns kimi's RAW tool-call SENTINEL tokens as text (not prose), runNode
+  // runs ONE no-tools NUDGE forward on the SAME mem and swaps in the nudged reply ONLY if it
+  // is clean. This unit-tests that path off-LLM (the live probe is AX2_LIVE-gated and cannot
+  // run in CI). A scripted fake gen returns the sentinel on call 1 and clean prose on call 2,
+  // and RECORDS the opts of each forward so we can assert the nudge ran with functionCall:'none'
+  // + maxSteps:1 (the last-resort cleaner contract).
+  {
+    // SENTINEL → CLEAN: call 1 emits raw tool tokens, call 2 (the nudge) emits prose.
+    const { events, sink } = recorder()
+    const SENTINEL = "<|tool_calls_section_begin|><|tool_call_begin|>read_file"
+    const calls: Array<{ input: unknown; opts: { functionCall?: unknown; maxSteps?: unknown } }> = []
+    const scriptedGen = (replies: ReadonlyArray<string>) => {
+      let i = 0
+      return {
+        forward: async (_ai: unknown, input: unknown, o: unknown): Promise<{ reply: string }> => {
+          calls.push({ input, opts: (o ?? {}) as { functionCall?: unknown; maxSteps?: unknown } })
+          return { reply: replies[Math.min(i++, replies.length - 1)]! }
+        },
+        getUsage: () => [],
+      } as unknown as AxGen<any, { reply: string }>
+    }
+    const out = await runNode(
+      { nodeId: "nudge", gen: scriptedGen([SENTINEL, "Here is the plain-prose answer."]), opts, onEvent: sink },
+      fakeAi,
+      { message: "q" },
+    )
+    assert(out.reply === "Here is the plain-prose answer.", `runNode swaps in the nudged clean reply, got ${JSON.stringify(out)}`)
+    assert(calls.length === 2, `runNode runs exactly ONE nudge forward after a sentinel reply, got ${calls.length} forward(s)`)
+    assert(calls[1]?.opts.functionCall === "none", "the nudge forward sets functionCall:'none' (tools disabled)")
+    assert(calls[1]?.opts.maxSteps === 1, "the nudge forward caps maxSteps:1 (single last-resort coercion)")
+    assert(
+      (calls[1]?.input as { message?: string })?.message?.includes("plain prose") === true,
+      `the nudge input carries the answer-now prose prompt, got ${JSON.stringify(calls[1]?.input)}`,
+    )
+    assert(events.some((e) => e.type === "delta" && /raw tool tokens/.test(e.chunk)), "runNode emits the coercion delta before nudging")
+
+    // SENTINEL → SENTINEL: if the nudge ALSO emits raw tokens (a deeper sentinel variant),
+    // runNode keeps the ORIGINAL result (never swaps in garbage). The calling code then owns
+    // the decision to return a partial / retry at a different cap — runNode does NOT loop.
+    // The nudge returns a DISTINCT sentinel variant so a buggy unconditional swap would be
+    // caught (the original sentinel and the nudge sentinel differ): runNode must keep the
+    // ORIGINAL, proving the swap is guarded on the nudge being clean — not merely non-empty.
+    const NUDGE_SENTINEL = "<|tool_call_begin|>glob"
+    const calls2: number = await (async () => {
+      const { sink: sink2 } = recorder()
+      let n = 0
+      const alwaysSentinel = {
+        forward: async (_ai: unknown, _input: unknown, _o: unknown): Promise<{ reply: string }> => {
+          n++
+          return { reply: n === 1 ? SENTINEL : NUDGE_SENTINEL }
+        },
+        getUsage: () => [],
+      } as unknown as AxGen<any, { reply: string }>
+      const r = await runNode({ nodeId: "stuck", gen: alwaysSentinel, opts, onEvent: sink2 }, fakeAi, { message: "q" })
+      assert(r.reply === SENTINEL, `runNode keeps the ORIGINAL sentinel (not the nudge's) when the nudge ALSO emits raw tokens, got ${JSON.stringify(r)}`)
+      return n
+    })()
+    assert(calls2 === 2, `runNode nudges AT MOST once then gives up (no loop), forward count ${calls2}`)
+  }
+
   // 4) allocate() is ADVISORY (soft budget): crossing the SOFT ceiling NEVER throws — it
   // only flips overSoft() (a completed node is never discarded). Only crossing the HARD
   // ceiling, or an explicit freeze(), throws BudgetExhaustedError.

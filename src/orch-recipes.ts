@@ -166,6 +166,10 @@ export const runNode = async <I extends AxGenIn, O extends AxGenOut>(
         message: "You already have the tool results in context. Answer the original request now in plain prose. Do NOT call any tools or emit tool-call syntax.",
       } as unknown as I
       const nudged = await node(gen, { ...opts, functionCall: "none", maxSteps: 1 })(ai, nudgeInput).catch(() => result)
+      // Swap ONLY if the nudge produced clean prose. If the nudge ALSO emits raw tokens (a
+      // deeper sentinel variant), we KEEP the original and do NOT loop — runNode nudges AT MOST
+      // once. The caller (orchestrate in orch-run.ts / turn() in agent.ts) then owns the decision
+      // to surface a partial or retry at a different cap; runNode never spins on a stuck model.
       if (!looksLikeRawToolTokens(replyOf(nudged))) result = nudged
     }
     // ADVISORY charge: track this node's spend AFTER it returned its real work. charge()
