@@ -62,6 +62,24 @@ export const runOrchestrateLive = async (
   return String(out ?? "")
 }
 
+// (G) PLAN-EXECUTE (auto-decompose): drive orchestrate with strategy 'plan' and JUST a
+// decomposable `task` (NO subtasks) — a PLANNER node splits the task into distinct subtasks
+// ITSELF, then one sub-agent works each. The 'plan' reply is "PLAN (N subtasks):\n …\n\n
+// RESULTS:\n#1:…#2:…", so the caller sees the model's own decomposition AND each branch's
+// output. Proves AUTO division of labour (model-driven, not caller-passed). Verbatim string.
+export const runPlanLive = async (
+  task: string,
+  liveAi: AxAIService = buildLiveAi(),
+): Promise<string> => {
+  const orchestrateTool = ORCH_TOOLS.find((t: AxFunction) => t.name === "orchestrate")
+  if (!orchestrateTool?.func) throw new Error("orchestrate tool not found in ORCH_TOOLS")
+  const out = await orchestrateTool.func(
+    { task, strategy: "plan" },
+    { sessionId: "live-plan", ai: liveAi, abortSignal: new AbortController().signal },
+  )
+  return String(out ?? "")
+}
+
 // (B) DECOMPOSE: drive orchestrate with DISTINCT subtasks (real division of labour).
 // Each branch gets subtasks[i]; with strategy 'parallel' the result is the numbered
 // join of every branch's reply, so a decompose run yields DISTINCT per-branch work —
@@ -274,6 +292,49 @@ await (async () => {
   assert(
     expectedHits >= 2,
     `at least 2/3 subtasks produced their specific correct answer (etartsehcro / 6 / SUBTASK), got ${expectedHits}: ${JSON.stringify(decomposeReply.slice(0, 400))}`,
+  )
+
+  // (G) PLAN-EXECUTE gate (AUTO-decompose): give a single DECOMPOSABLE task and strategy
+  // 'plan' — the PLANNER node must split it into >1 DISTINCT subtask ITSELF (the model's own
+  // division of labour, NOT a caller-passed list), then each branch returns real work for ITS
+  // subtask. We parse the "PLAN (N subtasks):" header to read the planner's subtask list, and
+  // the "#N:" chunks under "RESULTS:" to read each branch's output, asserting: a real plan with
+  // 2+ distinct subtasks, and 2+ distinct branch outputs (so the fan-out did per-subtask work,
+  // not N identical attempts). A decomposable, self-contained task so no repo/tool flakiness.
+  const planTask =
+    "Produce a tiny self-contained reference card with THREE independent parts: (1) list three common HTTP status codes with their meanings, (2) give the ISO date format string, (3) name three primary colors. Treat each part as a separate piece of work."
+  const planReply = await runPlanLive(planTask)
+
+  console.log("─".repeat(60))
+  console.log("LIVE PLAN-EXECUTE REPLY (planner auto-decomposes, then fans out):")
+  console.log(planReply)
+  console.log("─".repeat(60))
+
+  assert(isRealReply(planReply), `plan reply is a real non-empty string (not a failure/partial sentinel), got: ${JSON.stringify(planReply.slice(0, 200))}`)
+  // The planner emitted a structured PLAN header listing its subtasks — proof the model
+  // produced the decomposition itself. Read the numbered "  1. …" lines under "PLAN (".
+  assert(/^PLAN \(\d+ subtasks\):/m.test(planReply), `plan reply opens with the planner's "PLAN (N subtasks):" header, got: ${JSON.stringify(planReply.slice(0, 200))}`)
+  const planSection = planReply.split(/\n\nRESULTS:\n/)[0] ?? ""
+  // >1 DISTINCT subtask: the planner split the task (not a single passthrough). Compare the
+  // numbered plan lines case-insensitively.
+  const planLines = planSection.split(/\n/).filter((l) => /^\s*\d+\.\s/.test(l)).map((l) => l.replace(/^\s*\d+\.\s*/, "").trim())
+  const distinctPlan = new Set(planLines.map((l) => l.toLowerCase()))
+  assert(
+    distinctPlan.size > 1,
+    `planner produced >1 DISTINCT subtask (auto division of labour), got ${distinctPlan.size} unique of ${planLines.length}: ${JSON.stringify(planLines)}`,
+  )
+  // Each branch returned real work for ITS subtask: split the RESULTS join into "#N:" chunks
+  // and assert 2+ distinct non-empty branch outputs (per-subtask work, not redundant attempts).
+  const resultsSection = planReply.split(/\n\nRESULTS:\n/)[1] ?? ""
+  const planChunks = resultsSection
+    .split(/(?=^#\d+:)/m)
+    .map((c) => c.replace(/^#\d+:\s*/, "").trim())
+    .filter((c) => c.length > 0)
+  assert(planChunks.length >= 2, `plan-execute produced 2+ branch outputs (one per subtask), got ${planChunks.length}: ${JSON.stringify(resultsSection.slice(0, 400))}`)
+  const distinctBranches = new Set(planChunks.map((c) => c.toLowerCase()))
+  assert(
+    distinctBranches.size >= 2,
+    `plan-execute branch outputs are DISTINCT (each did ITS own subtask), got ${distinctBranches.size} unique of ${planChunks.length}: ${JSON.stringify(planChunks.map((c) => c.slice(0, 80)))}`,
   )
 
   // (D) BOUNDED FAN-OUT gate: 12 DISTINCT subtasks (> the OLD cap of 4) → prove the raised

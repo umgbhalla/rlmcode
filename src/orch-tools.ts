@@ -38,6 +38,7 @@ import { BASE_PROMPT, limits, llm, onEvent, readUsageOf } from "./runtime.ts"
 import { adversarialVerify, finalizeOnMaxSteps, judge, loopUntilDry, MAX_CONCURRENCY, parallelLimit, runNode } from "./orch-recipes.ts"
 import { allocate, type Budget, BudgetExhaustedError, type LeafOpts } from "./orch.ts"
 import { type OrchLoadCtx, runLoadedScript } from "./orch-load.ts"
+import { runPlanner } from "./orch-plan.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "./otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 
@@ -72,7 +73,7 @@ const ORCH_CONCURRENCY = (() => {
   return Number.isFinite(v) ? Math.min(MAX_CONCURRENCY, Math.max(1, Math.floor(v))) : 8
 })()
 
-const STRATEGIES = ["parallel", "judge", "verify", "best_of_n"] as const
+const STRATEGIES = ["parallel", "judge", "verify", "best_of_n", "plan"] as const
 type Strategy = (typeof STRATEGIES)[number]
 
 const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
@@ -208,10 +209,24 @@ const runOrchestration = async ({
 }: OrchestrationOpts): Promise<{ reply: string; branches: number; accepted?: boolean }> => {
   onEvent({ type: "start", nodeId: rootId, phase: `orchestrate:${strategy}` })
   try {
+    // AUTO-decomposition ('plan'): a PLANNER node emits the DISTINCT subtask list itself
+    // (the model's own division of labour, vs the caller passing `subtasks`), THEN we fan
+    // out over that list. The planner runs FIRST (one node, no tools); its subtasks replace
+    // whatever was passed in and drive the branch count (clamped to MAX_BRANCHES). After
+    // planning, the rest is exactly the 'parallel' fan-out path over the generated list.
+    let effectiveSubtasks = subtasks
+    let effectiveBranches = branches
+    if (strategy === "plan") {
+      const planned = await runPlanner({ ai, task, cap: MAX_BRANCHES, optsFor, budget, rootId, onEvent, usageOf: (g) => readUsageOf(g) })
+      if (planned.length === 0) throw new Error("planner produced no subtasks")
+      effectiveSubtasks = planned
+      effectiveBranches = planned.length
+    }
+
     // Branch i's task: its OWN subtask if the model supplied a distinct list, else the
     // shared `task` (parallel-same fallback). subtaskFor keeps the judge/verify message
     // (the overall `task`) separate from per-branch work.
-    const subtaskFor = (i: number): string => subtasks[i]?.trim() || task
+    const subtaskFor = (i: number): string => effectiveSubtasks[i]?.trim() || task
     // BOUNDED fan-out: build n node thunks, run <= ORCH_CONCURRENCY at a time via
     // parallelLimit (the rest QUEUE) so a large branch count never hits CF all at once.
     // parallelLimit preserves input order and maps a failed slot to null; we coerce null
@@ -224,11 +239,19 @@ const runOrchestration = async ({
         ORCH_CONCURRENCY,
       ).then((rs) => rs.map((r) => r ?? "").filter((r) => r.length > 0))
 
-    // parallel: fan out, return the joined replies (no judge/verify).
-    if (strategy === "parallel") {
-      const replies = await fanOut(branches)
+    // parallel / plan: fan out, return the joined replies (no judge/verify). For 'plan'
+    // the fan-out is over the PLANNER-generated subtasks (each branch its own subtask), so
+    // the reply is the numbered join of distinct per-subtask work — real auto division of
+    // labour. We prepend the PLAN (the subtask list) so the caller sees the decomposition
+    // alongside each branch's output.
+    if (strategy === "parallel" || strategy === "plan") {
+      const replies = await fanOut(effectiveBranches)
       if (replies.length === 0) throw new Error("all branches failed")
-      const reply = replies.length === 1 ? replies[0]! : numbered(replies)
+      const joined = replies.length === 1 ? replies[0]! : numbered(replies)
+      const reply =
+        strategy === "plan"
+          ? `PLAN (${effectiveSubtasks.length} subtasks):\n${effectiveSubtasks.map((s, i) => `  ${i + 1}. ${s}`).join("\n")}\n\nRESULTS:\n${joined}`
+          : joined
       onEvent({ type: "done", nodeId: rootId, result: { branches: replies.length } })
       return { reply, branches: replies.length }
     }
@@ -317,7 +340,7 @@ const runOrchestration = async ({
 const orchestrateTool: AxFunction = {
   name: "orchestrate",
   description:
-    "Decompose a task into DISTINCT subtasks and run each on its OWN parallel sub-agent (each with the file/shell tools) — real division of labour, not redundant attempts. PREFER passing `subtasks`: a list of DIFFERENT, independent pieces of the work (e.g. ['audit src/auth for bugs', 'check the tests cover edge cases', 'review error handling']); branch i works subtasks[i], `branches` follows the list length. If you only pass `task` (no subtasks), every branch runs the SAME task (parallel-same fallback — use only when you genuinely want N redundant attempts, e.g. best_of_n). strategy: 'parallel' (fan out, return all), 'judge' (fan out, pick the best), 'verify' (answer once, skeptics vote), 'best_of_n' (re-run fan-out until stable, then judge). branches caps at 100 (at most ~8 run at once; the rest queue). Returns the synthesized result. Sub-agents CANNOT themselves orchestrate (one level deep).",
+    "Decompose a task into DISTINCT subtasks and run each on its OWN parallel sub-agent (each with the file/shell tools) — real division of labour, not redundant attempts. AUTO-DECOMPOSE: use strategy 'plan' with JUST a `task` (no subtasks) — a PLANNER sub-agent splits the task into distinct subtasks ITSELF, then fans out one sub-agent per subtask and returns the plan + each branch's output. Or pass `subtasks` yourself: a list of DIFFERENT, independent pieces (e.g. ['audit src/auth for bugs', 'check the tests cover edge cases', 'review error handling']); branch i works subtasks[i], `branches` follows the list length. If you only pass `task` with a non-plan strategy and no subtasks, every branch runs the SAME task (parallel-same fallback — use only when you genuinely want N redundant attempts, e.g. best_of_n). strategy: 'plan' (a planner auto-decomposes the task, then fan out per subtask), 'parallel' (fan out, return all), 'judge' (fan out, pick the best), 'verify' (answer once, skeptics vote), 'best_of_n' (re-run fan-out until stable, then judge). branches caps at 100 (at most ~8 run at once; the rest queue). Returns the synthesized result. Sub-agents CANNOT themselves orchestrate (one level deep).",
   parameters: {
     type: "object",
     properties: {
@@ -329,8 +352,8 @@ const orchestrateTool: AxFunction = {
       },
       strategy: {
         type: "string",
-        enum: ["parallel", "judge", "verify", "best_of_n"],
-        description: "how to combine the sub-agents (default 'parallel')",
+        enum: ["parallel", "judge", "verify", "best_of_n", "plan"],
+        description: "how to combine the sub-agents (default 'parallel'). 'plan' AUTO-decomposes `task` into subtasks via a planner node, then fans out one sub-agent per subtask.",
       },
       branches: { type: "number", description: "number of parallel sub-agents (1-100, default 2; at most ~8 run at once, the rest queue); ignored when subtasks is given (the list length wins)" },
     },
