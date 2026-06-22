@@ -83,12 +83,20 @@ const ProviderLive = Layer.provide(
 
 export const TracingLive = Layer.mergeAll(SdkLive, ProviderLive)
 
-// Reusable Effect runtime bound to tracing. appRuntime.fn(...) effects run here.
-export const appRuntime = Atom.runtime(TracingLive)
+// ONE shared layer-build memo: both the atom runtime (appRuntime, for the TUI's reactive
+// actions) AND the headless boundary runtime (coreRuntime, for src/core/run.ts) are built over
+// the SAME TracingLive through this memo map — so NodeSdk is constructed EXACTLY ONCE and the
+// single metricReader/spanProcessor instance is bound to ONE MeterProvider. Without the shared
+// memo, a TUI process that mounts appRuntime AND drives runTurn would build TracingLive twice
+// and OTel throws "MetricReader can not be bound to a MeterProvider again".
+const memoMap = Layer.makeMemoMapUnsafe()
 
-// HEADLESS boundary runtime — the SAME TracingLive layer (one NodeSdk build, memoized) made
-// runnable OUTSIDE an Atom registry, so src/core/run.ts can drive turn()'s Effect (which needs
-// OtelTracerProvider) from a PLAIN async-gen with NO @effect/atom dependency. This is the
-// session boundary for the headless engine; the TUI keeps using appRuntime (the atom-bound
-// runtime) for its reactive actions. Both share TracingLive, so the trace pipeline is one.
-export const coreRuntime = ManagedRuntime.make(TracingLive)
+// Reusable Effect runtime bound to tracing. appRuntime.fn(...) effects run here. Built through
+// the shared memoMap (Atom.context) so it reuses the SAME TracingLive build as coreRuntime.
+export const appRuntime = Atom.context({ memoMap })(TracingLive)
+
+// HEADLESS boundary runtime — the SAME TracingLive build (memoized via memoMap) made runnable
+// OUTSIDE an Atom registry, so src/core/run.ts drives turn()'s Effect (which needs
+// OtelTracerProvider) from a PLAIN async-gen with NO @effect/atom dependency. Shares the build
+// with appRuntime, so the trace pipeline is one and the OTel SDK is initialized once.
+export const coreRuntime = ManagedRuntime.make(TracingLive, { memoMap })

@@ -2,12 +2,11 @@
 // atom; effectful actions (new session, send turn) run on the tracing runtime,
 // so calling them from React both updates the UI and emits traces/logs/metrics.
 import { AxMemory } from "@ax-llm/ax"
-import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import * as Tracer from "effect/Tracer"
 import * as Atom from "effect/unstable/reactivity/Atom"
-import { setActivitySink } from "../core/activity.ts"
-import { abortTurn, turn } from "../core/agent.ts"
+import { abortTurn } from "../core/agent.ts"
+import { runTurn, type TurnEvent, type TurnResult } from "../core/run.ts"
 import { appRuntime } from "../otel.ts"
 import { deleteSession, sessionsRT } from "../core/sessions.ts"
 
@@ -152,103 +151,102 @@ const patchNodeTools = (
   return { ...t, nodes: { ...t.nodes, [nodeId]: node }, roots }
 }
 
-// Wire the activity bus to the live transcript for one in-flight turn: narration/tool/
-// result rows patch messages; node events (emitted by the agent's orchestrate tool mid-
-// turn) patch the orch tree.
-const installSink = (
+// STREAMING: grow the in-flight streaming agent message in place (append to its reply text
+// or its thinking), or start one if the trailing message isn't a live stream. Thinking
+// arrives first (model reasons, then answers), so the first thinking_delta mints the message
+// with empty text; reply_delta then grows text and chat.tsx auto-folds the thinking block.
+const grow = (m: readonly Msg[], field: "reply" | "thinking", text: string): readonly Msg[] => {
+  const last = m[m.length - 1]
+  if (last?.kind === "agent" && last.streaming === true) {
+    const next: Msg = field === "reply" ? { ...last, text: last.text + text } : { ...last, thinking: (last.thinking ?? "") + text }
+    return [...m.slice(0, -1), next]
+  }
+  const fresh: Msg = field === "reply" ? { kind: "agent", text, streaming: true } : { kind: "agent", text: "", thinking: text, streaming: true }
+  return [...m, fresh]
+}
+
+// Fold ONE non-terminal TurnEvent into the live transcript / orch tree. Mirrors the old
+// activity-sink switch, now keyed on the FLAT serializable TurnEvent (run.ts) instead of the
+// internal Activity union. The terminal {type:'reply'} is NOT handled here — sendAtom finalizes
+// it ONCE (final-reply-once: the reply prose arrives only via that arm). node events feed the
+// SAME OrchTree reducer the TUI already renders (tui/orch-tree.ts flattens it).
+const applyEvent = (
+  ev: TurnEvent,
   patch: (fn: (m: readonly Msg[]) => readonly Msg[]) => void,
   orchPatch: (fn: (t: OrchTree) => OrchTree) => void,
-) => {
-  // STREAMING: grow the in-flight streaming agent message in place (append to its reply text
-  // or its thinking), or start one if the trailing message isn't a live stream. Thinking
-  // arrives first (model reasons, then answers), so the first thinkingDelta mints the message
-  // with empty text; replyDelta then grows text and chat.tsx auto-folds the thinking block.
-  const grow = (m: readonly Msg[], field: "reply" | "thinking", text: string): readonly Msg[] => {
-    const last = m[m.length - 1]
-    if (last?.kind === "agent" && last.streaming === true) {
-      const next: Msg = field === "reply" ? { ...last, text: last.text + text } : { ...last, thinking: (last.thinking ?? "") + text }
-      return [...m.slice(0, -1), next]
+): void => {
+  switch (ev.type) {
+    case "message":
+      patch((m) => [...m, { kind: "agent", text: ev.text }])
+      break
+    case "reply_delta":
+      patch((m) => grow(m, "reply", ev.text))
+      break
+    case "thinking_delta":
+      patch((m) => grow(m, "thinking", ev.text))
+      break
+    case "tool_call": {
+      const step: Msg = { kind: "tool", id: ev.id, name: ev.name, args: ev.args, status: "running", result: "", startedAt: Date.now() }
+      // PER-NODE TOOL ROUTING: a tagged tool (nodeId set) belongs to that orchestration NODE —
+      // append it to the node's OWN tools list (NodeView renders it under the node). An untagged
+      // tool is the MAIN turn's — append to the transcript (unchanged default).
+      if (ev.nodeId !== undefined) orchPatch((t) => patchNodeTools(t, ev.nodeId!, (tools) => [...tools, step]))
+      else patch((m) => [...m, step])
+      break
     }
-    const fresh: Msg = field === "reply" ? { kind: "agent", text, streaming: true } : { kind: "agent", text: "", thinking: text, streaming: true }
-    return [...m, fresh]
+    case "tool_result": {
+      const settle = (x: Msg): Msg =>
+        x.kind === "tool" && x.id === ev.id ? { ...x, status: ev.isError ? "error" : "ok", result: ev.result } : x
+      if (ev.nodeId !== undefined) orchPatch((t) => patchNodeTools(t, ev.nodeId!, (tools) => tools.map(settle) as typeof tools))
+      else patch((m) => m.map(settle))
+      break
+    }
+    case "node":
+      orchPatch((t) => reduceNode(t, ev))
+      break
+    case "reply":
+      // TERMINAL — handled by sendAtom's finalize (final-reply-once). Never folded here.
+      break
   }
-  setActivitySink((a) => {
-    switch (a.kind) {
-      case "text":
-        patch((m) => [...m, { kind: "agent", text: a.text }])
-        break
-      case "replyDelta":
-        patch((m) => grow(m, "reply", a.text))
-        break
-      case "thinkingDelta":
-        patch((m) => grow(m, "thinking", a.text))
-        break
-      case "tool": {
-        const step: Msg = { kind: "tool", id: a.id, name: a.name, args: a.args, status: "running", result: "", startedAt: Date.now() }
-        // PER-NODE TOOL ROUTING: a tagged tool (nodeId set) belongs to that orchestration NODE —
-        // append it to the node's OWN tools list (NodeView renders it under the node). An untagged
-        // tool is the MAIN turn's — append to the transcript (unchanged default).
-        if (a.nodeId !== undefined) orchPatch((t) => patchNodeTools(t, a.nodeId!, (tools) => [...tools, step]))
-        else patch((m) => [...m, step])
-        break
-      }
-      case "result": {
-        const settle = (x: Msg): Msg =>
-          x.kind === "tool" && x.id === a.id ? { ...x, status: a.isError ? "error" : "ok", result: a.result } : x
-        // Update the matching tool row in place — under the owning node when tagged, else in the
-        // transcript. (A result's nodeId mirrors the call's, set by the same per-node logger.)
-        if (a.nodeId !== undefined) orchPatch((t) => patchNodeTools(t, a.nodeId!, (tools) => tools.map(settle) as typeof tools))
-        else patch((m) => m.map(settle))
-        break
-      }
-      case "node":
-        orchPatch((t) => {
-          const prev = t.nodes[a.nodeId]
-          // parentId is carried on start; on delta/done/error it's undefined, so
-          // ALWAYS keep the previously-known parentId — a child that resolves
-          // before its parent's start event never drops its edge.
-          const parentId = a.parentId ?? prev?.parentId
-          if (a.event === "start") {
-            const node: OrchNode = {
-              id: a.nodeId,
-              ...(parentId !== undefined ? { parentId } : {}),
-              label: a.detail ?? a.nodeId,
-              phase: a.detail ?? "",
-              status: prev?.status ?? "running",
-              ...(prev?.result !== undefined ? { result: prev.result } : {}),
-              ...(prev?.tokens !== undefined ? { tokens: prev.tokens } : {}),
-              // PER-NODE TOOL ROUTING: preserve any tools already collected (a tool can land
-              // before/with the start event under concurrency) so the start never drops them.
-              ...(prev?.tools !== undefined ? { tools: prev.tools } : {}),
-            }
-            const isRoot = parentId === undefined
-            return {
-              nodes: { ...t.nodes, [a.nodeId]: node },
-              roots: isRoot && !t.roots.includes(a.nodeId) ? [...t.roots, a.nodeId] : t.roots,
-              totalTokens: t.totalTokens,
-            }
-          }
-          // delta/done/error update an existing node in place; ignore unknown ids.
-          if (prev === undefined) return t
-          const parentPatch = parentId !== undefined ? { parentId } : {}
-          const resultPatch = a.detail !== undefined ? { result: a.detail } : {}
-          // COST-METER: a done event carries this node's per-node tokens — fold it onto the
-          // node, then recompute the run total as the sum of every node's tokens (idempotent:
-          // a re-emitted done overwrites the same node's tokens, never double-counts).
-          const tokensPatch = a.event === "done" && a.tokens !== undefined ? { tokens: a.tokens } : {}
-          const next: OrchNode =
-            a.event === "done"
-              ? { ...prev, ...parentPatch, status: "done", ...resultPatch, ...tokensPatch }
-              : a.event === "error"
-                ? { ...prev, ...parentPatch, status: "error", ...resultPatch }
-                : { ...prev, ...parentPatch } // delta: streaming chunk, no status change (tree shows phase only)
-          const nodes = { ...t.nodes, [a.nodeId]: next }
-          const totalTokens = Object.values(nodes).reduce((sum, n) => sum + (n.tokens ?? 0), 0)
-          return { ...t, nodes, totalTokens }
-        })
-        break
+}
+
+// The OrchTree node reducer (start mints, delta/done/error update in place), unchanged from the
+// old activity sink — just sourced from the flat node TurnEvent. parentId travels on start; on
+// delta/done/error it's undefined, so ALWAYS keep the previously-known parentId.
+const reduceNode = (t: OrchTree, ev: Extract<TurnEvent, { type: "node" }>): OrchTree => {
+  const prev = t.nodes[ev.nodeId]
+  const parentId = ev.parentId ?? prev?.parentId
+  if (ev.event === "start") {
+    const node: OrchNode = {
+      id: ev.nodeId,
+      ...(parentId !== undefined ? { parentId } : {}),
+      label: ev.detail ?? ev.nodeId,
+      phase: ev.detail ?? "",
+      status: prev?.status ?? "running",
+      ...(prev?.result !== undefined ? { result: prev.result } : {}),
+      ...(prev?.tokens !== undefined ? { tokens: prev.tokens } : {}),
+      ...(prev?.tools !== undefined ? { tools: prev.tools } : {}),
     }
-  })
+    const isRoot = parentId === undefined
+    return {
+      nodes: { ...t.nodes, [ev.nodeId]: node },
+      roots: isRoot && !t.roots.includes(ev.nodeId) ? [...t.roots, ev.nodeId] : t.roots,
+      totalTokens: t.totalTokens,
+    }
+  }
+  if (prev === undefined) return t
+  const parentPatch = parentId !== undefined ? { parentId } : {}
+  const resultPatch = ev.detail !== undefined ? { result: ev.detail } : {}
+  const tokensPatch = ev.event === "done" && ev.tokens !== undefined ? { tokens: ev.tokens } : {}
+  const next: OrchNode =
+    ev.event === "done"
+      ? { ...prev, ...parentPatch, status: "done", ...resultPatch, ...tokensPatch }
+      : ev.event === "error"
+        ? { ...prev, ...parentPatch, status: "error", ...resultPatch }
+        : { ...prev, ...parentPatch }
+  const nodes = { ...t.nodes, [ev.nodeId]: next }
+  const totalTokens = Object.values(nodes).reduce((sum, n) => sum + (n.tokens ?? 0), 0)
+  return { ...t, nodes, totalTokens }
 }
 
 /** Send a message in the active session: append user -> traced turn -> append reply. */
@@ -281,44 +279,40 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
     get.set(busyAtom, true)
     get.set(busySessionsAtom, new Set(get(busySessionsAtom)).add(id))
 
-    // Step-by-step activity from ax's native logger: agent narration, tool
-    // calls (in-flight), and results (which update the matching row in place).
-    installSink(patch, orchPatch)
-
     const startedAt = Date.now()
-    const res = yield* turn(rt.mem, rt.parent, id)(text).pipe(
-      // Clean, one-line error instead of dumping the whole Cause/stack.
-      Effect.catchCause((c) => {
-        const e = Cause.squash(c) as { cause?: { message?: string }; message?: string }
-        const raw = e?.cause?.message ?? e?.message ?? String(e)
-        // GRACEFUL MAX-STEPS removed the "max steps reached" throw (turn() now finalizes
-        // in-loop with tools stripped, never throwing that string), so only abort + the
-        // raw first line remain — the old max-steps string-match branch is dead.
-        const msg = /abort/i.test(raw) ? "Interrupted." : raw.split("\n")[0]!.slice(0, 240)
-        return Effect.succeed({ reply: `⚠ ${msg}`, tokens: undefined, finishReason: undefined, budget: false })
-      }),
-    )
-
-    setActivitySink(null)
-    get.set(busyAtom, false)
-    get.set(busySessionsAtom, ((s) => (s.delete(id), s))(new Set(get(busySessionsAtom))))
-    const meta: TurnMeta = {
-      model: MODEL,
-      ms: Date.now() - startedAt,
-      tokens: res.tokens,
-      finishReason: res.finishReason,
-      budget: res.budget,
-    }
-    // FINALIZE: if the reply streamed live, reconcile that in-flight message to the
-    // AUTHORITATIVE res.reply (correct even if the live deltas were coarse/absent), stamp meta,
-    // clear `streaming` (drops the cursor; keeps the thinking block). Otherwise (non-streaming
-    // provider, or an error short-circuit) append the reply as a fresh row — the unchanged path.
-    patch((m) => {
-      const last = m[m.length - 1]
-      if (last?.kind === "agent" && last.streaming === true) {
-        return [...m.slice(0, -1), { ...last, text: res.reply, meta, streaming: false }]
+    // CONSUME runTurn: a plain AsyncGenerator of FLAT, serializable TurnEvents. Effect runs
+    // INSIDE runTurn (on coreRuntime); here we just for-await. Non-terminal events fold into the
+    // transcript / orch tree (applyEvent); the SINGLE terminal {type:'reply'} carries the final
+    // reply prose and is the ONLY place we set it (final-reply-once). The turn-failure '⚠'
+    // mapping now lives in runTurn — atoms no longer catches the Cause.
+    yield* Effect.promise(async () => {
+      let result: TurnResult | null = null
+      for await (const ev of runTurn(id, text)) {
+        if (ev.type === "reply") result = ev.result
+        else applyEvent(ev, patch, orchPatch)
       }
-      return [...m, { kind: "agent", text: res.reply, meta }]
+      get.set(busyAtom, false)
+      get.set(busySessionsAtom, ((cur) => (cur.delete(id), cur))(new Set(get(busySessionsAtom))))
+      // result is ALWAYS set: runTurn yields exactly one reply, always last.
+      const reply = result?.reply ?? ""
+      const meta: TurnMeta = {
+        model: MODEL,
+        ms: Date.now() - startedAt,
+        tokens: result?.usage.total,
+        // finishReason is provider-wire and was dropped from the normalized TurnResult; the
+        // UI line falls back to model + tokens. budget = the turn finalized at the step ceiling.
+        finishReason: undefined,
+        budget: result?.stopReason === "max_steps",
+      }
+      // FINALIZE: reconcile a live-streamed message to the AUTHORITATIVE reply (correct even if
+      // the deltas were coarse/absent), stamp meta, clear `streaming`. Otherwise append a fresh row.
+      patch((m) => {
+        const last = m[m.length - 1]
+        if (last?.kind === "agent" && last.streaming === true) {
+          return [...m.slice(0, -1), { ...last, text: reply, meta, streaming: false }]
+        }
+        return [...m, { kind: "agent", text: reply, meta }]
+      })
     })
   }),
 )
