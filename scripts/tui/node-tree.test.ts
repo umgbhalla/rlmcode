@@ -20,7 +20,10 @@ await report("node-tree.test", async (a) => {
     // "orchestrate" routes the mock to mock_orch → MOCK_NODES replay → live OrchTree render.
     await d.type("orchestrate the research")
     await d.key("Enter")
-    const tree = await d.waitFor((f) => /fan-out/.test(f) && /Σ/.test(f), { label: "orch tree", timeoutMs: 40000 })
+    // Wait for the COMPLETE Σ footer (…1 error), not merely /Σ/: the footer paints in pieces
+    // as the tree settles, so gating on a partial "Σ" can capture a frame where the trailing
+    // "error" hasn't landed yet. Waiting for the whole line we assert makes the capture stable.
+    const tree = await d.waitFor((f) => /fan-out/.test(f) && /Σ.*1 error/.test(f), { label: "orch tree", timeoutMs: 40000 })
 
     // ── the orchestration section header + UNICODE connectors ───────────────────────────
     a.has(tree, "orchestration", "orchestration section header rendered")
@@ -55,7 +58,8 @@ await report("node-tree.test", async (a) => {
       await capped.waitFor((f) => /message kimi/.test(f))
       await capped.type("orchestrate it")
       await capped.key("Enter")
-      const windowed = await capped.waitFor((f) => /earlier/.test(f) && /Σ/.test(f), { label: "velocity window", timeoutMs: 40000 })
+      // Same stability gate: wait for the COMPLETE Σ footer (…7 nodes) we assert, not a bare /Σ/.
+      const windowed = await capped.waitFor((f) => /earlier/.test(f) && /Σ.*7 node/.test(f), { label: "velocity window", timeoutMs: 40000 })
       a.has(windowed, /┄\s*\+1 earlier/, "velocity cap collapses older siblings into '┄ +1 earlier'")
       a.has(windowed, /read models/, "the most-recent settled child stays visible under the cap")
       a.has(windowed, /Σ.*7 node/, "Σ still counts all 7 nodes — hidden children are folded, not dropped")
