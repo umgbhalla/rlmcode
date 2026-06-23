@@ -1,6 +1,8 @@
 // Claude-Code-style tool presentation: a human label (Bash(cmd), Read(path),
 // Search(pattern)) and a short result summary (6 files, 12 lines), instead of
 // raw function name + JSON params / raw output.
+import { getIconShape } from "./icons.ts"
+
 const field = (args: string, k: string): string => {
   try {
     const o = JSON.parse(args)
@@ -23,23 +25,25 @@ const lines = (s: string) => {
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
 // One glyph per tool TYPE so a transcript that's mostly tool rows is scannable at
-// a glance. Used as the "done" status mark (running keeps the spinner, error ✗).
+// a glance. Used as the "done" status mark (running keeps the spinner, error ✗). The
+// glyphs come from the shared icon map (src/tui/icons.ts) keyed by render ROLE, so the
+// $/→/←/✱/% marks live in ONE place, not duplicated as literals across the TUI.
 export const toolIcon = (name: string): string => {
   switch (name) {
     case "bash":
-      return "$"
+      return getIconShape("bash")
     case "read_file":
-      return "→"
+      return getIconShape("read")
     case "write_file":
     case "edit_file":
-      return "←"
+      return getIconShape("write")
     case "glob":
     case "grep":
-      return "✱"
+      return getIconShape("search")
     case "web_fetch":
-      return "%"
+      return getIconShape("fetch")
     default:
-      return "⏺"
+      return getIconShape("tool")
   }
 }
 

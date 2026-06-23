@@ -9,6 +9,7 @@
 // glyph/color, and the ▾/▸ expander state. The owning chat.tsx renders the tools
 // under the node, indented by `bodyPrefix` so they hang inside the tree.
 import type { Msg, OrchNode, OrchTree } from "./atoms.ts"
+import { getIconShape } from "./icons.ts"
 import { theme } from "./theme.ts"
 
 type ToolMsg = Extract<Msg, { kind: "tool" }>
@@ -34,7 +35,7 @@ export type Row = {
   readonly expanded: boolean
 }
 
-const glyphOf = (s: OrchNode["status"]) => (s === "running" ? "◌" : s === "error" ? "✗" : "✓")
+const glyphOf = (s: OrchNode["status"]) => getIconShape(s === "running" ? "running" : s === "error" ? "error" : "done")
 const colorOf = (s: OrchNode["status"]) => (s === "error" ? theme.error : s === "done" ? theme.ok : theme.muted)
 
 // A node's settled payload is often a serialized object ({"thought":"…","reply":"…"})
@@ -102,7 +103,7 @@ const moreRow = (id: string, prefix: string, hidden: number): Row => ({
   id,
   prefix,
   bodyPrefix: "",
-  glyph: "┄",
+  glyph: getIconShape("more"),
   color: theme.faint,
   label: `+${hidden} earlier`,
   summary: "",
