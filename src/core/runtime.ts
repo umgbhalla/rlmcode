@@ -26,15 +26,37 @@ const MAX_RPS = (() => {
   const v = Number(process.env.RLM_MAX_RPS ?? 12)
   return Number.isFinite(v) && v > 0 ? Math.max(0.1, v) : 12
 })()
-const minIntervalRateLimiter = (rps: number): AxRateLimiterFunction => {
+// CONTENTION (FIX B / STUCK-ANALYSIS R2+R5): chat turns AND background workflow nodes share this
+// ONE limiter (nodes reuse the same `llm` service — workflow.ts `extra.ai ?? llm`), so a single
+// global `nextAllowed` clock. The defect: `nextAllowed` grew UNBOUNDED — a `parallel` burst of N
+// node starts pushes the clock to now+N*interval, so the INTERACTIVE chat turn's NEXT forward
+// reserves BEHIND all N and waits ~N*interval. With N up to parallelLimit's cap that starves a
+// user's turn behind a background fan-out (the "crawl" amplifier). FIX: CAP the reservation
+// backlog — `nextAllowed` may run at most RLM_MAX_BACKLOG intervals ahead of `now`, so ANY single
+// caller (notably the chat turn's next step) waits AT MOST backlog*interval no matter how large the
+// concurrent burst. Steady-state RPS is unchanged (still one start per interval); only the WORST-
+// CASE wait behind a flood is bounded — anti-thundering-herd staggering kept, unbounded starvation
+// removed. A burst beyond the backlog simply starts together at the cap rather than queuing forever.
+// ponytail: ONE shared lane (chat + nodes), bounded but not isolated. Upgrade: a dedicated higher-
+// priority chat lane (a second AxRateLimiterFunction passed in the node forward opts so background
+// nodes throttle on a SEPARATE clock) once the node call sites thread a per-lane limiter.
+const MAX_BACKLOG = (() => {
+  const v = Number(process.env.RLM_MAX_BACKLOG ?? 8)
+  return Number.isFinite(v) && v > 0 ? Math.max(1, Math.floor(v)) : 8
+})()
+const minIntervalRateLimiter = (rps: number, maxBacklog: number): AxRateLimiterFunction => {
   const interval = 1000 / rps
+  const cap = maxBacklog * interval // the clock may lead `now` by at most this many ms
   let nextAllowed = 0
   return async (reqFunc) => {
     const now = Date.now()
-    const wait = Math.max(0, nextAllowed - now)
-    // Reserve this slot on the shared clock BEFORE awaiting, so concurrent callers each
-    // get a distinct, staggered start time (one forward begins every `interval` ms).
-    nextAllowed = Math.max(now, nextAllowed) + interval
+    // Clamp the reserved start to within `cap` of now: a flood can't push this caller's slot (or
+    // any later one — incl. the interactive turn) arbitrarily far into the future. `start` is the
+    // SOONEST free slot that respects both the per-interval stagger and the backlog cap.
+    const start = Math.min(Math.max(now, nextAllowed), now + cap)
+    const wait = start - now
+    // Reserve the NEXT slot one interval past this start, so concurrent callers still stagger.
+    nextAllowed = start + interval
     if (wait > 0) await new Promise((r) => setTimeout(r, wait))
     return reqFunc()
   }
@@ -42,7 +64,7 @@ const minIntervalRateLimiter = (rps: number): AxRateLimiterFunction => {
 // The shared limiter instance — attached in agent.ts's setOptions (the ONE setOptions call,
 // since setOptions reassigns every field). Exported so the live harness's standalone service
 // can attach the SAME throttle and the bounded-fan-out gate exercises the real limited path.
-export const rateLimiter: AxRateLimiterFunction = minIntervalRateLimiter(MAX_RPS)
+export const rateLimiter: AxRateLimiterFunction = minIntervalRateLimiter(MAX_RPS, MAX_BACKLOG)
 
 // The capable base system prompt shared by the MAIN agent (agent.ts re-exports it)
 // and every orchestration NODE (rlm-workflow.ts nodeGen). Lives HERE — the neutral
