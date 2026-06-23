@@ -5,8 +5,8 @@
 // thinking state) are bugs of the REAL app — its createCliRenderer + createRoot mount, its
 // useKeyboard/useFocus wiring, the atoms orchestration loop. TestRenderer renders a tree you
 // hand it; it would NOT exercise `bun run chat`'s actual boot + input path. terminal-control
-// (vendor/terminal-control — same author as opentui + motel) drives the REAL app through a
-// real pseudo-terminal, captures the rendered cell grid as text, and injects typed text /
+// (@kitlangton/terminal-control — same author as opentui + motel) drives the REAL app through
+// a real pseudo-terminal, captures the rendered cell grid as text, and injects typed text /
 // named keys / raw bytes (mouse) — exactly the surface this gate needs. The `--host opentui`
 // launch flag is built for this. We confirmed a trivial render+capture boots before building
 // on it (AX2_MOCK=1 + the lazy-llm seam let chat.tsx mount with NO Cloudflare env).
@@ -17,7 +17,7 @@
 // frame-stable predicate poll (waitFor over captured text), never setTimeout-then-assert.
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { TerminalControl, type Session, type Key } from "../../vendor/terminal-control/packages/test/src/index.ts"
+import { TerminalControl, type Session, type Key } from "@kitlangton/terminal-control"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = join(HERE, "..", "..")
