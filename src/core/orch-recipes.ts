@@ -9,9 +9,9 @@
 import type { AxAIService, AxGen, AxGenIn, AxGenOut, AxStepHooks } from "@ax-llm/ax"
 import { makeNodeLogger } from "./activity.ts"
 import { type Budget, type BudgetUsage, node, type NodeOpts, type NodeEvent, tokensOf } from "./orch.ts"
-import { LEAF_TIMEOUT_MS, resilientNode } from "./orch-resilience.ts"
+import { classifyTransient, LEAF_TIMEOUT_MS, NODE_ATTEMPTS, resilientNode } from "./orch-resilience.ts"
 // Re-export the resilience surface so callers/tests keep a single recipe import site.
-export { LEAF_TIMEOUT_MS, NodeTimeoutError, resilientNode, withRetry, withTimeout } from "./orch-resilience.ts"
+export { classifyTransient, LEAF_TIMEOUT_MS, NODE_ATTEMPTS, NodeTimeoutError, resilientNode, withRetry, withTimeout } from "./orch-resilience.ts"
 
 // Hard upper bound on in-flight thunks for parallelLimit — the absolute concurrency
 // ceiling regardless of what a caller (or the model) asks for. A big fan-out (e.g. 100
@@ -93,7 +93,7 @@ const withNodeLogger = (opts: NodeOpts, nodeId: string): NodeOpts =>
 // Real ax types end-to-end (AxStepHooks / AxStepContext.removeFunctions) — no `any`.
 //
 // The in-loop finalize is clean when the model has done >=1 real tool step before the cap (the
-// realistic case: RLM_MAX_STEPS default 50, verified clean at low caps >=2). At the DEGENERATE cap
+// realistic case: RLM_MAX_STEPS default 24, verified clean at low caps >=2). At the DEGENERATE cap
 // maxSteps=1 (first step is also the last, ZERO prior tool work) kimi, primed by a tool-heavy
 // system prompt, can emit raw `<|tool_call_begin|>` sentinel tokens as text instead of prose — a
 // non-empty but garbage reply. That degenerate shape is now CAUGHT and coerced: runNode() (below)
@@ -183,9 +183,14 @@ export const runNode = async <I extends AxGenIn, O extends AxGenOut>(
   try {
     // TRANSIENT RESILIENCE on the node path: per-node timeout (abort a hang) + retry-with-
     // backoff on transient (429/5xx/network/timeout) errors only — a logic error
-    // (AxFunctionError/budget) fails fast. A retry emits a delta so the live tree shows it.
+    // (AxFunctionError/budget) fails fast. RATE-LIMIT VISIBILITY: a retry emits a structured
+    // `retry` NodeEvent (cause + attempt + backoff) BEFORE the backoff sleep, so the live tree +
+    // composer SHOW "⏳ rate-limited · retry 2/3 · 4s" WHILE backing off — a 429 is no longer
+    // silent (the node sat "running…" indistinguishable from a hang). `attempt` is the UPCOMING
+    // attempt number (tryIndex 0 just failed ⇒ the 2nd attempt is next), out of NODE_ATTEMPTS.
     let result = await resilientNode(gen, opts, nodeId, ai, input, {
-      onRetry: (tryIndex, _err, delayMs) => onEvent({ type: "delta", nodeId, chunk: `⟳ transient failure — retry ${tryIndex + 1} in ${delayMs}ms` }),
+      onRetry: (tryIndex, err, delayMs) =>
+        onEvent({ type: "retry", nodeId, cause: classifyTransient(err), attempt: tryIndex + 2, max: NODE_ATTEMPTS, delayMs }),
       timeoutMs,
     })
     // GRACEFUL-FINALIZE CLEANER (orch-recipes.ts:77 Upgrade): if a stripped-tools finalize

@@ -20,6 +20,7 @@ import { BASE_TOOLS } from "./tools.ts"
 import { setNodeSpanTracer, setTurnContext } from "./orch-spans.ts"
 import { BASE_PROMPT, limits, makeOnEvent, rateLimiter, setTurnEmit } from "./runtime.ts"
 import { setMockEmit } from "./mock-ai.ts"
+import { drainWithWatchdog } from "./stream-watchdog.ts"
 import { WORKFLOW_TOOLS } from "./workflow.ts"
 
 // Step/token ceilings default to today's app values (limits, from runtime.ts): maxSteps is
@@ -48,12 +49,14 @@ const RLM_WORKFLOW_OVERLAY = [
   // everywhere is a NODE. (rlm_workflow's fixed strategies are now just a few lines of script.)
   "## Orchestration",
   "You can run deterministic multi-node flows, not just single replies. ONE tool: `workflow({ script })` — AUTHOR a JS orchestration script the engine runs. The unit is always a NODE.",
-  // WHEN to orchestrate.
-  "WHEN to orchestrate: (1) the task SPLITS into independent parts that don't depend on each other's output — fan them out with `parallel`; (2) you want the BEST of N attempts or to VERIFY an answer — generate N and `judge`, or run N skeptics and vote; (3) a BIG blob (long file, pasted log, whole concatenated module) won't fit the window — mine it with the `rlm` prim.",
-  // WHEN NOT.
-  "WHEN NOT: a trivial or strictly sequential task — DO IT DIRECTLY with your own file/shell tools. Do NOT fan out a one-liner. Do NOT spin up a node to read one file or run one command. Sequential steps (read → edit → test) are ONE node's task (yours): orchestration is for INDEPENDENT work or N-way redundancy, never to wrap a single linear chore.",
+  // GUARDRAIL FIRST (FIX C / over-exploration): a thinking model reads the WHOLE prompt before it
+  // reasons, so leading with the orchestration patterns PRIMES it to fan out a trivial ask. Put the
+  // "do it directly" rule at the TOP — the DEFAULT is a direct answer; orchestration is the exception.
+  "DEFAULT: answer directly. Most asks — a question, a one-file edit, a single command, a short sequential chore (read → edit → test) — are ONE node's work (yours): just use your own file/shell tools and reply. Do NOT fan out. Do NOT spin up a node to read one file or run one command. Do NOT wrap a single linear task in a workflow. Reach for `workflow` ONLY when the next paragraph's conditions genuinely hold.",
+  // WHEN to orchestrate (the exception, AFTER the default).
+  "WHEN to orchestrate (the exception): (1) the task SPLITS into independent parts that don't depend on each other's output — fan them out with `parallel`; (2) you want the BEST of N attempts or to VERIFY an answer — generate N and `judge`, or run N skeptics and vote; (3) a BIG blob (long file, pasted log, whole concatenated module) won't fit the window — mine it with the `rlm` prim. If none of these hold, answer directly.",
   // The prims.
-  "`workflow({ script })`: the script body sees ONLY these prims: `phase(title)` groups the nodes that follow under a live tree heading; `log(msg)` narrates; `agent(prompt, {label?, model?, effort?, schema?})` spawns ONE sub-agent NODE (file/shell tools) → its text (or a validated object with schema, or null if it dies); `parallel(thunks)` is a BARRIER (all concurrent, ≤8 at once, a throwing thunk → null — `.filter(Boolean)`); `pipeline(items, ...stages)` flows each item through every stage with NO barrier (`stage(prev, item, i)`); `judge(candidates, criteria?)` picks the best verbatim; `rlm(context, query)` mines a BIG blob in a code runtime kept OUT of the prompt (the RLM node-kind — just a prim); `budget` is `{total, spent(), remaining()}`. `return <value>` is what comes back to you.",
+  "`workflow({ script })`: the body runs IN-PROCESS with host access (plain JS, NOT a sandbox) bounded only by the budget + a wall-clock timeout — <= your own bash tool, no new authority. It uses these prims (the orchestration API, the intended interface — not an enforced boundary): `phase(title)` groups the nodes that follow under a live tree heading; `log(msg)` narrates; `agent(prompt, {label?, model?, effort?, schema?})` spawns ONE sub-agent NODE (file/shell tools) → its text (or a validated object with schema, or null if it dies); `parallel(thunks)` is a BARRIER (all concurrent, ≤8 at once, a throwing thunk → null — `.filter(Boolean)`); `pipeline(items, ...stages)` flows each item through every stage with NO barrier (`stage(prev, item, i)`); `judge(candidates, criteria?)` picks the best verbatim; `rlm(context, query)` mines a BIG blob in a code runtime kept OUT of the prompt (the RLM node-kind — just a prim); `budget` is `{total, spent(), remaining()}`. `return <value>` is what comes back to you.",
   // Patterns as scripts (replacing the old fixed strategy menu).
   "PATTERNS (write the strategy as a script): division of labour — `phase('audit'); const rs = await parallel([()=>agent('audit src/auth for bugs'),()=>agent('check tests cover edge cases'),()=>agent('review error handling')]); return rs.filter(Boolean).join('\\n');`. Best of N + judge — `const c = await parallel([0,1,2].map(()=>()=>agent('design a rate limiter'))); return await judge(c.filter(Boolean));`. Verify (2-vote) — `const v = (await parallel([0,1].map(i=>()=>agent('refute: '+claim, {schema: VERDICT, label: 'vote:'+i})))).filter(Boolean); const ok = v.length>=2 && v.every(x=>!x.refuted);`. Survey-loop (the workhorse) — `for (let r=1;r<=12;r++){ phase('survey'); const s = await agent('scan -> total', {schema: S}); if (s.total===0) break; await pipeline(frontier, fix, verify, apply); }`. Mine a blob — `return await rlm(BIG_BLOB, 'which function registers the /auth route?');`.",
   // The hard rules.
@@ -100,6 +103,22 @@ export const SYSTEM_PROMPT_CHARS = buildSystemPrompt().length
 class ChatError {
   readonly _tag = "ChatError"
   constructor(readonly cause: unknown) {}
+}
+
+// LEAK FIX (D3): a module-level registry of per-agent `turnAborters` clearers. `turnAborters` is
+// closed over INSIDE createAgent (one Map per agent, so two agents never collide on a sessionId),
+// so the module-level deleteSession (sessions.ts) cannot reach it directly. Each createAgent
+// registers its own clearer here; clearTurnAborter(sessionId) fans the drop out across every live
+// agent, so closing a session frees its AbortController in all of them. Without this, the
+// per-session AbortController accumulates forever (sessionIds are never reused). A Set (not a Map)
+// because there is no key to dedupe agents on — each createAgent owns one distinct clearer.
+const aborterClearers = new Set<(sessionId: string) => boolean>()
+// Drop a closed session's AbortController across every agent. Called from deleteSession. Returns
+// whether any agent held an entry for the session (for the leak unit test).
+export const clearTurnAborter = (sessionId: string): boolean => {
+  let existed = false
+  for (const clear of aborterClearers) if (clear(sessionId)) existed = true
+  return existed
 }
 
 // The token budget (orch.allocate) throws BudgetExhaustedError, wrapped by
@@ -212,6 +231,12 @@ export const createAgent = (config: AxAgentConfig) => {
     c.abort()
     return true
   }
+  // LEAK FIX (D3): register THIS agent's turnAborters clearer in the module-level registry so
+  // deleteSession (via clearTurnAborter, fanning out across agents) frees this session's
+  // AbortController on close — turnAborters is closed over here, unreachable from the module sink
+  // otherwise. Returns whether an entry existed. (Never deregistered: an agent lives for the
+  // process; the registry holds at most one clearer per createAgent call.)
+  aborterClearers.add((sessionId: string): boolean => turnAborters.delete(sessionId))
 
   /**
    * Build a traced turn for a session. `chat.turn` (our Effect.fn span, kind=client,
@@ -327,15 +352,12 @@ export const createAgent = (config: AxAgentConfig) => {
                 logger: makeLiveLogger(emit),
                 debug: true,
               }
-              let reply = ""
-              for await (const d of chat.streamingForward(service, { message: msg }, opts as Parameters<typeof chat.streamingForward>[2])) {
-                const delta = (d as { delta?: { reply?: string; thought?: string } }).delta ?? {}
-                if (delta.thought) emit({ kind: "thinkingDelta", text: delta.thought })
-                if (delta.reply) {
-                  reply += delta.reply
-                  emit({ kind: "replyDelta", text: delta.reply })
-                }
-              }
+              // STALL-WATCHDOG (FIX A): drain the stream under a per-chunk stall deadline + an
+              // outer wall-clock cap, both threading `aborter` so a fire cancels the CF request and
+              // breaks the loop (→ run.ts .finally → queue.close → a "⚠ …" partial). Good turns are
+              // byte-identical: the watchdog only ever fires on dead air / a runaway.
+              const stream = chat.streamingForward(service, { message: msg }, opts as Parameters<typeof chat.streamingForward>[2])
+              const reply = await drainWithWatchdog(stream, aborter, emit)
               // ADVISORY budget charge (runNode used to do this; the streaming drain bypasses it).
               budget.charge(usageOf(chat))
               return { reply }

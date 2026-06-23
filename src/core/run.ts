@@ -41,7 +41,10 @@ export type TurnEvent =
   | {
       readonly type: "node"
       readonly nodeId: string
-      readonly event: "start" | "delta" | "done" | "error"
+      // RATE-LIMIT VISIBILITY: "retry" joins the node lifecycle — a transient (429/5xx) backoff in
+      // progress, carried as a flat event (the formatted status rides `detail`) so the UI reducer
+      // sets a live retry status on the node. Fully serializable like every other arm.
+      readonly event: "start" | "delta" | "retry" | "done" | "error"
       readonly parentId?: string | undefined
       readonly detail?: string | undefined
       readonly tokens?: number | undefined
@@ -134,7 +137,7 @@ const toEvent = (a: Activity): TurnEvent => {
       return {
         type: "node",
         nodeId: a.nodeId,
-        event: a.event as "start" | "delta" | "done" | "error",
+        event: a.event as "start" | "delta" | "retry" | "done" | "error",
         parentId: a.parentId,
         detail: a.detail,
         tokens: a.tokens,
@@ -156,11 +159,22 @@ const okResult = (raw: RawTurnResult): TurnResult => ({
 // Build the final reply EVENT for a failed/aborted turn. The '⚠ ...' text mapping moved here
 // from atoms.ts: an abort reads as 'Interrupted.', anything else as the first clean error line.
 const errorResult = (cause: Cause.Cause<unknown>): TurnResult => {
-  const e = Cause.squash(cause) as { cause?: { message?: string }; message?: string; _tag?: string }
+  const e = Cause.squash(cause) as { cause?: { message?: string; status?: unknown }; message?: string; _tag?: string; status?: unknown }
   const raw = e?.cause?.message ?? e?.message ?? String(e)
   const aborted = /abort/i.test(raw)
   const budget = /budget/i.test(raw) || e?._tag === "BudgetExhaustedError"
-  const msg = aborted ? "Interrupted." : raw.split("\n")[0]!.slice(0, 240)
+  // RATE-LIMIT VISIBILITY (main-turn 429): unlike a node, the main turn does NOT retry — a 429
+  // mid-stream fails the turn. ax surfaces it as a status error (429 on the error or its inner
+  // cause) and/or a "429"/"rate limit"/"too many requests" message. Detect it and word the
+  // ErrorCard CLEARLY ("Rate limited (429) …") instead of dumping ax's raw status-error line, so
+  // the user knows it's throttling — not an opaque provider fault. kind:"provider" (it IS one).
+  const rateLimited =
+    !aborted && !budget && (isStatus429(e?.status) || isStatus429(e?.cause?.status) || /\b429\b|rate.?limit|too many requests/i.test(raw))
+  const msg = aborted
+    ? "Interrupted."
+    : rateLimited
+      ? "Rate limited (429) — too many requests. Try again shortly."
+      : raw.split("\n")[0]!.slice(0, 240)
   const kind: TurnError["kind"] = aborted ? "aborted" : budget ? "budget_exhausted" : "provider"
   return {
     reply: `⚠ ${msg}`,
@@ -170,6 +184,10 @@ const errorResult = (cause: Cause.Cause<unknown>): TurnResult => {
     error: { kind, message: msg },
   }
 }
+
+// True when a squashed-error `status` field is HTTP 429 (the duck-typed ax status shape, same
+// discriminator orch-resilience.classifyTransient uses). Tolerates a string "429" too.
+const isStatus429 = (status: unknown): boolean => status === 429 || status === "429"
 
 // A reply EVENT helper for the no-session / empty-message early exit (final-reply-once still holds).
 const earlyReply = (why: string): TurnEvent => ({

@@ -5,8 +5,15 @@
 // this SMALL — fixtures, not a second provider.
 import type { AxFunction } from "@ax-llm/ax"
 import type { Activity } from "./activity.ts"
-import type { ActivitySink, NodeEvent } from "./orch.ts"
+import { type ActivitySink, type NodeEvent, retryStatus } from "./orch.ts"
 import { getTurnEmit } from "./runtime.ts"
+
+// Holdable pace for the time-sensitive fixtures (the rate-limit retry below): a real backoff is
+// brief, so without a pause the "⏳ rate-limited" retry state flips to ✓ faster than the frame gate
+// can capture it. RLM_MOCK_DELAY_MS (the same knob mock-ai's stream uses) holds the retry state so
+// the frame gate sees it DURING the backoff; default 0 keeps non-timed tests instant.
+const MOCK_DELAY_MS = Number(process.env.RLM_MOCK_DELAY_MS ?? 0)
+const sleep = (ms: number): Promise<void> => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve())
 
 // ── CANNED ORCH FEED ────────────────────────────────────────────────────────────────
 // A fixed NodeEvent script so the orch tree renders deterministically with NO model: a
@@ -77,5 +84,125 @@ export const MOCK_ORCH_TOOL: AxFunction = {
   func: async (_args: unknown, extra?: Readonly<{ sessionId?: string; abortSignal?: AbortSignal }>) => {
     feedMockNodes(getTurnEmit(extra?.sessionId))
     return "orchestrated 4 nodes (1 error)"
+  },
+}
+
+// ── CANNED TRANSCRIPT-MATURITY FEED (separate from the orch fixture so tool-grouping.test stays
+// byte-identical) — drives the MATURED tool render (tool-view.tsx): the three render MODES + the
+// output-collapse, all owned by a single still-running `worker` subagent NODE (a node IS a
+// sub-agent / the Task surface; running ⇒ its owned tools stay shown). Exercises:
+//   - a SETTLED bash with a 12-line stdout → a BLOCK row whose body COLLAPSES to 10 lines + a
+//     "+N more" footer (Shell cap 10), expandable;
+//   - a SETTLED read_file (12 lines) → a BLOCK row carrying the "12 lines" per-tool detail;
+//   - a SETTLED bash that FAILED (exit 127) → a RED ✗ error card;
+//   - a tool CALL with NO result → a RUNNING tool, rendered as a dim INLINE one-liner (no body).
+// The 12-line bodies are deterministic literal strings (no real shell), so the collapse math is
+// frame-stable. NOT in production — replayed only by the transcript frame gate.
+const TWELVE = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join("\n")
+const MOCK_TRANSCRIPT_TOOLS: ReadonlyArray<{ id: string; name: string; args: string; result: string; isError: boolean; settle: boolean }> = [
+  { id: "tx_run", name: "bash", args: JSON.stringify({ command: "seq 12" }), result: TWELVE, isError: false, settle: true },
+  { id: "tx_read", name: "read_file", args: JSON.stringify({ path: "src/big.ts" }), result: TWELVE, isError: false, settle: true },
+  { id: "tx_err", name: "bash", args: JSON.stringify({ command: "missing-bin" }), result: "exit 127: command not found", isError: true, settle: true },
+  { id: "tx_live", name: "grep", args: JSON.stringify({ pattern: "TODO" }), result: "", isError: false, settle: false }, // RUNNING (no result) → inline
+]
+const feedTranscriptNodes = (emit: ActivitySink): void => {
+  const push = (a: Activity): void => emit(a)
+  // one running subagent node owns the tools (start, never done ⇒ stays expanded).
+  push({ kind: "node", nodeId: "worker", event: "start", detail: "subagent" })
+  for (const t of MOCK_TRANSCRIPT_TOOLS) {
+    push({ kind: "tool", id: t.id, name: t.name, args: t.args, nodeId: "worker" })
+    if (t.settle) push({ kind: "result", id: t.id, result: t.result, isError: t.isError, nodeId: "worker" })
+  }
+}
+
+// TEST-ONLY transcript tool — like MOCK_ORCH_TOOL but replays the richer per-tool cluster above so
+// the transcript-maturity frame gate (scripts/tui/transcript.test.ts) can assert the inline/block/
+// error modes + the "+N more" collapse. Off in production (registered only under RLM_MOCK).
+export const MOCK_TRANSCRIPT_TOOL: AxFunction = {
+  name: "mock_transcript",
+  description: "TEST ONLY: replay a canned per-tool cluster (inline/block/error + collapse) for the headless TUI harness.",
+  parameters: { type: "object", properties: {}, required: [] },
+  func: async (_args: unknown, extra?: Readonly<{ sessionId?: string; abortSignal?: AbortSignal }>) => {
+    feedTranscriptNodes(getTurnEmit(extra?.sessionId))
+    return "ran 4 tools (1 error, 1 running)"
+  },
+}
+
+// ── CANNED DIFF FEED (diff-viewer frame gate) — a settled edit_file + a settled write_file owned by
+// one still-running `editor` subagent NODE, so the MATURED diff render (tool-view.tsx ToolBody) draws
+// the native opentui <diff> from canned data. edit_file carries deterministic old/new strings whose
+// LCS (toolui.toolDiff) yields a clean context + one -/+ pair; write_file is an all-add diff. The
+// content tokens are unique + line-stable so the frame gate can assert the native diff (line numbers +
+// the +/- gutter, content with the leading sign STRIPPED) over the crude LCS <text> fallback it
+// replaces. NOT in production — replayed only by scripts/tui/diff-viewer.test.ts under RLM_MOCK.
+//   The edit changes ONE line (the greeting string) inside three context lines, so the diff reads as a
+// real minimal edit (context kept, one - then one +), not a whole-block rewrite. .ts filetype drives
+// the syntax highlighter through the populated SyntaxStyle (theme.makeSyntaxStyle).
+const DIFF_OLD = ['export function greet(name: string) {', '  const msg = "hi " + name', '  return msg', '}'].join("\n")
+const DIFF_NEW = ['export function greet(name: string) {', '  const msg = "hello, " + name', '  return msg', '}'].join("\n")
+const WRITE_BODY = ['export const VERSION = "0.0.1"', 'export const NAME = "rlmcode"'].join("\n")
+// A SECOND edit on a .py file (a DIFFERENT filetype) so the diff-viewer gate proves the native
+// <diff> is FILETYPE-GENERAL — the .py path runs through the SAME populated SyntaxStyle as .ts (the
+// renderer is filetype-driven, not TS-hardcoded), which is the "syntax-highlighted" claim across a
+// second language. One changed line inside two context lines ⇒ a clean minimal -/+ diff.
+const PY_OLD = ['def greet(name):', '    return "hi " + name'].join("\n")
+const PY_NEW = ['def greet(name):', '    return "hello, " + name'].join("\n")
+const MOCK_DIFF_TOOLS: ReadonlyArray<{ id: string; name: string; args: string; result: string; isError: boolean }> = [
+  { id: "df_edit", name: "edit_file", args: JSON.stringify({ path: "src/greet.ts", old_string: DIFF_OLD, new_string: DIFF_NEW }), result: "updated", isError: false },
+  { id: "df_py", name: "edit_file", args: JSON.stringify({ path: "src/greet.py", old_string: PY_OLD, new_string: PY_NEW }), result: "updated", isError: false },
+  { id: "df_write", name: "write_file", args: JSON.stringify({ path: "src/version.ts", content: WRITE_BODY }), result: "written", isError: false },
+]
+const feedDiffNodes = (emit: ActivitySink): void => {
+  const push = (a: Activity): void => emit(a)
+  // one running subagent node owns the file-mutation tools (start, never done ⇒ stays expanded).
+  push({ kind: "node", nodeId: "editor", event: "start", detail: "subagent" })
+  for (const t of MOCK_DIFF_TOOLS) {
+    push({ kind: "tool", id: t.id, name: t.name, args: t.args, nodeId: "editor" })
+    push({ kind: "result", id: t.id, result: t.result, isError: t.isError, nodeId: "editor" })
+  }
+}
+
+// TEST-ONLY diff tool — replays a canned edit_file + write_file cluster so the diff-viewer frame gate
+// (scripts/tui/diff-viewer.test.ts) can assert the native opentui <diff> render (syntax-highlighted
+// +/- lines, line numbers, split/unified by width). Off in production (registered only under RLM_MOCK).
+export const MOCK_DIFF_TOOL: AxFunction = {
+  name: "mock_diff",
+  description: "TEST ONLY: replay a canned edit_file + write_file cluster (native diff render) for the headless TUI harness.",
+  parameters: { type: "object", properties: {}, required: [] },
+  func: async (_args: unknown, extra?: Readonly<{ sessionId?: string; abortSignal?: AbortSignal }>) => {
+    feedDiffNodes(getTurnEmit(extra?.sessionId))
+    return "edited 2 files (1 edit, 1 write)"
+  },
+}
+
+// ── CANNED RATE-LIMIT RETRY FEED (rate-limit-visible frame gate) — a child node that hits a 429,
+// emits the `retry` NodeEvent (so it shows "⏳ rate-limited · retry 2/3 · 4s" WHILE backing off),
+// HOLDS (RLM_MOCK_DELAY_MS) so the frame gate captures the live retry state, then RECOVERS (done ✓).
+// The retry detail uses retryStatus() — the SAME formatter the real path uses — so the fixture and
+// production agree byte-for-byte. NOT in production — replayed only by rate-limit.test under RLM_MOCK.
+const RL_BACKOFF_MS = 4000 // a fixed, legible backoff so the badge reads "· 4s" (test-stable)
+const feedRateLimitNodes = async (emit: ActivitySink, signal?: AbortSignal): Promise<void> => {
+  const push = (a: Activity): void => emit(a)
+  // root fan-out + one child that will hit the 429.
+  push({ kind: "node", nodeId: "orchestrate", event: "start", detail: "fan-out" })
+  push({ kind: "node", nodeId: "scan", parentId: "orchestrate", event: "start", detail: "scan routes" })
+  // the 429 RETRY — the live backoff signal (cause rate_limited, attempt 2/3, the 4s backoff).
+  push({ kind: "node", nodeId: "scan", event: "retry", detail: retryStatus("rate_limited", 2, 3, RL_BACKOFF_MS) })
+  await sleep(MOCK_DELAY_MS) // hold the "⏳ rate-limited" state so the frame gate captures it
+  if (signal?.aborted) return // a cancelled turn leaves the node mid-retry (no spurious recover)
+  // RECOVER — the retry cleared, the node finishes clean (✓), proving the backoff was transient.
+  push({ kind: "node", nodeId: "scan", event: "done", detail: "found 3 routes", tokens: 800 })
+}
+
+// TEST-ONLY rate-limit tool — replays a 429-then-recover node so the rate-limit frame gate
+// (scripts/tui/rate-limit.test.ts) asserts the "⏳ rate-limited · retry 2/3 · 4s" status shows
+// DURING the backoff, then ✓ on recover. Off in production (registered only under RLM_MOCK).
+export const MOCK_RATELIMIT_TOOL: AxFunction = {
+  name: "mock_ratelimit",
+  description: "TEST ONLY: replay a 429-then-recover node (visible retry backoff) for the headless TUI harness.",
+  parameters: { type: "object", properties: {}, required: [] },
+  func: async (_args: unknown, extra?: Readonly<{ sessionId?: string; abortSignal?: AbortSignal }>) => {
+    await feedRateLimitNodes(getTurnEmit(extra?.sessionId), extra?.abortSignal)
+    return "scanned routes (recovered after a rate-limit retry)"
   },
 }

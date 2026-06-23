@@ -18,7 +18,7 @@ import { BASE_TOOLS } from "../core/tools.ts"
 import { createAgent, projectDocLoaded } from "../core/agent.ts"
 import { makeRunTurn } from "../core/run.ts"
 import { makeMockAI, MOCK_MODEL } from "../core/mock-ai.ts"
-import { MOCK_ORCH_TOOL } from "../core/mock.ts"
+import { MOCK_DIFF_TOOL, MOCK_ORCH_TOOL, MOCK_RATELIMIT_TOOL, MOCK_TRANSCRIPT_TOOL } from "../core/mock.ts"
 import { llm, MODEL } from "../core/runtime.ts"
 import { deleteSession, sessionsRT } from "../core/sessions.ts"
 
@@ -27,7 +27,7 @@ import { deleteSession, sessionsRT } from "../core/sessions.ts"
 // TUI pulls its turn boundary from.
 const defaultAgent =
   process.env.RLM_MOCK === "1"
-    ? createAgent({ ai: makeMockAI(process.env.RLM_MOCK_STREAM === "1"), model: MOCK_MODEL, tools: [...BASE_TOOLS, MOCK_ORCH_TOOL] })
+    ? createAgent({ ai: makeMockAI(process.env.RLM_MOCK_STREAM === "1"), model: MOCK_MODEL, tools: [...BASE_TOOLS, MOCK_ORCH_TOOL, MOCK_TRANSCRIPT_TOOL, MOCK_DIFF_TOOL, MOCK_RATELIMIT_TOOL] })
     : createAgent({ ai: llm, model: MODEL })
 
 // The DEFAULT-agent turn boundary used by the TUI's sendAtom: a serializable AsyncGenerator of
@@ -46,3 +46,10 @@ export { projectDocLoaded }
 // directly: newSessionAtom sets a richer chat.session root span, deleteSessionAtom releases it.
 // App-internal plumbing — re-exported here so src/tui/* never deep-imports src/core/sessions.ts.
 export { deleteSession, sessionsRT }
+
+// The model POOL (the two routable thinking models) + its name type — surfaced for the TUI's model
+// picker (dialogs.tsx). App-display only; re-exported through this composition layer so src/tui/*
+// reads the pool WITHOUT deep-importing src/core/models.ts (the crosscore boundary). The picker maps
+// a chosen ModelName → MODELS[name].id for the composer's model label.
+export { MODELS } from "../core/models.ts"
+export type { ModelName } from "../core/models.ts"

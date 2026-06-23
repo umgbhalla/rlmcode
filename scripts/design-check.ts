@@ -54,7 +54,6 @@ const resolveCoreTarget = (importerPath: string, specifier: string, resolved?: s
 // export. Everything else that must stay live is reached either from here or from a real consumer
 // (tests/examples) now that those are in the graph — so there is no hand-maintained keep-alive list.
 const APP_ENTRYPOINTS = ["src/tui/chat.tsx"]
-
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
 const NEST_BUDGET = 8 // block nesting depth per function
 const PARAM_BUDGET = 6 // parameters per function

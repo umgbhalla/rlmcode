@@ -6,6 +6,9 @@
 import { AxMemory } from "@ax-llm/ax"
 import * as Tracer from "effect/Tracer"
 import type { AnySpan } from "effect/Tracer"
+import { clearTurnEmit } from "./runtime.ts"
+import { clearTurnContext } from "./orch-spans.ts"
+import { clearTurnAborter } from "./agent.ts"
 
 export type SessionRT = {
   readonly mem: AxMemory
@@ -29,8 +32,17 @@ export const ensureSession = (id: string): SessionRT => {
   return rt
 }
 
-// LEAK FIX: drop a closed session's runtime objects (its AxMemory + the ExternalSpan
-// handle) so a long-lived process doesn't accumulate dead sessions' memory. The Map is
-// the ONLY non-serializable session store (atoms holds the serializable view); closing a
-// session in the UI must call this so its mem is released. Returns whether an entry existed.
-export const deleteSession = (id: string): boolean => sessionsRT.delete(id)
+// LEAK FIX (D3): drop a closed session's runtime objects (its AxMemory + the ExternalSpan
+// handle) AND its per-turn module-Map entries so a long-lived process doesn't accumulate dead
+// sessions. sessionsRT is one of FOUR per-session module stores: the other three are turn-keyed
+// Maps (turnEmits in runtime.ts, turnCtx in orch-spans.ts, turnAborters closed over per agent in
+// agent.ts) that were SET per turn but never dropped — each held a dead closure/context/controller
+// for the process lifetime (sessionIds are never reused). Closing a session in the UI must call
+// this so ALL FOUR free their entry. Returns whether the sessionsRT entry existed (the canonical
+// liveness signal; the turn-Maps may legitimately be absent if the session never ran a turn).
+export const deleteSession = (id: string): boolean => {
+  clearTurnEmit(id)
+  clearTurnContext(id)
+  clearTurnAborter(id)
+  return sessionsRT.delete(id)
+}

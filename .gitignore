@@ -13,6 +13,7 @@ artifacts
 .codex/
 .agents/
 .rlmcode_history.jsonl
+.rlmcode.json
 *.history.jsonl
 worker/node_modules/
 worker/.wrangler/

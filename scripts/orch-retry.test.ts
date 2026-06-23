@@ -15,9 +15,9 @@ import { AxFunctionError, type AxAIService, type AxGen } from "@ax-llm/ax"
 // here and dynamic-import the recipes below — static imports would hoist above this.
 process.env.RLM_NODE_BACKOFF_MS = "2"
 process.env.RLM_NODE_RETRIES = "2"
-const { NodeTimeoutError, parallelLimit, resilientNode, runNode, withRetry, withTimeout } = await import("../src/core/orch-recipes.ts")
+const { classifyTransient, NODE_ATTEMPTS, NodeTimeoutError, parallelLimit, resilientNode, runNode, withRetry, withTimeout } = await import("../src/core/orch-recipes.ts")
 type EmitSink = import("../src/core/orch-recipes.ts").EmitSink
-const { BudgetExhaustedError } = await import("../src/core/orch.ts")
+const { BudgetExhaustedError, retryStatus } = await import("../src/core/orch.ts")
 type NodeOpts = import("../src/core/orch.ts").NodeOpts
 type NodeEvent = import("../src/core/orch.ts").NodeEvent
 
@@ -83,6 +83,40 @@ await (async () => {
     const out = await resilientNode(gen, optsFor(), "n1b", fakeAi, { message: "q" })
     assert(out.reply === "net-ok", `network error retried + recovered, got ${JSON.stringify(out)}`)
     assert(state.calls === 2, `network transient retried once, got ${state.calls} calls`)
+  }
+
+  // 1c) RATE-LIMIT VISIBILITY — classifyTransient distinguishes a 429 (rate_limited) from any
+  //     other transient (5xx / network → transient), and retryStatus formats the live badge.
+  {
+    assert(classifyTransient(statusErr(429)) === "rate_limited", "classifyTransient: 429 → rate_limited")
+    assert(classifyTransient(statusErr(503)) === "transient", "classifyTransient: 503 → transient")
+    assert(classifyTransient(networkErr()) === "transient", "classifyTransient: network → transient")
+    assert(
+      retryStatus("rate_limited", 2, 3, 4000) === "⏳ rate-limited · retry 2/3 · 4s",
+      `retryStatus 429 wording, got ${JSON.stringify(retryStatus("rate_limited", 2, 3, 4000))}`,
+    )
+    assert(
+      retryStatus("transient", 2, 3, 250) === "⏳ retrying 2/3 · 1s",
+      `retryStatus transient + sub-second backoff rounds to 1s, got ${JSON.stringify(retryStatus("transient", 2, 3, 250))}`,
+    )
+  }
+
+  // 1d) RATE-LIMIT VISIBILITY — runNode emits a structured `retry` NodeEvent (cause + attempt N/M
+  //     + backoff) DURING a 429-then-recover, BEFORE the node settles `done`. This is the live
+  //     signal the tree + composer render — proving a 429 backoff is no longer silent.
+  {
+    const { events, sink } = recorder()
+    const { gen } = scriptedGen([statusErr(429), null], "rl-ok")
+    const out = await runNode({ nodeId: "rl-node", gen, opts: optsFor(), onEvent: sink }, fakeAi, { message: "q" })
+    assert(out.reply === "rl-ok", `runNode recovers the 429, got ${JSON.stringify(out)}`)
+    const retry = events.find((e): e is Extract<NodeEvent, { type: "retry" }> => e.type === "retry")
+    assert(retry !== undefined, "runNode emitted a `retry` NodeEvent during the 429 backoff")
+    assert(retry?.cause === "rate_limited", `the retry event names the 429 cause (rate_limited), got ${retry?.cause}`)
+    assert(retry?.attempt === 2 && retry?.max === NODE_ATTEMPTS, `the retry event carries attempt 2/${NODE_ATTEMPTS}, got ${retry?.attempt}/${retry?.max}`)
+    // ORDER: the retry fires BEFORE the terminal done (the node is still backing off when it shows).
+    const iRetry = events.findIndex((e) => e.type === "retry")
+    const iDone = events.findIndex((e) => e.type === "done")
+    assert(iRetry >= 0 && iDone >= 0 && iRetry < iDone, "the retry signal precedes the node's done (shown WHILE backing off)")
   }
 
   // 2) LOGIC errors are NOT retried — AxFunctionError throws on the FIRST failure.

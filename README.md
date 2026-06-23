@@ -42,6 +42,11 @@ Built on Bun + [Effect v4](https://effect.website) + [opentui](https://github.co
   OpenTelemetry to `motel` — the trace mirrors the live tree.
 - **`⌘K` command palette** and an importable SDK at [`src/core/sdk.ts`](src/core/sdk.ts)
   (`createAgent → Agent`).
+- **Selectable themes.** A palette registry (Catppuccin · Gruvbox · Tokyo Night · high-contrast)
+  with a `/theme` picker (`⌘K` → `theme`) that switches live and persists your choice.
+- **Sticky session header + native diffs.** `rlmcode · session <id>` anchors at the top — the id
+  is the motel `chat.session` span tag, so what's on screen is the handle you grep in the trace
+  viewer. `edit`/`write` tool calls render as real syntax-highlighted +/- diffs inline.
 
 ---
 
@@ -73,6 +78,12 @@ Hit `⌘K` for the command palette.
 
 <p align="center">
   <img src="assets/palette.png" alt="The ⌘K command palette" width="800" />
+</p>
+
+Pick a theme with `⌘K → theme` (or `/theme`) — it switches live and persists.
+
+<p align="center">
+  <img src="assets/theme.png" alt="The /theme picker — selectable palettes, switched live, over the live node-tree" width="800" />
 </p>
 
 > [!WARNING]

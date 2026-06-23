@@ -1,72 +1,35 @@
-// COMMAND PALETTE (⌘K / Ctrl+K) — the centered command dialog the composer's "Cmd+K commands"
-// hint advertises. termcast actions.tsx ⌘K + dialog.tsx (centered overlay) + list.tsx item row,
-// ported to opentui-React. Presentational: chat.tsx owns the open/query/selection state + the
-// command registry + key routing (so the palette intercepts keys deterministically while the
-// composer YIELDS focus via captureFocus); this draws the dialog from those props.
+// COMMAND PALETTE (⌘K / Ctrl+K) — now a THIN WRAPPER over the generic DialogSelect<T> primitive
+// (dialog-select.tsx). It used to be its own centered card (search line + hand-rolled filtered
+// list + footer); that chrome is gone — the palette is just DialogSelect specialised to the command
+// registry (title "Commands", a run/nav/close footer). Every dialog in the TUI (this palette, plus
+// the session/model pickers to come) now shares ONE primitive, so they read identically and the
+// filter/scroll/keyboard-nav logic lives in exactly one place (the useDialogSelect controller).
 //
-// An absolute, full-screen overlay (termcast DialogOverlay position:absolute) so it floats over
-// the transcript without reflowing it; a single centered card holds the search line + the
-// filtered command list (› active marker, bold title, right-aligned key hint) + a footer.
-import { TextAttributes } from "@opentui/core"
+// chat.tsx still owns the open/close boolean + DRIVES the useDialogSelect controller (the live
+// command registry + key routing) so the palette intercepts keys deterministically while the
+// composer YIELDS focus via captureFocus; this component only supplies the command-specific chrome
+// (title/footer/placeholder) and hands the model straight to DialogSelect. A command's `value` in
+// the controller is its `run` thunk, so the controller's submit() = invoke the command.
+import { DialogSelect, type DialogSelectModel } from "./dialog-select.tsx"
 import { type ResolvedTheme } from "./theme.ts"
 
-// A command the palette can run. `hint` is the optional key shortcut shown right-aligned.
+// A command the palette can run. `hint` is the optional key shortcut shown right-aligned (it maps
+// to DialogSelect's Option.hint). `run` is the action chat.tsx wraps as the option's value, so the
+// controller's submit() invokes it. Kept here (not in dialog-select.tsx) because it's the
+// command-palette's DOMAIN shape — DialogSelect itself is value-generic.
 export type Command = { readonly title: string; readonly hint?: string | undefined; readonly run: () => void }
 
-export function Palette({
-  query,
-  sel,
-  commands,
-  theme,
-}: {
-  query: string
-  sel: number
-  commands: readonly Command[]
-  theme: ResolvedTheme
-}) {
+// The palette = DialogSelect titled "Commands" with the command run/nav/close footer. The model is
+// built by chat.tsx via useDialogSelect over the command registry (each option's value = a command
+// run thunk); selecting a row runs that command + closes the palette (chat.tsx wires onSelect).
+export function Palette({ model, theme }: { model: DialogSelectModel<() => void>; theme: ResolvedTheme }) {
   return (
-    <box position="absolute" left={0} top={0} width="100%" height="100%" justifyContent="center" alignItems="center">
-      <box
-        border
-        borderStyle="rounded"
-        borderColor={theme.accent}
-        backgroundColor={theme.backgroundPanel}
-        style={{ width: 64, maxWidth: "90%", paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1 }}
-      >
-        {/* header: title + esc hint */}
-        <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1 }}>
-          <text fg={theme.textMuted} attributes={TextAttributes.BOLD}>Commands</text>
-          <text fg={theme.textMuted}>esc</text>
-        </box>
-        {/* search line */}
-        <box flexDirection="row" style={{ paddingLeft: 1, paddingTop: 1, paddingBottom: 1 }}>
-          <text fg={theme.accent}>{"❯ "}</text>
-          <text fg={query.length > 0 ? theme.text : theme.muted}>{query.length > 0 ? query : "search commands…"}</text>
-        </box>
-        {/* filtered list */}
-        <box flexDirection="column" style={{ paddingLeft: 1 }}>
-          {commands.length === 0 ? (
-            <text fg={theme.muted}>  no matching command</text>
-          ) : (
-            commands.map((c, i) => (
-              <box key={c.title} flexDirection="row" justifyContent="space-between" style={{ paddingRight: 1 }}>
-                <text
-                  fg={i === sel ? theme.accent : theme.text}
-                  attributes={i === sel ? TextAttributes.BOLD : 0}
-                >
-                  {i === sel ? "› " : "  "}
-                  {c.title}
-                </text>
-                {c.hint !== undefined ? <text fg={theme.textMuted}>{c.hint}</text> : null}
-              </box>
-            ))
-          )}
-        </box>
-        {/* footer */}
-        <box style={{ paddingLeft: 1, paddingTop: 1 }}>
-          <text fg={theme.textMuted}>↵ run · ↑↓ select · esc close</text>
-        </box>
-      </box>
-    </box>
+    <DialogSelect
+      title="Commands"
+      model={model}
+      placeholder="search commands…"
+      footer="↵ run · ↑↓ select · esc close"
+      theme={theme}
+    />
   )
 }

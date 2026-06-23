@@ -10,27 +10,21 @@
 // 1..3 columns by MAX_COLUMN_WIDTH+COLUMN_GAP, fill column-major) → whichKeyColumns(). Solid's
 // For/Show/createMemo map to .map()/{cond && …}/useMemo; no Solid mechanics cross over.
 //
-// ponytail: the `bindings` are seeded from chat.tsx's chatBindings() (a hand-rolled table that
-// mirrors the live useKeyboard handlers) rather than read from a real keybind REGISTRY — none
-// exists yet (no @opentui/keymap dep; the if-chain in chat.tsx is the source of truth).
-// Upgrade: when keys.ts (a {keys,desc,group,when}[] registry + mode stack) lands, drop
-// chatBindings() and pass registry.active(mode) here — the Binding shape is already that row.
+// The `bindings` are now read STRAIGHT FROM THE REGISTRY: chat.tsx passes
+// activeBindings(mode, binds) (keys.ts) — the active-mode rows projected to this Binding display
+// shape — so the overlay is genuinely "presentational over the registry" (the old hand-rolled
+// chatBindings() table + the `?`-toggle predicate that lived here are gone; the toggle is a
+// registry chord, the bindings a registry projection). The Binding row IS the registry's display row.
 import { useMemo } from "react"
 import { TextAttributes } from "@opentui/core"
 import { type ResolvedTheme } from "./theme.ts"
+import { Panel, Separator } from "./ui/panel.tsx"
 
-// One active keybind, the row the registry's active-mode query yields (opencode Entry :70-76).
-// `keys` = the printable chord ("esc", "↑↓", "ctrl+k"); `desc` = what it does; `group` = the
-// category it buckets under (the which-key column header).
+// One active keybind, the row the registry's active-mode query yields (opencode Entry :70-76;
+// keys.ts Bind extends this with the executable mode/chord/run bits). `keys` = the printable
+// display chord ("esc", "↑↓", "ctrl+k"); `desc` = what it does; `group` = the category it buckets
+// under (the which-key column header).
 export type Binding = { readonly keys: string; readonly desc: string; readonly group: string }
-
-// isWhichKeyToggle(): does this key event request the which-key overlay? The `?` chord (no
-// ctrl/meta). Extracted from chat.tsx's onChatKey so the chord-predicate's branches live in the
-// which-key module (keeps the host handler under its complexity budget). `k` is opentui's ParsedKey
-// (we read .sequence / .name / .ctrl / .meta). ponytail: `any` — opentui's key type isn't exported
-// here. Upgrade: import opentui's ParsedKey once it's surfaced (same `any` chat.tsx's handlers use).
-export const isWhichKeyToggle = (k: { sequence?: string; name?: string; ctrl?: boolean; meta?: boolean }): boolean =>
-  !k.ctrl && !k.meta && (k.sequence === "?" || k.name === "?")
 
 // A group = a category label + its bindings (opencode Group :78-81).
 export type BindingGroup = { readonly label: string; readonly bindings: readonly Binding[] }
@@ -123,17 +117,16 @@ export function WhichKey({
   if (groups.length === 0) return null
   return (
     <box position="absolute" left={0} top={0} width="100%" height="100%" justifyContent="center" alignItems="center">
-      <box
-        border
-        borderStyle="rounded"
-        borderColor={theme.accent}
-        backgroundColor={theme.backgroundPanel}
-        style={{ maxWidth: "90%", width: cardWidth, paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1 }}
-      >
+      <Panel variant="card" borderColor={theme.accent} backgroundColor={theme.backgroundPanel} width={cardWidth}>
         {/* header: title + esc hint */}
-        <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1, marginBottom: 1 }}>
+        <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1 }}>
           <text fg={theme.textMuted} attributes={TextAttributes.BOLD}>Keybindings</text>
           <text fg={theme.textMuted}>esc</text>
+        </box>
+        {/* divider under the header (shared Separator). Width = the content area minus this box's
+            own L/R padding (2), so the rule fills the card without wrapping to a second line. */}
+        <box style={{ paddingLeft: 1, paddingRight: 1, marginBottom: 1 }}>
+          <Separator color={theme.border} width={Math.max(1, contentWidth - 2)} />
         </box>
         {/* grouped, multi-column-if-wide grid */}
         <box flexDirection="row" style={{ paddingLeft: 1 }}>
@@ -145,7 +138,7 @@ export function WhichKey({
         <box style={{ paddingLeft: 1, paddingTop: 1 }}>
           <text fg={theme.textMuted}>? toggle · esc close</text>
         </box>
-      </box>
+      </Panel>
     </box>
   )
 }

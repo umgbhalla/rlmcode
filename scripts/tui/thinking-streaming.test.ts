@@ -30,12 +30,14 @@ await report("thinking-streaming.test", async (a) => {
     await d.type("how many matches in src?")
     await d.key("Enter")
 
-    // The reasoning_content streamed as a thinkingDelta → the dim/italic thinking block, KEPT
-    // under the settled reply. Its presence is the proof a STREAMED thought reached the render
-    // (the non-streaming baseline below asserts its absence).
+    // The reasoning_content streamed as a thinkingDelta → the reasoning block. Once the turn
+    // SETTLES, that block COLLAPSES to a "▸ Thought · <duration>" header (messages.tsx
+    // ThinkingPart reasoning-collapse) — the body hides by default, so the streaming proof is the
+    // collapse header carrying a duration summary (a streamed thought DID arrive + settle; a turn
+    // with NO reasoning_content renders no Thought header at all). The reveal-on-toggle of the
+    // collapsed body (click the header → the full reasoning shows) is proven in transcript.test.ts.
     const reply = await d.waitFor((f) => /Found 3 matches in src\/\. Done\./.test(f), { label: "settled reply", timeoutMs: 40000 })
-    a.has(reply, "User wants the file count", "the streamed reasoning_content renders as a live thinking block")
-    a.has(reply, "grep the source dir, then report the number", "the full streamed thought is kept under the settled reply")
+    a.has(reply, /▸ Thought · \d/, "the streamed reasoning settles into a collapsed 'Thought · <duration>' header")
 
     // The reply was STREAMED in pieces ("Found **3 " · "matches** in " · "`src/`. Done.") and
     // ax re-assembled them; the settled markdown row carries the whole reply byte-for-byte —
