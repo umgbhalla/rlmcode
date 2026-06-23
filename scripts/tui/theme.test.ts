@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // FRAME GATE — THEME. Proves the theme system (src/tui/theme.ts: a termcast-style ResolvedTheme
-// token object, Catppuccin-Mocha as the ONE default palette, PLUS the syntax-scope SyntaxStyle that
+// token object, a registry of selectable palettes (Catppuccin-Mocha the default), PLUS the syntax-scope SyntaxStyle that
 // makes fenced code + markdown + diff render in palette) is correct AND a pure re-skin:
 //
 //  (1) RENDER UNCHANGED — mount the REAL chat.tsx headlessly (terminal-control PTY + RLM_MOCK
