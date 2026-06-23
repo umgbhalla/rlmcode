@@ -42,7 +42,7 @@ await report("focus.test", async (a) => {
     // (opentui relays the input row under the status bar; the durable signal is that
     // keystrokes still reach the input, not that the placeholder cell is visible).
     const afterSend = await d.waitFor((f) => /Found 3 matches|Done\./.test(f), { label: "reply", timeoutMs: 40000 })
-    a.has(afterSend, "⏺", "agent reply marker rendered")
+    a.has(afterSend, /Found 3 matches/, "agent reply rendered")
     a.has(afterSend, "first message", "the prior user message stays in the transcript")
 
     // ── second message drives an ORCHESTRATE turn → expandable node rows appear, so Tab has

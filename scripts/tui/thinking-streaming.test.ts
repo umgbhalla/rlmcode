@@ -40,7 +40,6 @@ await report("thinking-streaming.test", async (a) => {
     // The reply was STREAMED in pieces ("Found **3 " · "matches** in " · "`src/`. Done.") and
     // ax re-assembled them; the settled markdown row carries the whole reply byte-for-byte —
     // proof the per-chunk replyDelta path ran (a half-piece would leave a truncated reply).
-    a.has(reply, "⏺", "the streamed reply renders as a marked agent row (the reply box)")
     a.has(reply, "Found 3 matches in src/. Done.", "the streamed pieces re-assembled into the full reply")
     a.has(reply, /280 tok/, "turn meta shows the token total (reasoning attributed into tokens)")
   } finally {

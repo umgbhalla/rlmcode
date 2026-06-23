@@ -29,17 +29,16 @@ await report("messages.test", async (a) => {
     await d.type("count matches in src")
     await d.key("Enter")
     await d.waitFor((f) => /count matches in src/.test(f), { label: "user message in transcript" })
-    // The settled reply carries the "▣ model · duration" footer line (assistantFooter). The
-    // model is the per-turn meta.model (atoms MODEL const); duration is the turn wall-clock.
-    // Gate on BOTH the settled markdown body AND the footer so a transitional frame (footer up
-    // before the markdown reflow settles, or vice-versa) never wins the capture.
-    const reply = await d.waitFor((f) => /▣ @cf\/moonshotai\/kimi/.test(f) && /Found 3 matches in src\/\. Done\./.test(f), { label: "assistant footer + body", timeoutMs: 40000 })
+    // The settled reply carries the model · duration · tokens footer (assistantFooter). The
+    // model is the per-turn meta.model; duration is the turn wall-clock. Gate on BOTH the settled
+    // markdown BODY and the footer so a transitional frame never wins the capture. (We assert
+    // CONTENT, not decorative markers — the reply has no leading badge anymore, by design.)
+    const reply = await d.waitFor((f) => /@cf\/moonshotai\/kimi/.test(f) && /Found 3 matches in src\/\. Done\./.test(f), { label: "assistant footer + body", timeoutMs: 40000 })
 
     a.has(reply, "count matches in src", "user card shows the prompt text")
     a.has(reply, /│/, "user card renders its left-border (the │ border glyph)")
-    a.has(reply, "⏺", "assistant reply renders its marked agent row")
     a.has(reply, "Found 3 matches in src/. Done.", "assistant reply renders the settled markdown body")
-    a.has(reply, /▣ @cf\/moonshotai\/kimi-k2\.7-code · 0\.0s/, "assistant card shows the '▣ model · duration' footer line")
+    a.has(reply, /@cf\/moonshotai\/kimi-k2\.7-code · 0\.0s/, "assistant footer shows model · duration")
     a.has(reply, /· 280 tok/, "assistant footer carries the turn token total after model · duration")
 
     // ── ERROR CARD ──────────────────────────────────────────────────────────────────────

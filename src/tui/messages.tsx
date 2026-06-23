@@ -74,20 +74,14 @@ export function AssistantReply({
   // stays free of the renderer's <markdown> + style wiring.
   renderBody: (content: string) => React.ReactNode
 }) {
+  // No leading marker — the reply body renders straight at paddingLeft=3 (aligned with the
+  // thinking + footer), not pushed in behind a ⏺/▣ badge. Cleaner, opencode-plain.
   return (
     <box flexDirection="column" style={{ marginTop: 1, paddingLeft: 3 }}>
-      <box flexDirection="row" style={{ width: "100%" }}>
-        <text fg={theme.ok}>{"⏺ "}</text>
-        <box style={{ flexGrow: 1, flexShrink: 1 }}>
-          {streaming ? <text fg={theme.text}>{`${text}█`}</text> : renderBody(text)}
-        </box>
-      </box>
+      {streaming ? <text fg={theme.text}>{`${text}█`}</text> : renderBody(text)}
       {meta && (
         <box style={{ marginTop: 1 }}>
-          <text fg={meta.budget ? theme.busy : theme.muted}>
-            <span fg={theme.accent}>{"▣ "}</span>
-            {assistantFooter(meta, fmtTokens)}
-          </text>
+          <text fg={meta.budget ? theme.busy : theme.muted}>{assistantFooter(meta, fmtTokens)}</text>
         </box>
       )}
     </box>
