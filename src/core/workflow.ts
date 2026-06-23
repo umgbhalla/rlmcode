@@ -1,15 +1,23 @@
 // WORKFLOW TOOL — the PRIMARY self-orchestration interface: the model AUTHORS a JS orchestration
-// script (not a fixed JSON strategy-menu) and the engine runs it IN-PROCESS. The script body sees
-// ONLY the prims (phase/log/agent/parallel/pipeline/judge/rlm/budget/args) bound by
-// buildWorkflowPrims() over the EXISTING engine (orch.ts 5 prims + orch-recipes recipes) — this
-// file adds NO 6th core primitive. RLM is the rlm() prim, one node-kind among many.
+// script (not a fixed JSON strategy-menu) and the engine runs it IN-PROCESS. The prims
+// (phase/log/agent/parallel/pipeline/judge/rlm/budget/args) bound by buildWorkflowPrims() over the
+// EXISTING engine (orch.ts 5 prims + orch-recipes recipes) are the INTENDED orchestration interface
+// — this file adds NO 6th core primitive. RLM is the rlm() prim, one node-kind among many.
 //
-// RUN MODEL: an async Function whose only in-scope names are the prims — exactly like the
-// assistant's Workflow tool. NO AxJSRuntime worker, NO sandbox ceremony.
+// RUN MODEL + HONEST SCOPE (D1): the body is a `new Function` whose PARAMETERS are the prims, so a
+// script references them as free names — but `new Function` does NOT sandbox: the body runs
+// IN-PROCESS with FULL host access (it can reach `process.env`, `globalThis`, `require`), bounded
+// only by the token budget + the wall-clock timeout below. The prims are the intended API, NOT an
+// enforced boundary. This is NO AxJSRuntime worker, NO sandbox ceremony — by design for 0.0.1.
 //
-// ponytail: in-process LLM-authored JS = host authority, but <= the bash tool already exposed
-// (tools.ts is unsandboxed real shell), so in-process JS eval adds ZERO new authority.
-// Upgrade: AxJSRuntime isolate if untrusted scripts ever run.
+// ponytail: in-process LLM-authored JS = full host authority (process.env/globalThis reachable),
+// but <= the bash tool already exposed (tools.ts is unsandboxed real shell — see SECURITY.md), so
+// in-process JS eval adds ZERO new authority over what the agent already has. The one asymmetry is
+// auditability: a script reading process.env directly leaves NO `Tool: bash` tree row.
+// Upgrade: run the body in an AxJSRuntime isolate (a worker the host can terminate) with the prims
+// as host globals — proven for the RLM executor in rlm-node.ts — so the prims become the REAL
+// enforced boundary (no process/globalThis) AND the wall-clock cap becomes total. Use if untrusted
+// scripts ever run; out of 0.0.1 scope (the user wanted the simple in-process model).
 //
 // THE SAFETY MODEL (reuses the existing guards via buildWorkflowPrims): budget ceiling (advisory
 // SOFT, runaway-only HARD throw), abortSignal threaded into every node, branch cap via
@@ -56,10 +64,12 @@ const costFooter = (tokens: number): string => {
 const signalOf = (extra: { abortSignal?: AbortSignal } | undefined): AbortSignal =>
   extra?.abortSignal ?? new AbortController().signal
 
-// Run the model-authored script body in-process: an async Function whose ONLY parameter names are
-// the prims (so the script body references them as free names). The script's return value is what
-// the workflow tool returns to the model. A SyntaxError (the model wrote bad JS) or a thrown error
-// surfaces as a string — never crashes the turn.
+// Run the model-authored script body in-process: an async Function whose PARAMETER names are the
+// prims (so the script body references them as free names). NB those parameters do NOT bound what
+// the body can reach — `new Function` is not a sandbox, so the body also sees host globals
+// (process/globalThis); see the file header (D1). The script's return value is what the workflow
+// tool returns to the model. A SyntaxError (the model wrote bad JS) or a thrown error surfaces as a
+// string — never crashes the turn.
 const runScript = async (script: string, prims: WorkflowPrims): Promise<unknown> => {
   const { phase, log, agent, parallel, pipeline, judge, rlm, budget, args } = prims
   // The async Function wrapper: the body runs with the prims bound as parameters. `await` is
@@ -83,7 +93,7 @@ const runScript = async (script: string, prims: WorkflowPrims): Promise<unknown>
 const workflowTool: AxFunction = {
   name: "workflow",
   description:
-    "AUTHOR a JS orchestration script and the engine runs it IN-PROCESS — for multi-node work (fan out, judge, mine a big blob), not a single reply. The script body uses these prims (the ONLY names in scope), mirroring a real workflow API: phase(title) groups the nodes that follow under a live tree heading; log(msg) narrates; agent(prompt, {label?, model?, effort?, schema?}) spawns ONE sub-agent NODE (file/shell tools) and returns its text (or a validated object with schema, or null if it dies); parallel(thunks) is a BARRIER — runs all concurrently (≤8 at once, the rest queue), a throwing thunk → null, so .filter(Boolean) the result; pipeline(items, ...stages) flows each item through every stage independently with NO barrier (stage(prev, item, i)); judge(candidates, criteria?) picks the best candidate verbatim; rlm(context, query) is the RLM NODE KIND — mine a BIG blob (long file/log/module) in a code runtime kept OUT of the prompt; budget is {total, spent(), remaining()} (advisory). `return <value>` is what comes back to you. EXAMPLE (fan out + judge): phase('audit'); const rs = await parallel([()=>agent('audit src/auth for bugs'),()=>agent('check the tests cover edge cases'),()=>agent('review error handling')]); return await judge(rs.filter(Boolean)); EXAMPLE (mine a blob): return await rlm(BIG_BLOB, 'which function registers the /auth route?'); EXAMPLE (pipeline): const outs = await pipeline(files, (prev,f)=>agent('summarize '+f), (prev)=>agent('refine: '+prev)); return outs.filter(Boolean).join('\\n'). RULES: sub-agent nodes carry the file/shell tools ONLY and canNOT themselves run a workflow (one level deep). Do NOT wrap a trivial or strictly sequential chore — do that directly. Write plain JS (loops/conditionals/await allowed at the top of the body).",
+    "AUTHOR a JS orchestration script and the engine runs it IN-PROCESS — for multi-node work (fan out, judge, mine a big blob), not a single reply. The script body uses these prims (the orchestration API), mirroring a real workflow API: phase(title) groups the nodes that follow under a live tree heading; log(msg) narrates; agent(prompt, {label?, model?, effort?, schema?}) spawns ONE sub-agent NODE (file/shell tools) and returns its text (or a validated object with schema, or null if it dies); parallel(thunks) is a BARRIER — runs all concurrently (≤8 at once, the rest queue), a throwing thunk → null, so .filter(Boolean) the result; pipeline(items, ...stages) flows each item through every stage independently with NO barrier (stage(prev, item, i)); judge(candidates, criteria?) picks the best candidate verbatim; rlm(context, query) is the RLM NODE KIND — mine a BIG blob (long file/log/module) in a code runtime kept OUT of the prompt; budget is {total, spent(), remaining()} (advisory). `return <value>` is what comes back to you. EXAMPLE (fan out + judge): phase('audit'); const rs = await parallel([()=>agent('audit src/auth for bugs'),()=>agent('check the tests cover edge cases'),()=>agent('review error handling')]); return await judge(rs.filter(Boolean)); EXAMPLE (mine a blob): return await rlm(BIG_BLOB, 'which function registers the /auth route?'); EXAMPLE (pipeline): const outs = await pipeline(files, (prev,f)=>agent('summarize '+f), (prev)=>agent('refine: '+prev)); return outs.filter(Boolean).join('\\n'). RULES: sub-agent nodes carry the file/shell tools ONLY and canNOT themselves run a workflow (one level deep). Do NOT wrap a trivial or strictly sequential chore — do that directly. Write plain JS (loops/conditionals/await allowed at the top of the body).",
   parameters: {
     type: "object",
     properties: {

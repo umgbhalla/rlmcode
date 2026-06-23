@@ -1,6 +1,8 @@
 // WORKFLOW PRIMS — the in-process bindings the model-authored workflow script runs against.
-// buildWorkflowPrims() returns the ONLY names in scope for a script body: phase/log/agent/
-// parallel/pipeline/judge/rlm/budget/args. Each is a THIN binding over the EXISTING engine
+// buildWorkflowPrims() returns the prims bound as the script body's PARAMETERS: phase/log/agent/
+// parallel/pipeline/judge/rlm/budget/args. They are the INTENDED orchestration API, NOT an
+// enforced scope (the body runs via `new Function` in-process and also sees host globals — see
+// workflow.ts header, D1). Each is a THIN binding over the EXISTING engine
 // (orch.ts 5 prims + orch-recipes recipes) — this file adds NO 6th core primitive. It mirrors
 // the assistant Workflow API exactly (parallel = barrier + null-on-throw; pipeline = no barrier).
 //
@@ -48,7 +50,8 @@ const agentGen = (label: string): AxGen => {
 }
 const BASE_TOOL_NAMES = BASE_TOOLS.map((f) => f.name)
 
-// The assistant Workflow API shape — the names the script body sees in scope. agent/parallel/
+// The assistant Workflow API shape — the prim names bound as the script body's parameters (the
+// intended API; the body can still reach host globals — see workflow.ts header). agent/parallel/
 // pipeline/judge/rlm are async; phase/log are sync emits; budget/args are values.
 export type AgentOpts = {
   readonly label?: string | undefined
