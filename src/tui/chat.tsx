@@ -21,7 +21,8 @@ import { FocusGutter, ToolView } from "./tool-view.tsx"
 import { type Row as OrchRow } from "./orch-tree.ts"
 import { ActionBar, shortCwd } from "./shell.tsx"
 import { Composer, useComposerFocus } from "./composer.tsx"
-import { AssistantReply, ErrorCard, ThinkingPart, UserCard } from "./messages.tsx"
+import { AssistantReply, ErrorCard, QueuedCard, ThinkingPart, UserCard } from "./messages.tsx"
+import { useMessageQueue } from "./queue.ts"
 import { type Option, useDialogSelect } from "./dialog-select.tsx"
 import { type AcItem, Autocomplete, useAutocomplete } from "./autocomplete.tsx"
 import { type Command, Palette } from "./palette.tsx"
@@ -441,6 +442,12 @@ function App() {
   const taRef = useRef<any>(null)
   const scrollRef = useRef<any>(null)
   const work = useWorking(busy) // animated placeholder state (frame + elapsed)
+  // QUEUED MESSAGE (opencode pending-prompt): a message submitted WHILE a turn is in flight is HELD
+  // (UI-local, so Msg/session shapes stay UNCHANGED) and AUTO-SENT once the turn settles, instead
+  // of firing a second concurrent turn. The hook (queue.ts) owns the pending slot + the flush /
+  // session-drop effects; `queued` drives the dim "↑ queued" card (QueuedCard), `sendOrQueue` is
+  // the busy-aware submit. Extracted to keep App under its complexity budget.
+  const { queued, sendOrQueue } = useMessageQueue(busy, state.activeId, send)
 
   const [expTurns, setExpTurns] = useState<Set<number>>(new Set())
   const [expTools, setExpTools] = useState<Set<string>>(new Set())
@@ -619,7 +626,10 @@ function App() {
       draftRef.current = ""
       if (t.length === 0) return
       history.push(t)
-      send(t)
+      // QUEUE while busy: sendOrQueue (queue.ts) HOLDS the message in the pending slot when a turn
+      // is in flight (the hook's busy→idle effect flushes it) instead of starting a concurrent turn;
+      // idle ⇒ send immediately. Either way, pin the transcript to the bottom.
+      sendOrQueue(t)
       toBottom() // pin the transcript to the new turn (sticky-bottom on submit)
     }
     queueMicrotask(() => queueMicrotask(run))
@@ -1012,6 +1022,11 @@ function App() {
             renderNode={renderNode}
           />
         ))}
+        {/* QUEUED PROMPT — a message typed while the turn is busy, held pending below the live
+            transcript; the queue hook auto-sends it on busy→idle. Dim "↑ queued" card so it reads
+            as waiting-to-send, not a committed turn. The card OWNS the null case (renders nothing
+            when queued===null), so App keeps no extra branch. UI-local (Msg/session unchanged). */}
+        <QueuedCard text={queued} />
       </scrollbox>
       {/* AUTOCOMPLETE popup (wire-autocomplete) — the @-mention / slash menu, an absolute card
           bottom-anchored so it floats just ABOVE the composer (opencode docks it over the prompt).

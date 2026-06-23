@@ -130,6 +130,26 @@ export function AssistantReply({
   )
 }
 
+// QUEUED CARD — a user message typed+submitted WHILE a turn is in flight. opencode queues the
+// next prompt and shows it pending below the transcript (component/prompt queued state) rather
+// than firing a second concurrent turn or dropping it; it auto-sends when the turn settles. This
+// is the PENDING render: a DIM left-border card (muted border, not the live accent of UserCard)
+// headed by an "↑ queued" marker, so it reads as "waiting to send", visually distinct from a
+// committed user turn. State is UI-local (chat.tsx), so the Msg/session shapes stay UNCHANGED.
+// `text` is null when nothing is queued ⇒ the card OWNS the empty-case (renders null), so the
+// caller mounts it unconditionally and keeps no extra branch.
+export function QueuedCard({ text }: { text: string | null }) {
+  if (text === null) return null
+  return (
+    <box border={["left"]} borderColor={theme.muted} style={{ marginTop: 1, paddingLeft: INDENT, width: "100%" }}>
+      <text fg={theme.muted}>
+        <span fg={theme.dim}>{"↑ queued  "}</span>
+        {text}
+      </text>
+    </box>
+  )
+}
+
 // ERROR CARD — an errored / interrupted reply (atoms catchCause surfaces a "⚠ …" reply). A RED
 // left-border card (opencode AssistantMessage error :1595-1609 borderColor=theme.error),
 // paddingLeft=2, marginTop=1 — so a failure is unmissable, not painted success-green.
