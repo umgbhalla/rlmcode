@@ -23,7 +23,8 @@ import { Composer, useComposerFocus } from "./composer.tsx"
 import { AssistantReply, ErrorCard, ThinkingPart, UserCard } from "./messages.tsx"
 import { type Option, useDialogSelect } from "./dialog-select.tsx"
 import { type Command, Palette } from "./palette.tsx"
-import { type Binding, isWhichKeyToggle, WhichKey } from "./which-key.tsx"
+import { WhichKey } from "./which-key.tsx"
+import { activeBindings, type Bind, dispatch, type KeyEventLike, matchesChord, useModeStack } from "./keys.ts"
 import { computeShowOrch, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
 
 // The shared syntax style for the reply <markdown> + the tool <diff>: a SyntaxStyle with every
@@ -81,30 +82,6 @@ const statusBar = (busy: boolean, armed: boolean, note: string | null, work: Wor
   if (busy) return { right: `thinking… ${work.elapsed}s · esc interrupt`, tone: theme.busy, live: true }
   return { right: "", tone: theme.muted, live: false }
 }
-
-// CHAT-NODE BINDINGS — the active-mode keybind table the which-key overlay reads, grouped by
-// category. This is the REGISTRY SEAM: it mirrors the live useKeyboard handlers (the global
-// Ctrl+K/Ctrl+C + onChatKey's nav/scroll/history/focus keys) as a {keys,desc,group} list, so the
-// overlay is "presentational over the registry" today and the SAME shape a real keys.ts will feed.
-// ponytail: hand-rolled table duplicating the if-chain in onChatKey (no keybind registry exists —
-// only @opentui/core + react are deps). Upgrade: when keys.ts (a {keys,desc,group,when}[] registry
-// + mode stack) lands, replace this with registry.active("chat") — the row shape is already Binding.
-const chatBindings = (): readonly Binding[] => [
-  { keys: "↵", desc: "send message", group: "Compose" },
-  { keys: "⇧↵", desc: "newline", group: "Compose" },
-  { keys: "↑↓", desc: "prompt history", group: "Compose" },
-  { keys: "esc", desc: "back / interrupt", group: "Navigate" },
-  { keys: "←", desc: "session list", group: "Navigate" },
-  { keys: "tab", desc: "cycle focus", group: "Navigate" },
-  { keys: "↵", desc: "toggle focused row", group: "Navigate" },
-  { keys: "pgup", desc: "scroll up", group: "Scroll" },
-  { keys: "pgdn", desc: "scroll down", group: "Scroll" },
-  { keys: "home", desc: "scroll to top", group: "Scroll" },
-  { keys: "end", desc: "scroll to bottom", group: "Scroll" },
-  { keys: "ctrl+k", desc: "command palette", group: "Global" },
-  { keys: "?", desc: "toggle this help", group: "Global" },
-  { keys: "ctrl+c", desc: "quit", group: "Global" },
-]
 
 function toTurns(messages: readonly Msg[], orch?: OrchTree): Turn[] {
   const turns: Turn[] = []
@@ -533,20 +510,21 @@ function App() {
   // list-view `d` arm-then-confirm: holds the session id awaiting a second `d` to close.
   const [armedDelete, setArmedDelete] = useState<string | null>(null)
   const focusedRef = useRef(true)
-  // COMMAND PALETTE (⌘K / Ctrl+K) open/close flag. Open → the composer YIELDS focus (captureFocus
-  // below) and the global key handler routes keys to onPaletteKey instead of the chat/list handlers,
-  // so the palette intercepts typing/nav deterministically (no focus war with the textarea). The
-  // query + highlighted-row state now live in the useDialogSelect CONTROLLER (palModel, built below
-  // over the command registry) — chat.tsx only owns whether the dialog is mounted.
-  const [palette, setPalette] = useState(false)
-  // WHICH-KEY overlay (`?` in chat): a contextual keybind-hint panel reading the active node's
-  // bindings. Like the palette it's a capture-focus overlay (composer yields) routed by the
-  // global handler while open, so `?` / esc close it deterministically (no textarea focus war).
-  const [whichKey, setWhichKey] = useState(false)
-  // FOCUS CAPTURE (composer.tsx captureFocus model): true when an overlay (palette OR which-key)
-  // owns focus, so the composer stops reclaiming and yields keystrokes to it. This is the gate the
-  // captureFocus seam was wired + tested for.
-  const captureFocus = palette || whichKey
+  // MODE STACK (keys.ts) — the single source of truth for which keyboard scope is active. "base"
+  // is the composer + transcript-nav mode; opening the command palette / the which-key overlay
+  // PUSHES its mode ("palette" / "whichkey") onto the stack, closing POPS it. This REPLACES the
+  // pair of standalone `palette`/`whichKey` booleans + the if-chain dispatch: the active mode now
+  // gates which registry bindings fire (dispatch below), so a base nav key can't fire under an
+  // overlay. The DialogSelect command-palette query/highlight still live in the useDialogSelect
+  // CONTROLLER (palModel, built below); the stack only owns which scope is on top.
+  const mode = useModeStack()
+  const palette = mode.is("palette")
+  const whichKey = mode.is("whichkey")
+  // FOCUS CAPTURE (composer.tsx captureFocus model): true whenever an overlay mode (anything but
+  // base) owns the keyboard, so the composer stops reclaiming and yields keystrokes to the
+  // registry. This is the gate the captureFocus seam was wired + tested for — now driven off the
+  // mode stack (active ≠ base) instead of the OR of the removed booleans.
+  const captureFocus = mode.active !== "base"
 
   useEffect(() => {
     setExpTurns(new Set())
@@ -744,25 +722,21 @@ function App() {
     }
   }
 
-  const onListKey = (k: any) => {
-    if (k.name === "q" || k.name === "escape") return quit()
-    if (k.name === "n") return void newSession()
-    // d — close the highlighted session (aborts its turn + frees its sessionsRT entry).
-    // Arm-then-confirm: a first `d` arms the highlighted row, a second `d` on the SAME
-    // row closes it. Destructive + adjacent to nav keys, so it can't fire on one keypress.
-    if (k.name === "d") {
-      const target = state.sessions[state.cursor]
-      if (!target) return
-      if (armedDelete === target.id) return void (deleteSession(target.id), setArmedDelete(null))
-      return setArmedDelete(target.id)
-    }
-    if (k.name === "up" || k.name === "k") return (setArmedDelete(null), setApp((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) })))
-    if (k.name === "down" || k.name === "j")
-      return (setArmedDelete(null), setApp((s) => ({ ...s, cursor: Math.min(s.sessions.length - 1, s.cursor + 1) })))
-    if (k.name === "return") {
-      const target = state.sessions[state.cursor]
-      if (target) setApp((s) => ({ ...s, view: "chat", activeId: target.id }))
-    }
+  // LIST-VIEW actions (folded into the registry's base-mode rows below). `d` arms-then-confirms a
+  // close (a first `d` arms the highlighted row, a second `d` on the SAME row closes it —
+  // destructive + adjacent to nav keys, so it can't fire on one keypress); the cursor moves clear
+  // the arm. Extracted as named helpers so the bind table reads as a flat list of {chord → action}.
+  const listDelete = () => {
+    const target = state.sessions[state.cursor]
+    if (!target) return
+    if (armedDelete === target.id) return void (deleteSession(target.id), setArmedDelete(null))
+    setArmedDelete(target.id)
+  }
+  const listMove = (d: -1 | 1) =>
+    void (setArmedDelete(null), setApp((s) => ({ ...s, cursor: Math.max(0, Math.min(s.sessions.length - 1, s.cursor + d)) })))
+  const listOpen = () => {
+    const target = state.sessions[state.cursor]
+    if (target) setApp((s) => ({ ...s, view: "chat", activeId: target.id }))
   }
 
   // Graceful quit: tear the renderer down (restores the main screen, disables mouse
@@ -792,21 +766,13 @@ function App() {
     setTimeout(() => setArmed(false), 5000)
   }
 
-  const onChatKey = (k: any) => {
-    const empty = text.trim() === ""
-    if (k.name === "escape") return handleEscape()
-    if (k.name === "left" && empty && !busy) return goToList()
-    if (k.name === "tab") return void (focusables.length && setFocus((f) => f + (k.shift ? -1 : 1)))
-    // Enter on empty toggles the focused row (textarea onSubmit no-ops on empty).
-    if (k.name === "return" && empty && focusedKey) return toggleFocused()
-    if (k.name === "pageup") return scrollPage(-1)
-    if (k.name === "pagedown") return scrollPage(1)
-    if (k.name === "home" && empty) return scrollPage("top")
-    if (k.name === "end" && empty) return scrollPage("bottom")
-    if (k.name === "up" && histActive()) return recall(-1)
-    if (k.name === "down" && histActive()) return recall(1)
-    // everything else (typing, cursor moves, submit) is handled by the textarea
-  }
+  // CHAT-VIEW actions folded into the registry's base-mode rows. `empty()` is the composer-empty
+  // guard several chat keys share (left→list, Enter→toggle, Home/End scroll) so a key with a draft
+  // in the composer falls through to the textarea (cursor move / submit) instead of navigating.
+  const empty = () => text.trim() === ""
+  const cycleFocus = (e: KeyEventLike) => void (focusables.length && setFocus((f) => f + (e.shift ? -1 : 1)))
+  // Enter on empty toggles the focused row (the textarea's onSubmit no-ops on empty); a `when`
+  // gate (empty composer AND a focused row) keeps this from stealing the submit Enter.
 
   // COMMAND REGISTRY — what ⌘K runs. Built from live state each render so "Switch: <session>"
   // reflects the current sessions. Every row here is a REAL action (the user: anything shown
@@ -833,61 +799,111 @@ function App() {
     run()
     closePalette()
   })
-  // Closing resets the controller to a clean slate: setQuery("") clears the filter AND resets the
-  // highlight to the first row (useDialogSelect resets selected on every query change), so the next
-  // open starts fresh — same contract the old setPq("")/setPSel(0) pair gave.
+  // OPEN/CLOSE an overlay = push/pop its MODE on the stack (keys.ts). Opening the palette resets
+  // the controller to a clean slate first (setQuery("") clears the filter AND resets the highlight
+  // to the first row), then pushes "palette"; closing pops it and re-clears (so the next open is
+  // fresh — the contract the old setPq("")/setPSel(0) pair gave). captureFocus (mode ≠ base) then
+  // yields the composer focus to the overlay.
+  const openPalette = () => {
+    palModel.setQuery("")
+    mode.push("palette")
+  }
   const closePalette = () => {
-    setPalette(false)
+    mode.pop("palette")
     palModel.setQuery("")
   }
   // Open the which-key overlay AND swallow the `?` that triggered it: opentui's focused textarea
-  // also receives the printable `?` keystroke (the global useKeyboard doesn't stop the textarea from
+  // also receives the printable `?` keystroke (the dispatch below doesn't stop the textarea from
   // inserting it), so without this the composer would hold a stray "?" after the overlay opens. The
   // toggle only fires on an EMPTY composer, so clearing it is lossless; deferred a tick (like submit)
-  // so it runs AFTER the textarea has inserted the char. captureFocus then yields focus to the overlay.
+  // so it runs AFTER the textarea has inserted the char.
   const openWhichKey = () => {
-    setWhichKey(true)
+    mode.push("whichkey")
     queueMicrotask(() => setInput(""))
   }
-  // Which-key key routing (active only while open): it's a read-only hint panel, so esc / Enter /
-  // `?` all dismiss it (no selection model). Routed by the global handler while whichKey is set.
-  const onWhichKeyKey = (k: any) => {
-    if (k.name === "escape" || k.name === "return" || isWhichKeyToggle(k)) setWhichKey(false)
-  }
-  // Palette key routing (active only while open) — now drives the controller instead of local
-  // state: esc closes, ↵ submits the active command (onSelect runs it + closes), ↑↓/home/end move
-  // the selection, backspace edits, a printable char appends to the filter (controller resets the
-  // highlight to the top on each edit).
-  const onPaletteKey = (k: any) => {
-    if (k.name === "escape") return closePalette()
-    if (k.name === "return") return palModel.submit()
-    if (k.name === "up") return palModel.move(-1)
-    if (k.name === "down") return palModel.move(1)
-    if (k.name === "home") return palModel.home()
-    if (k.name === "end") return palModel.end()
-    if (k.name === "backspace") return palModel.backspaceQuery()
-    const ch = typeof k.sequence === "string" && k.sequence.length === 1 && k.sequence >= " " && !k.ctrl && !k.meta ? k.sequence : ""
-    if (ch !== "") return palModel.appendQuery(ch)
-  }
+  const closeWhichKey = () => mode.pop("whichkey")
+  // Printable-char guard for the palette filter: a single visible char with no ctrl/meta (so it
+  // doesn't swallow Ctrl+K etc.). Shared by the palette's char-append binding.
+  const printable = (e: KeyEventLike): string =>
+    typeof e.sequence === "string" && e.sequence.length === 1 && e.sequence >= " " && !e.ctrl && !e.meta ? e.sequence : ""
+
+  // THE REGISTRY — one flat {mode, chord, when, run}[] table, the single source of truth the global
+  // useKeyboard dispatches against (REPLACES the onListKey/onChatKey/onPaletteKey/onWhichKeyKey
+  // if-chains + the palette/whichKey-boolean ladder). Order = precedence (first match wins, same as
+  // the old top-to-bottom ladder), so a SPECIFIC guarded row (empty-composer Enter→toggle) precedes
+  // a general one. `mode` scopes each row: base rows fire in the composer/list; the palette/whichkey
+  // rows fire ONLY when that overlay's mode is on the stack top — so a base nav key (n / tab / arrow)
+  // can NOT fire under a dialog. `when` adds the view/empty/history guards the old chains had inline.
+  // The same table feeds which-key (activeBindings projects the active mode's rows to its display).
+  const binds: readonly Bind[] = [
+    // ── GLOBAL ── Ctrl+C is the mode-INDEPENDENT panic quit (handled pre-dispatch below so it
+    // fires in ANY mode, even with a dialog open — matching the old top-of-handler check + opentui's
+    // exitOnCtrlC); this row is display-only so which-key still advertises it. Ctrl+K (palette
+    // toggle) works from list OR chat in base mode.
+    { mode: "base", chord: "ctrl+c", keys: "ctrl+c", desc: "quit", group: "Global", display: true, run: quit },
+    { mode: "base", chord: "ctrl+k", keys: "ctrl+k", desc: "command palette", group: "Global", run: openPalette },
+    // `?` raises the which-key overlay — chat view, composer EMPTY (read from the textarea's LIVE
+    // plainText, not the lagging `text` state, so a "?" ending a sentence types normally; only a `?`
+    // on a truly empty composer toggles). Hidden from which-key's own list (it's the toggle itself).
+    {
+      mode: "base", chord: "?", keys: "?", desc: "toggle this help", group: "Global", hidden: true,
+      when: () => inChat && (taRef.current?.plainText ?? "").trim() === "", run: openWhichKey,
+    },
+    // ── LIST VIEW (base, guarded to view==="list") ──
+    { mode: "base", chord: "q", keys: "q", desc: "quit", group: "Session", when: () => state.view === "list", run: quit },
+    { mode: "base", chord: "escape", keys: "esc", desc: "quit", group: "Session", hidden: true, when: () => state.view === "list", run: quit },
+    { mode: "base", chord: "n", keys: "n", desc: "new session", group: "Session", when: () => state.view === "list", run: () => void newSession() },
+    { mode: "base", chord: "d", keys: "d", desc: "close session", group: "Session", when: () => state.view === "list", run: listDelete },
+    { mode: "base", chord: "up", keys: "↑↓", desc: "move cursor", group: "Session", when: () => state.view === "list", run: () => listMove(-1) },
+    { mode: "base", chord: "k", keys: "k", desc: "move up", group: "Session", hidden: true, when: () => state.view === "list", run: () => listMove(-1) },
+    { mode: "base", chord: "down", keys: "↑↓", desc: "move cursor", group: "Session", hidden: true, when: () => state.view === "list", run: () => listMove(1) },
+    { mode: "base", chord: "j", keys: "j", desc: "move down", group: "Session", hidden: true, when: () => state.view === "list", run: () => listMove(1) },
+    { mode: "base", chord: "return", keys: "↵", desc: "open session", group: "Session", when: () => state.view === "list", run: listOpen },
+    // ── CHAT VIEW (base, guarded to inChat) ──
+    { mode: "base", chord: "escape", keys: "esc", desc: "back / interrupt", group: "Navigate", when: () => inChat, run: handleEscape },
+    { mode: "base", chord: "left", keys: "←", desc: "session list", group: "Navigate", when: () => inChat && empty() && !busy, run: goToList },
+    { mode: "base", chord: "tab", keys: "tab", desc: "cycle focus", group: "Navigate", when: () => inChat, run: cycleFocus },
+    { mode: "base", chord: "shift+tab", keys: "⇧tab", desc: "cycle focus back", group: "Navigate", hidden: true, when: () => inChat, run: cycleFocus },
+    { mode: "base", chord: "return", keys: "↵", desc: "toggle focused row", group: "Navigate", when: () => inChat && empty() && focusedKey !== undefined, run: toggleFocused },
+    { mode: "base", chord: "pageup", keys: "pgup", desc: "scroll up", group: "Scroll", when: () => inChat, run: () => scrollPage(-1) },
+    { mode: "base", chord: "pagedown", keys: "pgdn", desc: "scroll down", group: "Scroll", when: () => inChat, run: () => scrollPage(1) },
+    { mode: "base", chord: "home", keys: "home", desc: "scroll to top", group: "Scroll", when: () => inChat && empty(), run: () => scrollPage("top") },
+    { mode: "base", chord: "end", keys: "end", desc: "scroll to bottom", group: "Scroll", when: () => inChat && empty(), run: () => scrollPage("bottom") },
+    { mode: "base", chord: "up", keys: "↑↓", desc: "prompt history", group: "Compose", when: () => inChat && histActive(), run: () => recall(-1) },
+    { mode: "base", chord: "down", keys: "↑↓", desc: "prompt history", group: "Compose", hidden: true, when: () => inChat && histActive(), run: () => recall(1) },
+    // DISPLAY-ONLY (textarea-native): Enter submits / Shift+Enter inserts a newline are handled by
+    // the <textarea> itself (inputKeys), NOT the registry — these rows only let which-key advertise
+    // them for discovery (dispatch skips `display` rows, so the textarea keeps owning the keystroke).
+    { mode: "base", chord: "return", keys: "↵", desc: "send message", group: "Compose", display: true, when: () => inChat, run: () => {} },
+    { mode: "base", chord: "shift+return", keys: "⇧↵", desc: "newline", group: "Compose", display: true, when: () => inChat, run: () => {} },
+    // ── PALETTE MODE (scopes the keyboard while the command dialog is open) ──
+    { mode: "palette", chord: "escape", keys: "esc", desc: "close", group: "Palette", run: closePalette },
+    { mode: "palette", chord: "return", keys: "↵", desc: "run command", group: "Palette", run: () => palModel.submit() },
+    { mode: "palette", chord: "up", keys: "↑↓", desc: "select", group: "Palette", run: () => palModel.move(-1) },
+    { mode: "palette", chord: "down", keys: "↑↓", desc: "select", group: "Palette", hidden: true, run: () => palModel.move(1) },
+    { mode: "palette", chord: "home", keys: "home", desc: "first", group: "Palette", run: () => palModel.home() },
+    { mode: "palette", chord: "end", keys: "end", desc: "last", group: "Palette", run: () => palModel.end() },
+    { mode: "palette", chord: "backspace", keys: "⌫", desc: "edit filter", group: "Palette", run: () => palModel.backspaceQuery() },
+    // ── WHICHKEY MODE (read-only hint panel — esc/Enter/? all dismiss it) ──
+    { mode: "whichkey", chord: "escape", keys: "esc", desc: "close", group: "Help", run: closeWhichKey },
+    { mode: "whichkey", chord: "return", keys: "↵", desc: "close", group: "Help", hidden: true, run: closeWhichKey },
+    { mode: "whichkey", chord: "?", keys: "?", desc: "close", group: "Help", hidden: true, run: closeWhichKey },
+  ]
 
   useKeyboard((k) => {
-    if (k.ctrl && k.name === "c") return quit()
-    // ⌘K / Ctrl+K toggles the palette from anywhere (list or chat). While open it owns all keys.
-    // Reset the controller's filter (which also resets the highlight) so each open starts clean.
-    if (k.ctrl && k.name === "k") {
-      palModel.setQuery("")
-      return setPalette((p) => !p)
+    // GLOBAL FIRST: Ctrl+C is the mode-independent graceful quit — handled before mode dispatch so
+    // it fires even with a dialog/overlay open (the old handler checked it at the very top; opentui's
+    // exitOnCtrlC is the renderer-level backstop). matchesChord keeps the chord grammar in one place.
+    if (matchesChord(k, "ctrl+c")) return quit()
+    // Then dispatch against the ACTIVE-mode bindings (first match wins). If nothing matched AND the
+    // palette is up, a printable char feeds its filter — the palette's only bindings are named keys
+    // (esc/↵/↑↓/home/end/⌫), so a visible char never matches one and always falls through to here.
+    // (In base mode an unmatched printable just falls to the focused textarea, which inserts it.)
+    if (dispatch(k, mode.active, binds)) return
+    if (mode.is("palette")) {
+      const ch = printable(k)
+      if (ch !== "") palModel.appendQuery(ch)
     }
-    if (whichKey) return onWhichKeyKey(k)
-    if (palette) return onPaletteKey(k)
-    // `?` (chat view, composer EMPTY) raises the which-key keybind-hint overlay. Routed here in the
-    // global handler (alongside Ctrl+K) — NOT in onChatKey — so onChatKey stays under its complexity
-    // budget; while open, keys route to onWhichKeyKey above. Emptiness is read from the textarea's
-    // LIVE plainText (not the `text` state, which lags a tick behind fast typing — gating on it let
-    // a "?" ending a sentence like "…in src?" fire the toggle mid-type and wipe the draft). So a
-    // literal "?" appended to any draft types normally; only a `?` on a truly empty composer toggles.
-    if (inChat && (taRef.current?.plainText ?? "").trim() === "" && isWhichKeyToggle(k)) return openWhichKey()
-    return state.view === "list" ? onListKey(k) : onChatKey(k)
   })
 
   if (!inChat) {
@@ -966,9 +982,12 @@ function App() {
       {/* ⌘K command palette — absolute overlay on top of the transcript (termcast DialogOverlay).
           Rendered last so it floats over everything; chat.tsx owns its state + key routing. */}
       {palette ? <Palette model={palModel} theme={t} /> : null}
-      {/* WHICH-KEY overlay (`?`) — contextual keybind hints for the chat node, read from the
-          chatBindings() registry seam. Absolute overlay like the palette; presentational only. */}
-      {whichKey ? <WhichKey bindings={chatBindings()} cols={width || 80} theme={t} /> : null}
+      {/* WHICH-KEY overlay (`?`) — contextual keybind hints, now read straight from the REGISTRY:
+          activeBindings("base", binds) projects the base-mode rows whose `when` currently holds to
+          the which-key display shape. With inChat true that's exactly the chat-view bindings (the
+          list rows' `when` fails) — the overlay shows what you can press RIGHT NOW, no hand-rolled
+          duplicate table. Absolute overlay like the palette; presentational only. */}
+      {whichKey ? <WhichKey bindings={activeBindings("base", binds)} cols={width || 80} theme={t} /> : null}
     </box>
   )
 }
