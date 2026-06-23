@@ -15,7 +15,7 @@ import { abortTurn, projectDocLoaded } from "../app/default-agent.ts"
 import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
-import { theme } from "./theme.ts"
+import { theme, useTheme } from "./theme.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
 import { flatten, type Row as OrchRow } from "./orch-tree.ts"
 
@@ -518,6 +518,7 @@ function App() {
   const deleteSession = useAtomSet(deleteSessionAtom)
   const [, send] = useAtom(sendAtom)
   const { width, height } = useTerminalDimensions()
+  const t = useTheme() // termcast-style hook accessor onto the resolved palette (same tokens as the `theme` const)
 
   const [text, setText] = useState("") // mirror of textarea content (for empty-detection)
   const taRef = useRef<any>(null)
@@ -887,8 +888,8 @@ function App() {
             onSubmit={submit as any}
             onPaste={onPaste as any}
             focused
-            cursorColor={theme.accent}
-            focusedTextColor={theme.text}
+            cursorColor={t.accent}
+            focusedTextColor={t.text}
             placeholder={armed ? "⚠ esc again to interrupt" : busy ? `${work.frame} thinking… ${work.elapsed}s · esc to interrupt` : "message kimi"}
             placeholderColor={armed ? theme.error : busy ? theme.busy : theme.muted}
           />
