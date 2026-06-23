@@ -22,6 +22,7 @@ import { ActionBar, shortCwd } from "./shell.tsx"
 import { Composer, useComposerFocus } from "./composer.tsx"
 import { AssistantReply, ErrorCard, ThinkingPart, UserCard } from "./messages.tsx"
 import { type Option, useDialogSelect } from "./dialog-select.tsx"
+import { type AcItem, Autocomplete, useAutocomplete } from "./autocomplete.tsx"
 import { type Command, Palette } from "./palette.tsx"
 import { MODELS, type ModelName } from "../app/default-agent.ts"
 import { DialogOverlays, printableChar, useDialogs } from "./dialogs.tsx"
@@ -52,6 +53,23 @@ type Turn = { idx: number; user: string; steps: Msg[]; final: string | null; met
 const oneLine = (s: string, n = 90) => {
   const t = s.replace(/\s+/g, " ").trim()
   return t.length > n ? `${t.slice(0, n)}…` : t
+}
+
+// AUTOCOMPLETE nav-key map: an opentui key event → the controller's nav action, or null for any
+// other key (a printable, backspace, …) which is NOT consumed by the popup (it falls through to the
+// textarea so the query keeps narrowing). Pure; tab is treated like return (accept the selection).
+type AcNav = "up" | "down" | "return" | "escape" | "tab"
+const navKeyName = (k: { readonly name?: string | undefined }): AcNav | null => {
+  switch (k.name) {
+    case "up":
+    case "down":
+    case "return":
+    case "escape":
+    case "tab":
+      return k.name
+    default:
+      return null
+  }
 }
 
 // COST-METER token formatter: "318k tok" / "742 tok" (shared by turn meta + orch tree).
@@ -545,7 +563,12 @@ function App() {
   // registry. This is the gate the captureFocus seam was wired + tested for — now driven off the
   // mode stack (active ≠ base) instead of the OR of the removed booleans. The "dialog" mode (a
   // session/model picker) is ≠ base, so it captures focus exactly like the palette.
-  const captureFocus = mode.active !== "base"
+  //   AUTOCOMPLETE EXCEPTION: the @-mention / slash popup does NOT capture focus — the user keeps
+  // typing INTO the textarea to narrow the query (each keystroke re-syncs the popup), so the
+  // textarea must stay focused. Only the popup's NAV keys (↑↓/↵/esc/tab) are intercepted in the
+  // global useKeyboard handler below (preventDefault → the textarea never sees them); every
+  // printable + backspace falls through to the textarea, which re-fires onContentChange → ac.sync.
+  const captureFocus = mode.active !== "base" && mode.active !== "autocomplete"
 
   useEffect(() => {
     setExpTurns(new Set())
@@ -854,6 +877,57 @@ function App() {
   const printable = (e: KeyEventLike): string =>
     typeof e.sequence === "string" && e.sequence.length === 1 && e.sequence >= " " && !e.ctrl && !e.meta ? e.sequence : ""
 
+  // AUTOCOMPLETE (wire-autocomplete) — the @-mention / slash popup wired INTO the composer. The
+  // controller (autocomplete.tsx useAutocomplete) owns the open/selection/file-load state; chat.tsx
+  // owns the trigger DETECTION (onContentChange feeds ac.sync(plainText, cursorOffset) every
+  // keystroke), the focus YIELD (the textarea KEEPS focus — captureFocus excludes "autocomplete" —
+  // and the popup's nav keys are intercepted in useKeyboard with preventDefault), and the INSERT
+  // (onInsert splices the picked "@path "/"/cmd " into the live textarea + restores the cursor).
+  //   "/" items = the SAME command registry the palette runs, mapped to the popup's AcItem shape:
+  // selecting one INSERTS "/title " as text (opencode's /slash autocomplete inserts the command
+  // token; it isn't run from the popup). "@" items = a live repo file walk (the controller's default
+  // loadFiles = walkRepoFiles over cwd). One pickable list per trigger, fuzzy-filtered by the query.
+  const slashItems: AcItem[] = commands.map((c) => ({
+    value: c.title,
+    display: `/${c.title}`,
+    ...(c.hint !== undefined ? { hint: c.hint } : {}),
+    kind: "command" as const,
+  }))
+  const ac = useAutocomplete({
+    commands: slashItems,
+    onInsert: ({ text: next, cursor }) => {
+      const ta = taRef.current
+      ta?.setText?.(next)
+      try {
+        if (ta) ta.cursorOffset = cursor
+      } catch {
+        /* cursorOffset setter may be absent in some builds — text still landed */
+      }
+      setText(next)
+    },
+  })
+  // The popup's open-state drives the MODE STACK: while a trigger is live, "autocomplete" is the
+  // active mode (so which-key + the nav-key interception below scope to it); when it closes, the
+  // mode pops back to base. Driven off ac.mode (recomputed each render from the live trigger) via an
+  // effect so push/pop track the popup exactly. Unlike the palette/dialog modes this one does NOT
+  // capture focus (see captureFocus above) — the textarea stays focused for query typing.
+  const acOpen = ac.mode !== false
+  useEffect(() => {
+    if (acOpen) mode.push("autocomplete")
+    else mode.pop("autocomplete")
+    // eslint-disable-next-line react-hooks/exhaustive-deps — track the popup's open edge only
+  }, [acOpen])
+  // The composer's content-change handler: mirror the textarea content into `text` (for the empty/
+  // history guards) AND feed the autocomplete controller the LIVE (plainText, cursorOffset) so it
+  // opens/tracks/closes the popup off the cursor's "@"/"/" trigger. Runs on every keystroke — this
+  // is the trigger DETECTION the composer owns (autocomplete.tsx detectTrigger does the pure work).
+  const onComposerChange = () => {
+    const ta = taRef.current
+    const v: string = ta?.plainText ?? ""
+    setText(v)
+    ac.sync(v, typeof ta?.cursorOffset === "number" ? ta.cursorOffset : v.length)
+  }
+
   // THE REGISTRY — one flat {mode, chord, when, run}[] table, the single source of truth the global
   // useKeyboard dispatches against (REPLACES the onListKey/onChatKey/onPaletteKey/onWhichKeyKey
   // if-chains + the palette/whichKey-boolean ladder). Order = precedence (first match wins, same as
@@ -915,6 +989,14 @@ function App() {
     { mode: "whichkey", chord: "escape", keys: "esc", desc: "close", group: "Help", run: closeWhichKey },
     { mode: "whichkey", chord: "return", keys: "↵", desc: "close", group: "Help", hidden: true, run: closeWhichKey },
     { mode: "whichkey", chord: "?", keys: "?", desc: "close", group: "Help", hidden: true, run: closeWhichKey },
+    // ── AUTOCOMPLETE MODE (the @-mention / slash popup) — DISPLAY-only rows: the textarea KEEPS
+    // focus while the popup is open (captureFocus excludes "autocomplete"), so the popup's nav keys
+    // are intercepted in the useKeyboard callback below with preventDefault (so the textarea never
+    // also moves the cursor / submits), NOT by dispatch. These rows only let which-key advertise the
+    // popup's keys for discovery — dispatch skips `display` rows, leaving the callback to route them.
+    { mode: "autocomplete", chord: "up", keys: "↑↓", desc: "select", group: "Autocomplete", display: true, run: () => {} },
+    { mode: "autocomplete", chord: "return", keys: "↵", desc: "insert", group: "Autocomplete", display: true, run: () => {} },
+    { mode: "autocomplete", chord: "escape", keys: "esc", desc: "close", group: "Autocomplete", display: true, run: () => {} },
     // ── DIALOG MODE (session switcher / model pick) — the shared "dialog"-mode key rows live in
     // dialogs.tsx (routed to whichever picker kind is open) and are SPREAD in here so dispatch routes
     // esc/↵/↑↓/home/end/⌫ while a picker is up. They scope the keyboard exactly like the palette rows.
@@ -926,6 +1008,18 @@ function App() {
     // it fires even with a dialog/overlay open (the old handler checked it at the very top; opentui's
     // exitOnCtrlC is the renderer-level backstop). matchesChord keeps the chord grammar in one place.
     if (matchesChord(k, "ctrl+c")) return quit()
+    // AUTOCOMPLETE FIRST: while the @-mention / slash popup is open the textarea KEEPS focus (so the
+    // user can keep typing to narrow the query), so its nav keys (↑↓/↵/esc/tab) reach BOTH this
+    // global handler AND the focused textarea. Route them to the controller and preventDefault so the
+    // textarea does NOT also act on them (Enter wouldn't submit, ↑↓ wouldn't move the cursor) — the
+    // InternalKeyHandler skips the focused renderable's handler once a global listener preventDefaults
+    // (KeyHandler.ts:179). A printable/backspace is NOT a popup nav key, so it falls through to the
+    // textarea, which re-fires onContentChange → ac.sync (the query narrows). Runs before dispatch so
+    // the controller owns ↵/↑↓/esc while open (dispatch's "autocomplete" rows are display-only).
+    if (ac.mode !== false) {
+      const nav = navKeyName(k)
+      if (nav && ac.onKey(nav)) return void k.preventDefault?.()
+    }
     // Then dispatch against the ACTIVE-mode bindings (first match wins). If nothing matched AND the
     // palette is up, a printable char feeds its filter — the palette's only bindings are named keys
     // (esc/↵/↑↓/home/end/⌫), so a visible char never matches one and always falls through to here.
@@ -992,6 +1086,13 @@ function App() {
           />
         ))}
       </scrollbox>
+      {/* AUTOCOMPLETE popup (wire-autocomplete) — the @-mention / slash menu, an absolute card
+          bottom-anchored so it floats just ABOVE the composer (opencode docks it over the prompt).
+          Driven by the controller built above; mounts only while a trigger is live (the component
+          returns null on mode===false). The textarea KEEPS focus under it (captureFocus excludes
+          "autocomplete"); the popup's nav keys are intercepted in useKeyboard. `query` is the live
+          textarea text (the controller filters by the post-trigger slice). */}
+      <Autocomplete mode={ac.mode} items={ac.items} selected={ac.selected} query={text} theme={t} left={1} bottom={6} width={Math.min(64, Math.max(40, (width || 80) - 4))} />
       {/* COMPOSER (SPEC) — bordered textarea + metadata row (model) + status row (left
           spinner/hint, right token·cost / Cmd+K). flexShrink:0 so it ALWAYS reserves its
           height; the scrollbox (flexGrow:1) absorbs the slack and CLIPS the transcript
@@ -1010,7 +1111,7 @@ function App() {
         placeholder={placeholder}
         captureFocus={captureFocus}
         keyBindings={inputKeys}
-        onContentChange={() => setText(taRef.current?.plainText ?? "")}
+        onContentChange={onComposerChange}
         onSubmit={submit}
         onPaste={onPaste}
       />
