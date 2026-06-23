@@ -70,6 +70,52 @@ export const toolLabel = (name: string, args: string): string => {
 
 export type PreviewLine = { readonly text: string; readonly tone: "add" | "del" | "dim" }
 
+// ── TOOL RENDER MODE (PART_MAPPING-style dispatch) ──────────────────────────────────────
+// opencode renders a tool one of three ways (session/index.tsx:1714-2202): some tools are an
+// INLINE dim one-liner whose summary says everything (Glob/Grep/Read/WebFetch — "N matches",
+// "N lines"); the heavier tools are a BLOCK with a collapsed body (Shell shows its stdout;
+// Write/Edit show a diff); an errored tool is a RED card. This pure function is that dispatch —
+// one place names the mode so the React ToolView just switches on it (no status/name if-ladder in
+// the component). `inline` = the one-line header only (no body); `block` = header + an
+// expandable, collapsed body; `error` = the red card.
+//   A RUNNING tool is always inline (a dim live line, no body yet). A settled BLOCK tool with no
+// real output (an empty bash) downgrades to inline — there's nothing to collapse.
+export type ToolMode = "inline" | "block" | "error"
+const BLOCK_TOOLS = new Set(["bash", "write_file", "edit_file"]) // Shell stdout + Write/Edit diff
+export const toolRenderMode = (name: string, status: "running" | "ok" | "error", result: string): ToolMode => {
+  if (status === "error") return "error"
+  if (status === "running") return "inline" // in-flight → a dim live line, never a body yet
+  if (!BLOCK_TOOLS.has(name)) return "inline" // read/glob/grep/web_fetch — the summary says it all
+  return toolHasBody(name, result, false) ? "block" : "inline" // an empty bash has no body → inline
+}
+
+// ── PER-TOOL OUTPUT COLLAPSE (opencode collapseToolOutput, util/collapse-tool-output.ts) ──
+// A settled tool's body shows only the first `collapseMax(name)` preview lines; the rest collapse
+// behind a "+N more" affordance (expandable — the row's existing expTools toggle reveals the full
+// body). Shell keeps MORE context (10 lines) than a read/search/generic (3), matching opencode's
+// per-tool maxLines (session/index.tsx:1805 / :2055). Pure — tool-view.tsx slices the PreviewLine[]
+// at this cap so the collapse layers cleanly over the existing per-tool toolPreview output.
+export const collapseMax = (name: string): number => (name === "bash" ? 10 : 3)
+
+// ── PER-TOOL HEADER DETAIL (opencode Shell workdir/exit) ──────────────────────────────────
+// A short, Shell-specific suffix appended to a settled bash header — the high-signal fact
+// opencode's Shell renderer surfaces (the workdir it ran in + a non-zero exit). Empty string ⇒
+// no suffix (the row stays clean). The Read line-count requirement is already met by toolSummary
+// (read_file → "N lines"), so it isn't duplicated here. Pure over args+result so the frame gate
+// reads it identically.
+const EXIT_RE = /\bexit (\d+)\b/i
+export const toolDetail = (name: string, args: string, result: string, isError: boolean): string => {
+  if (name !== "bash") return ""
+  const wd = field(args, "workdir") || field(args, "cwd")
+  const exit = result.match(EXIT_RE)
+  const bits: string[] = []
+  if (wd && wd !== ".") bits.push(`in ${wd}`)
+  // surface a NON-zero exit (a clean run is exit 0 / no marker); an errored row already reads ✗,
+  // but its exit code is still useful, so show it whenever it's present + non-zero (or on error).
+  if (exit && (exit[1] !== "0" || isError)) bits.push(`exit ${exit[1]}`)
+  return bits.join(" · ")
+}
+
 // Width-aware: clamp each line to `cols` so one 5000-char line can't blow the
 // inline layout, independent of the `n` line cap.
 const headLines = (s: string, n: number, cols = 200): PreviewLine[] => {
@@ -155,33 +201,38 @@ export const toolHasBody = (name: string, result: string, isError: boolean): boo
   }
 }
 
-/** The explicit, per-tool detail body shown when a tool row is expanded. `cols`
- * = char budget per line (width-aware truncation). edit_file/write_file render
- * via toolDiff (native <diff>) so they fall through here only as a text fallback. */
-export const toolPreview = (name: string, args: string, result: string, isError: boolean, cols = 200): PreviewLine[] => {
+/** The explicit, per-tool detail body shown when a tool row is expanded. `cols` = char budget
+ * per line (width-aware truncation). `max` = the LINE cap: when set (tool-view.tsx passes
+ * collapseMax(name) collapsed, or a large number expanded) it OVERRIDES the per-tool default, so
+ * the collapse "first N + … +M more" is a SINGLE authority (headLines appends the "… +M more"
+ * line itself). edit_file/write_file render via toolDiff (native <diff>) so they fall through here
+ * only as a text fallback. */
+export const toolPreview = (name: string, args: string, result: string, isError: boolean, cols = 200, max?: number): PreviewLine[] => {
   if (isError || /^error:/.test(result.trim())) return [{ text: result.trim().slice(0, 200), tone: "del" }]
   const empty = /^\(no (output|matches)\)/.test(result.trim()) || result.trim() === ""
+  const cap = (dflt: number) => max ?? dflt
   switch (name) {
     case "bash":
-      return empty ? [{ text: "(no output)", tone: "dim" }] : headLines(result, 10, cols)
+      return empty ? [{ text: "(no output)", tone: "dim" }] : headLines(result, cap(10), cols)
     case "read_file":
-      return headLines(result, 8, cols)
+      return headLines(result, cap(8), cols)
     case "write_file": {
       const content = field(args, "content")
-      return content ? headLines(content, 8, cols) : [{ text: result, tone: "dim" }]
+      return content ? headLines(content, cap(8), cols) : [{ text: result, tone: "dim" }]
     }
     case "edit_file": {
-      const del: PreviewLine[] = field(args, "old_string").split("\n").slice(0, 6).map((l) => ({ text: l, tone: "del" as const }))
-      const add: PreviewLine[] = field(args, "new_string").split("\n").slice(0, 6).map((l) => ({ text: l, tone: "add" as const }))
+      const lim = cap(6)
+      const del: PreviewLine[] = field(args, "old_string").split("\n").slice(0, lim).map((l) => ({ text: l, tone: "del" as const }))
+      const add: PreviewLine[] = field(args, "new_string").split("\n").slice(0, lim).map((l) => ({ text: l, tone: "add" as const }))
       return [...del, ...add]
     }
     case "glob":
     case "grep":
-      return empty ? [{ text: "(no matches)", tone: "dim" }] : headLines(result, 10, cols)
+      return empty ? [{ text: "(no matches)", tone: "dim" }] : headLines(result, cap(10), cols)
     case "web_fetch":
-      return empty ? [{ text: "(empty response)", tone: "dim" }] : headLines(result, 10, cols)
+      return empty ? [{ text: "(empty response)", tone: "dim" }] : headLines(result, cap(10), cols)
     default:
-      return headLines(result, 6, cols)
+      return headLines(result, cap(6), cols)
   }
 }
 

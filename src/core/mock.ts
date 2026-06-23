@@ -79,3 +79,44 @@ export const MOCK_ORCH_TOOL: AxFunction = {
     return "orchestrated 4 nodes (1 error)"
   },
 }
+
+// ── CANNED TRANSCRIPT-MATURITY FEED (separate from the orch fixture so tool-grouping.test stays
+// byte-identical) — drives the MATURED tool render (tool-view.tsx): the three render MODES + the
+// output-collapse, all owned by a single still-running `worker` subagent NODE (a node IS a
+// sub-agent / the Task surface; running ⇒ its owned tools stay shown). Exercises:
+//   - a SETTLED bash with a 12-line stdout → a BLOCK row whose body COLLAPSES to 10 lines + a
+//     "+N more" footer (Shell cap 10), expandable;
+//   - a SETTLED read_file (12 lines) → a BLOCK row carrying the "12 lines" per-tool detail;
+//   - a SETTLED bash that FAILED (exit 127) → a RED ✗ error card;
+//   - a tool CALL with NO result → a RUNNING tool, rendered as a dim INLINE one-liner (no body).
+// The 12-line bodies are deterministic literal strings (no real shell), so the collapse math is
+// frame-stable. NOT in production — replayed only by the transcript frame gate.
+const TWELVE = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join("\n")
+const MOCK_TRANSCRIPT_TOOLS: ReadonlyArray<{ id: string; name: string; args: string; result: string; isError: boolean; settle: boolean }> = [
+  { id: "tx_run", name: "bash", args: JSON.stringify({ command: "seq 12" }), result: TWELVE, isError: false, settle: true },
+  { id: "tx_read", name: "read_file", args: JSON.stringify({ path: "src/big.ts" }), result: TWELVE, isError: false, settle: true },
+  { id: "tx_err", name: "bash", args: JSON.stringify({ command: "missing-bin" }), result: "exit 127: command not found", isError: true, settle: true },
+  { id: "tx_live", name: "grep", args: JSON.stringify({ pattern: "TODO" }), result: "", isError: false, settle: false }, // RUNNING (no result) → inline
+]
+const feedTranscriptNodes = (emit: ActivitySink): void => {
+  const push = (a: Activity): void => emit(a)
+  // one running subagent node owns the tools (start, never done ⇒ stays expanded).
+  push({ kind: "node", nodeId: "worker", event: "start", detail: "subagent" })
+  for (const t of MOCK_TRANSCRIPT_TOOLS) {
+    push({ kind: "tool", id: t.id, name: t.name, args: t.args, nodeId: "worker" })
+    if (t.settle) push({ kind: "result", id: t.id, result: t.result, isError: t.isError, nodeId: "worker" })
+  }
+}
+
+// TEST-ONLY transcript tool — like MOCK_ORCH_TOOL but replays the richer per-tool cluster above so
+// the transcript-maturity frame gate (scripts/tui/transcript.test.ts) can assert the inline/block/
+// error modes + the "+N more" collapse. Off in production (registered only under RLM_MOCK).
+export const MOCK_TRANSCRIPT_TOOL: AxFunction = {
+  name: "mock_transcript",
+  description: "TEST ONLY: replay a canned per-tool cluster (inline/block/error + collapse) for the headless TUI harness.",
+  parameters: { type: "object", properties: {}, required: [] },
+  func: async (_args: unknown, extra?: Readonly<{ sessionId?: string; abortSignal?: AbortSignal }>) => {
+    feedTranscriptNodes(getTurnEmit(extra?.sessionId))
+    return "ran 4 tools (1 error, 1 running)"
+  },
+}

@@ -58,6 +58,21 @@ const MOCK_ORCH_TOOL = {
   function: { name: "mock_orch", params: JSON.stringify({}) },
 }
 
+// TRANSCRIPT variant: when the user asks to show the transcript demo, the mock calls the
+// test-only `mock_transcript` tool (mock.ts) — it replays a richer per-tool cluster (a settled
+// block + collapse, an error card, a running inline tool) under one subagent node, so the
+// MATURED tool render (tool-view.tsx inline/block/error + "+N more") draws from canned data.
+const MOCK_TRANSCRIPT_TOOL = {
+  id: "call_mock_transcript",
+  type: "function" as const,
+  function: { name: "mock_transcript", params: JSON.stringify({}) },
+}
+const wantsTranscript = (req: Readonly<AxChatRequest<unknown>>): boolean => {
+  const users = req.chatPrompt.filter((m) => m.role === "user")
+  const last = users[users.length - 1]
+  return last !== undefined && typeof last.content === "string" && /transcript/i.test(last.content)
+}
+
 // GROUP variant: when the user message asks to explore, the mock scripts THREE CONSECUTIVE
 // explore tool calls (read_file → glob → grep) in ONE tool-loop step. ax executes all three,
 // appends their results to memory, then calls again → the final reply. These land as three
@@ -129,9 +144,16 @@ const scriptedChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResp
   if (wantsFail(req)) return Promise.reject(new Error("mock turn failed on request"))
   const hasToolResult = hasCurrentTurnToolResult(req)
   // The explore turn fans out the read/glob/grep cluster (grouping path); the orchestrate
-  // turn calls mock_orch; everything else runs the single bash step. One call returns one
-  // step's functionCalls — the group variant returns all three at once.
-  const calls = wantsGroup(req) ? MOCK_GROUP_TOOLS : wantsOrch(req) ? [MOCK_ORCH_TOOL] : [MOCK_TOOL]
+  // turn calls mock_orch; the transcript turn calls mock_transcript (the matured per-tool render
+  // cluster); everything else runs the single bash step. One call returns one step's
+  // functionCalls — the group variant returns all three at once.
+  const calls = wantsGroup(req)
+    ? MOCK_GROUP_TOOLS
+    : wantsOrch(req)
+      ? [MOCK_ORCH_TOOL]
+      : wantsTranscript(req)
+        ? [MOCK_TRANSCRIPT_TOOL]
+        : [MOCK_TOOL]
   // On the tool-call step of an explore turn, surface the cluster's calls to the activity bus
   // (the mock service doesn't, see emitGroupCalls) so the three explore steps render + group.
   if (!hasToolResult && wantsGroup(req)) emitGroupCalls()

@@ -14,10 +14,22 @@
 // fixed part list (reasoning? + text), so AssistantReply renders the dispatch inline rather
 // than mapping a dynamic Part[] — same shape (reasoning above text, footer after), no Solid
 // <Dynamic>. The tool parts stay in chat.tsx's step stream (grouped + collapsible there).
+import { useState } from "react"
 import { TextAttributes } from "@opentui/core"
 import { theme } from "./theme.ts"
 
 const INDENT = 2 // transcript nesting (matches chat.tsx INDENT)
+
+// opencode Locale.duration (util/locale.ts:39): ms → a compact "Ns"/"Nms"/"Nm Ns" label for the
+// reasoning summary. The reasoning's wall-clock = the turn's wall-clock (meta.ms) — the model
+// reasons then answers within the one turn — so we read that for the settled "Thought · 1.2s".
+const fmtDuration = (ms: number): string => {
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const m = Math.floor(ms / 60_000)
+  const s = Math.floor((ms % 60_000) / 1000)
+  return `${m}m ${s}s`
+}
 
 // "▣ model · duration" footer (opencode AssistantMessage :1612-1634). Pure string so the
 // frame gate reads it identically. The model is the per-turn meta.model; duration is the
@@ -43,14 +55,40 @@ export function UserCard({ text }: { text: string }) {
   )
 }
 
-// THINKING (reasoning part of the assistant message): the model's reasoning_content, rendered
-// LIVE as it streams and KEPT after the reply settles — dim + italic, no fold/icon/header. The
-// reasoning part in the PART_MAPPING dispatch (opencode ReasoningPart). Nothing when no reasoning.
-export function ThinkingPart({ thinking }: { thinking: string | undefined }) {
+// THINKING (reasoning part of the assistant message): the model's reasoning_content. The
+// PART_MAPPING reasoning part, ported from opencode's ReasoningPart + ReasoningHeader
+// (session/index.tsx:1584-1689) with the COLLAPSE behavior:
+//   - WHILE the turn is in flight (settled=false): the reasoning is live — render it OPEN, dim +
+//     italic, headed by a "Thinking…" spinner-less label (it streams in place; no toggle yet).
+//   - ONCE SETTLED: collapse to a single clickable header line "▸ Thought · <duration>"; the body
+//     (the full reasoning) hides until the row is expanded → "▾ Thought · <duration>". Default
+//     COLLAPSED so the settled transcript stays compact and the layout never shifts. `durationMs`
+//     is the turn wall-clock (meta.ms) — the reasoning's duration summary opencode shows.
+// Nothing renders when there's no reasoning.
+export function ThinkingPart({ thinking, settled, durationMs }: { thinking: string | undefined; settled: boolean; durationMs: number | undefined }) {
+  const [expanded, setExpanded] = useState(false)
   if (thinking === undefined || thinking.length === 0) return null
+  // LIVE: still thinking — show it open, no toggle (it's actively streaming in).
+  if (!settled) {
+    return (
+      <box flexDirection="column" style={{ marginTop: 1, paddingLeft: INDENT }}>
+        <text fg={theme.busy}>{"Thinking…"}</text>
+        <text fg={theme.faint} attributes={TextAttributes.ITALIC}>{thinking}</text>
+      </box>
+    )
+  }
+  // SETTLED: a collapsible "Thought" block — header toggles, body shows only when expanded.
+  const dur = typeof durationMs === "number" ? ` · ${fmtDuration(durationMs)}` : ""
   return (
     <box flexDirection="column" style={{ marginTop: 1, paddingLeft: INDENT }}>
-      <text fg={theme.faint} attributes={TextAttributes.ITALIC}>{thinking}</text>
+      <text fg={theme.muted} selectable={false} onMouseDown={(() => setExpanded((v) => !v)) as any}>
+        {`${expanded ? "▾" : "▸"} Thought${dur}`}
+      </text>
+      {expanded ? (
+        <box flexDirection="column" style={{ paddingLeft: INDENT }}>
+          <text fg={theme.faint} attributes={TextAttributes.ITALIC}>{thinking}</text>
+        </box>
+      ) : null}
     </box>
   )
 }

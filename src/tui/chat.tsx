@@ -16,7 +16,8 @@ import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, MODEL, type Msg
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { makeSyntaxStyle, theme, useTheme } from "./theme.ts"
-import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
+import { toolLabel } from "./toolui.ts"
+import { FocusGutter, ToolView } from "./tool-view.tsx"
 import { type Row as OrchRow } from "./orch-tree.ts"
 import { ActionBar, shortCwd } from "./shell.tsx"
 import { Composer, useComposerFocus } from "./composer.tsx"
@@ -82,11 +83,6 @@ const sessionTokens = (messages: readonly Msg[], orch: OrchTree | undefined): nu
   for (const m of messages) if (m.kind === "agent" && typeof m.meta?.tokens === "number") n += m.meta.tokens
   return n
 }
-
-// Whole-second elapsed since a wall-clock start (undefined start -> 0). Recomputed on
-// every render; the useWorking tick re-renders App ~12×/s while busy, so it advances.
-const elapsedSec = (startedAt: number | undefined): number =>
-  typeof startedAt === "number" ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0
 
 const INDENT = 2 // single source of truth for transcript nesting
 
@@ -186,80 +182,9 @@ function useWorking(busy: boolean): { frame: string; elapsed: number } {
   return { frame: SPIN_FRAMES[tick % SPIN_FRAMES.length]!, elapsed: busy ? Math.floor((Date.now() - startRef.current) / 1000) : 0 }
 }
 
-const statusColor = (status: ToolMsg["status"]) =>
-  status === "error" ? theme.error : status === "ok" ? theme.ok : theme.muted
-const previewColor = (tone: PreviewLine["tone"]) => (tone === "add" ? theme.ok : tone === "del" ? theme.error : theme.dim)
-const previewSign = (tone: PreviewLine["tone"]) => (tone === "add" ? "+" : tone === "del" ? "-" : "│")
-
-// Keyboard-focus gutter: a leading "❯ " ONLY when this row is the Tab-ring focus (never
-// on mere hover), so keyboard focus is visually distinct from a mouse-over. Two cells
-// wide so focused/unfocused rows stay column-aligned.
-const FocusGutter = ({ focused }: { focused: boolean }) =>
-  focused ? <span fg={theme.focus}>{"❯ "}</span> : <span fg={theme.faint}>{"  "}</span>
-
-// Clickable header row: brightens on hover when the row has a drill-down body. A running
-// tool shows the live spinner frame + elapsed seconds (a 60s bash is no longer byte-
-// identical at second 1 and 59).
-function ToolHeader({ m, expanded, hasBody, focused, frame, onToggle }: { m: ToolMsg; expanded: boolean; hasBody: boolean; focused: boolean; frame: string; onToggle: () => void }) {
-  const [hover, setHover] = useState(false)
-  const running = m.status === "running"
-  const color = statusColor(m.status)
-  const mark = running ? frame : m.status === "error" ? "✗" : toolIcon(m.name)
-  const el = running ? elapsedSec(m.startedAt) : 0
-  const summary = running ? (el > 0 ? `running ${el}s` : "running…") : toolSummary(m.name, m.result, m.status === "error")
-  const hot = hasBody && (hover || focused) // hover OR keyboard-focused -> brighten
-  return (
-    <text
-      fg={color}
-      selectable={false}
-      onMouseDown={(hasBody ? onToggle : undefined) as any}
-      onMouseOver={(hasBody ? (() => setHover(true)) : undefined) as any}
-      onMouseOut={(() => setHover(false)) as any}
-    >
-      <FocusGutter focused={focused} />
-      <span fg={hot ? theme.white : color}>{`${mark} `}</span>
-      <span fg={hot ? theme.white : theme.text}>{toolLabel(m.name, m.args)}</span>
-      <span fg={hot ? theme.subtext : theme.faint}>{`  ${summary}`}</span>
-      {hasBody ? <span fg={hot ? theme.text : theme.muted}>{expanded ? "  ▾" : "  ▸"}</span> : null}
-    </text>
-  )
-}
-
-function ToolView({ m, expanded, focused, cols, frame, onToggle }: { m: ToolMsg; expanded: boolean; focused: boolean; cols: number; frame: string; onToggle: () => void }) {
-  const isError = m.status === "error"
-  const hasBody = m.status !== "running" && toolHasBody(m.name, m.result, isError)
-  const open = expanded && hasBody
-  const diff = open ? toolDiff(m.name, m.args, isError) : null
-  const preview = open && !diff ? toolPreview(m.name, m.args, m.result, isError, Math.max(20, cols - 10)) : []
-  const body = (
-    <>
-      <ToolHeader m={m} expanded={expanded} hasBody={hasBody} focused={focused} frame={frame} onToggle={onToggle} />
-      {diff ? (
-        <box style={{ paddingLeft: INDENT, paddingTop: 1 }}>
-          <diff diff={diff.diff} view={cols > 120 ? "split" : "unified"} filetype={diff.filetype} showLineNumbers syntaxStyle={mdStyle} />
-        </box>
-      ) : (
-        <box flexDirection="column" style={{ paddingLeft: INDENT }}>
-          {preview.map((p, i) => (
-            <text key={i} fg={previewColor(p.tone)}>{`${previewSign(p.tone)} ${p.text}`}</text>
-          ))}
-        </box>
-      )}
-    </>
-  )
-  // ERROR CARD (P1): a failed tool gets a RED left-border card (not a dim one-liner) so a
-  // failure is unmissable. Two concrete boxes — a conditional-undefined `border` prop trips
-  // exactOptionalPropertyTypes, and `as const` makes the array readonly (BorderSides[] is mutable).
-  return isError ? (
-    <box flexDirection="column" border={["left"]} borderColor={theme.error} style={{ marginTop: open ? 1 : 0, paddingLeft: 1 }}>
-      {body}
-    </box>
-  ) : (
-    <box flexDirection="column" style={{ marginTop: open ? 1 : 0 }}>
-      {body}
-    </box>
-  )
-}
+// The keyboard-focus gutter (FocusGutter) + the per-tool row (ToolView, with the matured
+// inline-vs-block + per-tool detail + output-collapse) live in tool-view.tsx, imported above —
+// TurnView + NodeRow render the SAME ToolView for the main turn's steps and a node's owned tools.
 
 function TurnView({
   t,
@@ -323,6 +248,7 @@ function TurnView({
                       focused={focusedKey === `tool:${s.id}`}
                       cols={cols}
                       frame={frame}
+                      syntaxStyle={mdStyle}
                       onToggle={() => onToggleTool(s.id)}
                     />
                   )
@@ -334,8 +260,9 @@ function TurnView({
       )}
       {/* ASSISTANT CARD (PART_MAPPING dispatch, opencode :1556-1637 ported): reasoning part →
           ThinkingPart, then text part → AssistantReply (with the "▣ model · duration" footer)
-          OR, when the reply is an interrupted/errored "⚠ …", the red ErrorCard instead. */}
-      <ThinkingPart thinking={t.thinking} />
+          OR, when the reply is an interrupted/errored "⚠ …", the red ErrorCard instead. The
+          reasoning is SETTLED once the turn stops streaming; its duration = the turn wall-clock. */}
+      <ThinkingPart thinking={t.thinking} settled={!(t.streaming ?? false)} durationMs={t.meta?.ms} />
       {t.final !== null && !(t.final === "" && (t.streaming ?? false)) ? (
         failed ? (
           <ErrorCard text={t.final} />
@@ -444,7 +371,7 @@ function NodeRow(p: NodeRowProps) {
               {/* align owned tools under their node: the 2-cell focus gutter + body stem + connector */}
               <text fg={theme.dim} selectable={false}>{`  ${row.bodyPrefix}   `}</text>
               <box style={{ flexGrow: 1, flexShrink: 1 }}>
-                <ToolView m={m} expanded={p.expTools.has(m.id)} focused={p.focusedKey === `tool:${m.id}`} cols={p.cols} frame={p.frame} onToggle={() => p.onToggleTool(m.id)} />
+                <ToolView m={m} expanded={p.expTools.has(m.id)} focused={p.focusedKey === `tool:${m.id}`} cols={p.cols} frame={p.frame} syntaxStyle={mdStyle} onToggle={() => p.onToggleTool(m.id)} />
               </box>
             </box>
           ))}
