@@ -36,6 +36,8 @@ export type Driver = {
   type(text: string): Promise<void>
   /** Press a named key: "Enter" | "Tab" | "Escape" | "ArrowUp" | … (+ optional shift). */
   key(name: NamedKey, mods?: Mods): Promise<void>
+  /** Press Ctrl+<letter> (the raw control byte) — e.g. ctrl("k") opens the command palette. */
+  ctrl(letter: string): Promise<void>
   /** Left-click at cell (x, y) — 0-based — via a raw SGR mouse down+up byte sequence. */
   click(x: number, y: number): Promise<void>
   /** Poll the frame until `predicate(frame)` holds (frame-stable wait, no fixed sleeps). */
@@ -112,6 +114,10 @@ export const launchDriver = async (opts: LaunchDriverOptions = {}): Promise<Driv
     frame,
     type: (text) => session.keyboard.type(text),
     key: (name, mods) => session.keyboard.press(named(name, mods)),
+    // Ctrl+<letter> as the raw control byte the terminal sends (Ctrl+A=1 … Ctrl+K=0x0B …),
+    // i.e. (uppercase code) & 0x1f. opentui's input parser decodes it back to {ctrl, name}.
+    // Lets the frame gate drive ⌘K (the command palette) which `key`/`named` can't express.
+    ctrl: (letter: string) => session.keyboard.write(new Uint8Array([letter.toUpperCase().charCodeAt(0) & 0x1f])),
     click: async (x, y) => {
       await session.keyboard.write(sgr(x, y, true))
       await session.keyboard.write(sgr(x, y, false))

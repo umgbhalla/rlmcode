@@ -21,6 +21,7 @@ import { type Row as OrchRow } from "./orch-tree.ts"
 import { ActionBar, shortCwd } from "./shell.tsx"
 import { Composer, useComposerFocus } from "./composer.tsx"
 import { AssistantReply, ErrorCard, ThinkingPart, UserCard } from "./messages.tsx"
+import { type Command, Palette } from "./palette.tsx"
 import { computeShowOrch, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
 
 const mdStyle = SyntaxStyle.create()
@@ -502,10 +503,17 @@ function App() {
   // list-view `d` arm-then-confirm: holds the session id awaiting a second `d` to close.
   const [armedDelete, setArmedDelete] = useState<string | null>(null)
   const focusedRef = useRef(true)
-  // FOCUS CAPTURE seam (composer.tsx captureFocus model): true when a dialog / command palette
-  // owns focus, so the composer YIELDS and stops reclaiming. The palette step flips this; today
-  // it stays false (the composer is the sole default owner), but the gate is wired + tested.
-  const [captureFocus] = useState(false)
+  // COMMAND PALETTE (⌘K / Ctrl+K) state. Open → the composer YIELDS focus (captureFocus below)
+  // and the global key handler routes keys to onPaletteKey instead of the chat/list handlers, so
+  // the palette intercepts typing/nav deterministically (no focus war with the textarea). pq =
+  // the live filter query; pSel = the highlighted command index.
+  const [palette, setPalette] = useState(false)
+  const [pq, setPq] = useState("")
+  const [pSel, setPSel] = useState(0)
+  // FOCUS CAPTURE (composer.tsx captureFocus model): true when the palette owns focus, so the
+  // composer stops reclaiming and yields keystrokes to the palette. This is the gate the
+  // captureFocus seam was wired + tested for.
+  const captureFocus = palette
 
   useEffect(() => {
     setExpTurns(new Set())
@@ -767,8 +775,50 @@ function App() {
     // everything else (typing, cursor moves, submit) is handled by the textarea
   }
 
+  // COMMAND REGISTRY — what ⌘K runs. Built from live state each render so "Switch: <session>"
+  // reflects the current sessions. Every row here is a REAL action (the user: anything shown
+  // must work) — no dead entries. Filtered by the live query (substring, case-insensitive).
+  const commands: Command[] = [
+    { title: "New session", hint: "n", run: () => void newSession() },
+    ...state.sessions
+      .filter((s) => s.id !== state.activeId)
+      .map((s) => ({ title: `Switch: ${s.title}`, run: () => setApp((st) => ({ ...st, view: "chat" as const, activeId: s.id })) })),
+    { title: "Session list", hint: "esc", run: goToList },
+    ...(active ? [{ title: `Close session: ${active.title}`, run: () => void deleteSession(active.id) }] : []),
+    { title: "Scroll to bottom", hint: "End", run: () => scrollPage("bottom") },
+    { title: "Scroll to top", hint: "Home", run: () => scrollPage("top") },
+    { title: "Quit", hint: "ctrl+c", run: quit },
+  ]
+  const palFiltered = pq.trim() === "" ? commands : commands.filter((c) => c.title.toLowerCase().includes(pq.toLowerCase()))
+  const closePalette = () => {
+    setPalette(false)
+    setPq("")
+    setPSel(0)
+  }
+  // Palette key routing (active only while open): esc closes, ↵ runs the highlighted command,
+  // ↑↓ move, backspace edits, a printable char appends to the filter (and resets the highlight).
+  const onPaletteKey = (k: any) => {
+    if (k.name === "escape") return closePalette()
+    if (k.name === "return") {
+      palFiltered[Math.min(pSel, palFiltered.length - 1)]?.run()
+      return closePalette()
+    }
+    if (k.name === "up") return setPSel((s) => Math.max(0, s - 1))
+    if (k.name === "down") return setPSel((s) => Math.min(palFiltered.length - 1, s + 1))
+    if (k.name === "backspace") return void (setPq((q) => q.slice(0, -1)), setPSel(0))
+    const ch = typeof k.sequence === "string" && k.sequence.length === 1 && k.sequence >= " " && !k.ctrl && !k.meta ? k.sequence : ""
+    if (ch !== "") return void (setPq((q) => q + ch), setPSel(0))
+  }
+
   useKeyboard((k) => {
     if (k.ctrl && k.name === "c") return quit()
+    // ⌘K / Ctrl+K toggles the palette from anywhere (list or chat). While open it owns all keys.
+    if (k.ctrl && k.name === "k") {
+      setPq("")
+      setPSel(0)
+      return setPalette((p) => !p)
+    }
+    if (palette) return onPaletteKey(k)
     return state.view === "list" ? onListKey(k) : onChatKey(k)
   })
 
@@ -776,6 +826,7 @@ function App() {
     return (
       <box flexDirection="column" style={{ height: "100%" }}>
         <List sessions={state.sessions} cursor={state.cursor} busySessions={busySessions} frame={work.frame} armedDelete={armedDelete} />
+        {palette ? <Palette query={pq} sel={pSel} commands={palFiltered} theme={t} /> : null}
       </box>
     )
   }
@@ -834,6 +885,7 @@ function App() {
         fmtTokens={fmtTokens}
         spinnerFrame={work.frame}
         placeholder={placeholder}
+        captureFocus={captureFocus}
         keyBindings={inputKeys}
         onContentChange={() => setText(taRef.current?.plainText ?? "")}
         onSubmit={submit}
@@ -843,6 +895,9 @@ function App() {
           cluster now lives on the composer status row above; the footer keeps the cwd so the
           working directory stays a glance away. Drops opencode's LSP/MCP/permission dots. */}
       <ActionBar cwd={footerCwd} right="" theme={t} />
+      {/* ⌘K command palette — absolute overlay on top of the transcript (termcast DialogOverlay).
+          Rendered last so it floats over everything; chat.tsx owns its state + key routing. */}
+      {palette ? <Palette query={pq} sel={pSel} commands={palFiltered} theme={t} /> : null}
     </box>
   )
 }

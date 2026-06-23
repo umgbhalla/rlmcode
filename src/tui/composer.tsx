@@ -49,8 +49,13 @@ export const useComposerFocus = (
   useEffect(() => {
     const ta = taRef.current
     if (!ta) return
-    // When we're the rightful owner, take focus now; when a palette owns it, leave focus alone.
+    // When we're the rightful owner, take focus now; when a palette/dialog captures it, actively
+    // BLUR — opentui keeps the textarea focused across a `focused={false}` prop flip (focus is
+    // imperative), so without this the textarea keeps eating keystrokes WHILE the palette is open
+    // (the model's input doubles into the composer draft). Blur makes the global key handler the
+    // sole consumer → the palette owns input cleanly.
     if (shouldReclaim(inChat, captureFocus)) ta.focus?.()
+    else ta.blur?.()
     const reclaim = () => {
       // The steal (focusRenderable) is mid-flight when BLURRED fires; defer a tick so it settles,
       // then re-claim — but only if we're still the rightful owner (no palette captured focus).
@@ -78,6 +83,7 @@ export function Composer({
   fmtTokens,
   spinnerFrame,
   placeholder,
+  captureFocus,
   keyBindings,
   onContentChange,
   onSubmit,
@@ -93,6 +99,7 @@ export function Composer({
   fmtTokens: (n: number) => string
   spinnerFrame: string
   placeholder: string
+  captureFocus: boolean
   keyBindings: unknown
   onContentChange: () => void
   onSubmit: () => void
@@ -114,7 +121,7 @@ export function Composer({
           onContentChange={onContentChange}
           onSubmit={onSubmit as any}
           onPaste={onPaste as any}
-          focused
+          focused={!captureFocus}
           cursorColor={theme.accent}
           focusedTextColor={theme.text}
           placeholder={placeholder}
