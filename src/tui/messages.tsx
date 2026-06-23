@@ -17,6 +17,7 @@
 import { useState } from "react"
 import { TextAttributes } from "@opentui/core"
 import { theme } from "./theme.ts"
+import { Panel } from "./ui/panel.tsx"
 
 const INDENT = 2 // transcript nesting (matches chat.tsx INDENT)
 
@@ -46,12 +47,13 @@ export const assistantFooter = (
 }
 
 // USER CARD — left-border accent card, paddingLeft=2 (opencode UserMessage :1457-1476). The
-// whole prompt sits inside the card; the accent border + indent reads as "you said".
+// whole prompt sits inside the card; the accent border + indent reads as "you said". Now drawn
+// by the shared Panel "accent" variant (ui/panel.tsx) — the one bordered-card primitive.
 export function UserCard({ text }: { text: string }) {
   return (
-    <box border={["left"]} borderColor={theme.accent} style={{ paddingLeft: INDENT, width: "100%" }}>
+    <Panel variant="accent" borderColor={theme.accent} paddingLeft={INDENT}>
       <text fg={theme.text}>{text}</text>
-    </box>
+    </Panel>
   )
 }
 
@@ -141,12 +143,12 @@ export function AssistantReply({
 export function QueuedCard({ text }: { text: string | null }) {
   if (text === null) return null
   return (
-    <box border={["left"]} borderColor={theme.muted} style={{ marginTop: 1, paddingLeft: INDENT, width: "100%" }}>
+    <Panel variant="accent" borderColor={theme.muted} paddingLeft={INDENT} marginTop={1}>
       <text fg={theme.muted}>
         <span fg={theme.dim}>{"↑ queued  "}</span>
         {text}
       </text>
-    </box>
+    </Panel>
   )
 }
 
@@ -155,13 +157,8 @@ export function QueuedCard({ text }: { text: string | null }) {
 // paddingLeft=2, marginTop=1 — so a failure is unmissable, not painted success-green.
 export function ErrorCard({ text }: { text: string }) {
   return (
-    <box
-      flexDirection="column"
-      border={["left"]}
-      borderColor={theme.error}
-      style={{ marginTop: 1, paddingLeft: INDENT, width: "100%" }}
-    >
+    <Panel variant="accent" borderColor={theme.error} paddingLeft={INDENT} marginTop={1}>
       <text fg={theme.error}>{text}</text>
-    </box>
+    </Panel>
   )
 }

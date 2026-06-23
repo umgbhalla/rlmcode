@@ -18,6 +18,7 @@
 import { useMemo } from "react"
 import { TextAttributes } from "@opentui/core"
 import { type ResolvedTheme } from "./theme.ts"
+import { Panel, Separator } from "./ui/panel.tsx"
 
 // One active keybind, the row the registry's active-mode query yields (opencode Entry :70-76;
 // keys.ts Bind extends this with the executable mode/chord/run bits). `keys` = the printable
@@ -116,17 +117,16 @@ export function WhichKey({
   if (groups.length === 0) return null
   return (
     <box position="absolute" left={0} top={0} width="100%" height="100%" justifyContent="center" alignItems="center">
-      <box
-        border
-        borderStyle="rounded"
-        borderColor={theme.accent}
-        backgroundColor={theme.backgroundPanel}
-        style={{ maxWidth: "90%", width: cardWidth, paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1 }}
-      >
+      <Panel variant="card" borderColor={theme.accent} backgroundColor={theme.backgroundPanel} width={cardWidth}>
         {/* header: title + esc hint */}
-        <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1, marginBottom: 1 }}>
+        <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1 }}>
           <text fg={theme.textMuted} attributes={TextAttributes.BOLD}>Keybindings</text>
           <text fg={theme.textMuted}>esc</text>
+        </box>
+        {/* divider under the header (shared Separator). Width = the content area minus this box's
+            own L/R padding (2), so the rule fills the card without wrapping to a second line. */}
+        <box style={{ paddingLeft: 1, paddingRight: 1, marginBottom: 1 }}>
+          <Separator color={theme.border} width={Math.max(1, contentWidth - 2)} />
         </box>
         {/* grouped, multi-column-if-wide grid */}
         <box flexDirection="row" style={{ paddingLeft: 1 }}>
@@ -138,7 +138,7 @@ export function WhichKey({
         <box style={{ paddingLeft: 1, paddingTop: 1 }}>
           <text fg={theme.textMuted}>? toggle · esc close</text>
         </box>
-      </box>
+      </Panel>
     </box>
   )
 }

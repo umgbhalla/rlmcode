@@ -27,6 +27,7 @@
 import { TextAttributes } from "@opentui/core"
 import { useMemo, useState } from "react"
 import { type ResolvedTheme } from "./theme.ts"
+import { Panel, Separator } from "./ui/panel.tsx"
 
 // One selectable node. `value` is the payload handed to onSelect; `title` is the visible label;
 // `hint` is an optional right-aligned key/meta; `description` trails the title dimmed; `category`
@@ -176,13 +177,7 @@ export function DialogSelect<T>({
   const empty = flat.length === 0
   return (
     <box position="absolute" left={0} top={0} width="100%" height="100%" justifyContent="center" alignItems="center">
-      <box
-        border
-        borderStyle="rounded"
-        borderColor={theme.accent}
-        backgroundColor={theme.backgroundPanel}
-        style={{ width: 64, maxWidth: "90%", paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1 }}
-      >
+      <Panel variant="card" borderColor={theme.accent} backgroundColor={theme.backgroundPanel} width={64}>
         {/* header: title + esc hint */}
         <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1 }}>
           <text fg={theme.textMuted} attributes={TextAttributes.BOLD}>{title}</text>
@@ -192,6 +187,11 @@ export function DialogSelect<T>({
         <box flexDirection="row" style={{ paddingLeft: 1, paddingTop: 1, paddingBottom: 1 }}>
           <text fg={theme.accent}>{"❯ "}</text>
           <text fg={query.length > 0 ? theme.text : theme.muted}>{query.length > 0 ? query : (placeholder ?? "search…")}</text>
+        </box>
+        {/* divider between the search line and the results (shared Separator). 58 = the 64-wide
+            card minus the Panel border (2) + its padding (2) + this box's L/R padding (2). */}
+        <box style={{ paddingLeft: 1, paddingRight: 1, paddingBottom: 1 }}>
+          <Separator color={theme.border} width={58} />
         </box>
         {/* filtered, grouped, scrollable list. maxHeight makes a long list scroll instead of
             blowing past the card; a short list renders shorter. */}
@@ -218,7 +218,7 @@ export function DialogSelect<T>({
         <box style={{ paddingLeft: 1, paddingTop: 1 }}>
           <text fg={theme.textMuted}>{footer ?? "↵ select · ↑↓ move · esc close"}</text>
         </box>
-      </box>
+      </Panel>
     </box>
   )
 }
