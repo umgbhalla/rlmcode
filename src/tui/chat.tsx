@@ -10,7 +10,7 @@
 import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/atom-react"
 import { createCliRenderer, decodePasteBytes } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
-import { useEffect, useRef, useState } from "react"
+import { memo, useEffect, useRef, useState } from "react"
 import { abortTurn } from "../app/default-agent.ts"
 import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, MODEL, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
@@ -31,6 +31,7 @@ import { DialogOverlays, printableChar, useDialogs } from "./dialogs.tsx"
 import { WhichKey } from "./which-key.tsx"
 import { activeBindings, type Bind, dispatch, type KeyEventLike, matchesChord, useModeStack } from "./keys.ts"
 import { activeRetry, computeShowOrch, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
+import { turnPropsEqual } from "./turn-memo.ts"
 
 // The shared syntax style for the reply <markdown> + the tool <diff>: a SyntaxStyle with every
 // tree-sitter / markup / diff scope registered onto the theme palette (theme.ts makeSyntaxStyle),
@@ -191,7 +192,11 @@ function useWorking(busy: boolean): { frame: string; elapsed: number } {
 // inline-vs-block + per-tool detail + output-collapse) live in tool-view.tsx, imported above —
 // TurnView + NodeRow render the SAME ToolView for the main turn's steps and a node's owned tools.
 
-function TurnView({
+// STATIC-COMMIT (claude_code): TurnView is wrapped in React.memo with the turnPropsEqual
+// comparator (turn-memo.ts) so a SETTLED turn does NOT repaint on the ~12×/s busy tick — only
+// the in-flight turn + the composer redraw. TurnViewImpl is the unchanged render; the memo is a
+// pure perf wrapper (no logic/shape change). Below, `export const TurnView = memo(...)`.
+function TurnViewImpl({
   t,
   first,
   expanded,
@@ -296,6 +301,13 @@ function TurnView({
     </box>
   )
 }
+
+// STATIC-COMMIT: the memoized TurnView the transcript actually renders. turnPropsEqual
+// (turn-memo.ts) skips the re-render for a SETTLED turn whose render-relevant inputs (content,
+// cols, first, and the focus/expansion state scoped to its OWN rows) are unchanged — so the
+// busy-tick `frame` prop (the spinner, ~12×/s) can't repaint settled scrollback. The in-flight
+// turn is never settled, so it always re-renders; the comparator is a pure perf wrapper.
+const TurnView = memo(TurnViewImpl, turnPropsEqual)
 
 // Orchestration node tree (orch.emit) as a VELOCITY UNICODE TREE: pure flatten()
 // (src/tui/orch-tree.ts) walks roots→children and precomputes each node's ├─/└─/│
