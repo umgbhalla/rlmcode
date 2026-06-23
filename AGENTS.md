@@ -61,7 +61,7 @@ imports count). The TUI consumes the engine ONLY through the barrel + the app ha
 
 ## Run
 
-`.env`: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. Opt: `RLM_MAX_STEPS` (default 50).
+`.env`: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. Opt: `RLM_MAX_STEPS` (default 24).
 
     bun run motel        # local motel ingest (127.0.0.1:27686) — NOT npm @kitlangton/motel (broken)
     bun run motel:tui    # motel TUI
