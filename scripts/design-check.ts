@@ -2,13 +2,19 @@
 // Real semantic design analysis on yuku-analyzer (not comment-grep). One
 // cross-file pass over src/, reporting design smells that tsc doesn't:
 //   broken:  unresolvable / ambiguous import or re-export (link diagnostic)
-//   delete:  dead export / unused import / unused dependency
+//   delete:  dead export / unused import / unused dependency / UNREACHABLE module
 //   native:  a dependency that duplicates a platform/runtime native
 //   cycle:   import cycle between modules
 //   shrink:  cyclomatic complexity / nesting depth over budget
 //   yagni:   too many parameters
 //   mutate:  exported mutable binding reassigned / local written but never read
 //   capture: closure writes a shared module-level binding
+//
+// Dead code is REACHABILITY-based, not a per-symbol reference count: the run
+// pulls the test/example/script consumers into the graph and marks live
+// everything reachable from the real entrypoints (package.json "exports" + the
+// app entry). A module no root reaches is dead — which a refcount misses for a
+// mutually-referencing dead CLUSTER (each side keeps the other's count > 0).
 //
 // Core logic is exported (buildAnalyzer/analyze/unusedDeps) so scripts/
 // design-check.test.ts can assert it on fixtures — ponytail: non-trivial
@@ -17,14 +23,14 @@ import { Analyzer, SymbolFlags } from "yuku-analyzer"
 
 export type Finding = { tag: "broken" | "crosscore" | "delete" | "native" | "cycle" | "shrink" | "yagni" | "mutate" | "capture"; msg: string }
 
-// CROSS-CORE BOUNDARY: src/core/* is the engine; its ONLY public seam is the src/core/sdk.ts
-// barrel (package.json "exports" points there). A file OUTSIDE the trusted layers below that
-// deep-imports any core module other than the barrel has reached past the SDK seam — flagged.
-// Trusted layers (may import core internals): src/core/ itself, and src/app/ (the app composition
-// layer that wires the default agent over a concrete AxAIService). Pure presentation (src/tui/*)
-// and any external consumer must go through src/core/sdk.ts.
+// CROSS-CORE BOUNDARY: src/core/* is the engine; its ONLY public seam is the core barrel
+// (package.json "exports" "." points there — derived at run time, see coreBarrelFromPkg). A file
+// OUTSIDE the trusted layers below that deep-imports any core module other than the barrel has
+// reached past the SDK seam — flagged. Trusted layers (may import core internals): src/core/ itself,
+// and src/app/ (the app composition layer that wires the default agent over a concrete AxAIService).
+// Pure presentation (src/tui/*) and any external consumer must go through the barrel.
 const CORE_DIR = "src/core/"
-const CORE_BARREL = "src/core/sdk.ts"
+const DEFAULT_CORE_BARREL = "src/core/sdk.ts"
 const isTrustedCoreImporter = (path: string): boolean => path.startsWith(CORE_DIR) || path.startsWith("src/app/")
 
 // Resolve an import specifier to a src/-relative module path (for the crosscore check). Prefer the
@@ -43,24 +49,12 @@ const resolveCoreTarget = (importerPath: string, specifier: string, resolved?: s
   return p.startsWith(CORE_DIR) ? p : null
 }
 
-// Reachability roots: their exports are public API / entrypoints, not dead.
-// chat.tsx = app entry; orch.ts = orchestration-core library surface; orch-recipes.ts
-// = userland recipe surface (runNode() by turn(); judge/loopUntilDry/adversarialVerify
-// by orch-run.orchestrate()) — kept a root so the recipe library surface isn't pruned
-// to only its current callers.
-// sdk.ts = the public SDK re-export seam (the external entrypoint, consumed by
-// examples/sdk-usage.ts, outside the src/-only scan) — a root so its public-API
-// re-exports aren't flagged dead.
-// src/mock.ts + src/mock-ai.ts = the NARROW test-only mock seam (the deterministic AI +
-// canned node feed). Consumed by scripts/tui/*.test.ts and the agent.ts RLM_MOCK runtime
-// swap — the tests OUTSIDE the src/-only scan — so they're roots, like sdk.ts, lest their
-// seam surface (MOCK_NODES / makeMockAI / MOCK_FIXTURE) be pruned to its in-src callers.
-// src/tui/ui/* = the lifted termcast UI atoms (Spinner / Row / useEvent / useAnimationTick) —
-// a presentation foundation landed AHEAD of its chat.tsx wiring and exercised by the frame
-// gate fixture scripts/tui/ui-atoms-demo.tsx (mounted by ui-atoms.test.ts, OUTSIDE the
-// src/-only scan). Roots like sdk.ts/mock.ts so the atom surface isn't pruned to its (empty,
-// pending integration) in-src callers before the sequential chat.tsx re-skin consumes it.
-const ENTRY = new Set(["src/tui/chat.tsx", "src/core/orch.ts", "src/core/orch-recipes.ts", "src/core/sdk.ts", "src/core/run.ts", "src/core/mock.ts", "src/core/mock-ai.ts", "src/tui/ui/spinner.tsx", "src/tui/ui/row.tsx", "src/tui/ui/hooks.tsx", "src/tui/ui/animation-tick.tsx"])
+// Runtime entrypoints that are NOT expressible in package.json "exports": the TUI app boots by
+// `bun src/tui/chat.tsx`, so it (and what it imports) is reachable even though it is not a library
+// export. Everything else that must stay live is reached either from here or from a real consumer
+// (tests/examples) now that those are in the graph — so there is no hand-maintained keep-alive list.
+const APP_ENTRYPOINTS = ["src/tui/chat.tsx"]
+
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
 const NEST_BUDGET = 8 // block nesting depth per function
 const PARAM_BUDGET = 6 // parameters per function
@@ -125,11 +119,16 @@ export const buildAnalyzer = (files: { path: string; source: string }[]): Analyz
   return a
 }
 
-export const importedRoots = (a: Analyzer): Set<string> => {
+// Package roots imported by modules the predicate accepts (default: every module). The run
+// narrows this to src/ so a dependency used ONLY by tests/scripts still reads as unused-in-prod.
+export const importedRoots = (a: Analyzer, isLinted: (path: string) => boolean = () => true): Set<string> => {
   const roots = new Set<string>()
-  for (const m of a.modules.values()) for (const imp of m.imports) {
-    const root = pkgRoot(imp.specifier)
-    if (root) roots.add(root)
+  for (const m of a.modules.values()) {
+    if (!isLinted(m.path)) continue
+    for (const imp of m.imports) {
+      const root = pkgRoot(imp.specifier)
+      if (root) roots.add(root)
+    }
   }
   return roots
 }
@@ -149,9 +148,27 @@ const lineOf = (m: any, node: any): number => {
 
 const countLines = (source: string): number => source.split(/\r?\n/).length
 
-export const analyze = (a: Analyzer): Finding[] => {
+// Options for a real run. Defaults keep the function pure + fixture-friendly: with no roots the
+// reachability pass is OFF and every module is linted, so the unit tests drive analyze() exactly
+// as before.
+export type AnalyzeOptions = {
+  // Public/entry module paths whose exports are the API surface (never "dead"); also the seeds of
+  // the reachability sweep. Empty → reachability pass disabled (fixture mode).
+  roots?: Set<string>
+  // Which modules to actually LINT (per-file smells + dead-export). Non-linted modules
+  // (tests/examples/scripts) still populate the reference + import graph. Default: lint everything.
+  isLinted?: (path: string) => boolean
+  // The core public barrel for the cross-core boundary. Default src/core/sdk.ts.
+  coreBarrel?: string
+}
+
+export const analyze = (a: Analyzer, opts: AnalyzeOptions = {}): Finding[] => {
+  const roots = opts.roots ?? new Set<string>()
+  const isLinted = opts.isLinted ?? (() => true)
+  const coreBarrel = opts.coreBarrel ?? DEFAULT_CORE_BARREL
   const out: Finding[] = []
   for (const m of a.modules.values()) {
+    if (!isLinted(m.path)) continue // consumers (tests/examples) inform the graph but are not linted
     // file-size budget: CONDITIONED on role — 300 for a public-index/barrel, 500 for an
     // internal impl file — with an allow-list for existing oversized files so the rule
     // only blocks new growth.
@@ -163,8 +180,10 @@ export const analyze = (a: Analyzer): Finding[] => {
         out.push({ tag: "shrink", msg: `${m.path}: ${lines} lines (${role} budget ${budget}). Split the file.` })
       }
     }
-    // dead exports (cross-file). Skip entry roots + type-only (referencesOf undercounts type uses).
-    if (!ENTRY.has(m.path)) {
+    // dead exports (cross-file). Skip roots (their exports are the public surface) + type-only
+    // (referencesOf undercounts type uses). A reference from a consumer (test/example) counts, so
+    // a seam used only by tests is live without a hand-maintained keep-alive entry.
+    if (!roots.has(m.path)) {
       for (const s of m.symbols) {
         if (!s.has(SymbolFlags.Exported)) continue
         if (s.has(SymbolFlags.TypeSpace) && !s.has(SymbolFlags.ValueSpace)) continue
@@ -176,12 +195,12 @@ export const analyze = (a: Analyzer): Finding[] => {
       const root = pkgRoot(imp.specifier)
       if (root && NATIVE_DUPES[root]) out.push({ tag: "native", msg: `${m.path}: "${root}" duplicates a native — use ${NATIVE_DUPES[root]}.` })
       // CROSS-CORE: an importer outside the trusted layers reaching into a core module other than
-      // the sdk.ts barrel has gone past the public seam. (type-only imports count too — even a type
+      // the barrel has gone past the public seam. (type-only imports count too — even a type
       // dependency on a core internal couples the consumer to the engine's private shapes.)
       if (!isTrustedCoreImporter(m.path)) {
         const target = resolveCoreTarget(m.path, imp.specifier, imp.resolvedModule?.path)
-        if (target !== null && target !== CORE_BARREL)
-          out.push({ tag: "crosscore", msg: `${m.path}: deep import of core module "${target}" (via "${imp.specifier}"). Cross-core deep import — go through the ${CORE_BARREL} barrel.` })
+        if (target !== null && target !== coreBarrel)
+          out.push({ tag: "crosscore", msg: `${m.path}: deep import of core module "${target}" (via "${imp.specifier}"). Cross-core deep import — go through the ${coreBarrel} barrel.` })
       }
       if (imp.isSideEffect || imp.typeOnly || !imp.local) continue
       if (imp.local.references.length === 0) out.push({ tag: "delete", msg: `${m.path}: unused import "${imp.local.name}". Remove it.` })
@@ -247,14 +266,43 @@ export const analyze = (a: Analyzer): Finding[] => {
   // tsc reports these too, but surfacing them here keeps the one gate authoritative.
   for (const d of a.diagnostics) {
     if (d.severity !== "error" && d.severity !== "warning") continue
+    if (!isLinted(d.module)) continue // a consumer (test/example) seeds the graph but its own link errors are out of scope
     out.push({ tag: "broken", msg: `${d.module}: ${d.message}` })
   }
 
-  // circular dependencies (DFS over the resolved import graph).
+  // resolved import edges among LINTED modules (drives both reachability and cycles).
   const edges = new Map<string, string[]>()
   for (const m of a.modules.values()) {
-    edges.set(m.path, m.imports.map((i) => i.resolvedModule?.path).filter((p): p is string => Boolean(p)))
+    if (!isLinted(m.path)) continue
+    edges.set(m.path, m.imports.map((i) => i.resolvedModule?.path).filter((p): p is string => Boolean(p) && isLinted(p!)))
   }
+
+  // UNREACHABLE modules (dead files / dead clusters). Reachability replaces a hand-maintained
+  // keep-alive allowlist: seed from the real roots PLUS any linted module a consumer (test/example/
+  // script) imports, then sweep the import graph. A linted module no seed reaches is dead — caught
+  // even when it is part of a mutually-referencing cluster a per-symbol refcount would keep alive.
+  if (roots.size > 0) {
+    const seeds = new Set<string>(roots)
+    for (const m of a.modules.values()) {
+      if (isLinted(m.path)) continue
+      for (const imp of m.imports) {
+        const p = imp.resolvedModule?.path
+        if (p && isLinted(p)) seeds.add(p)
+      }
+    }
+    const reached = new Set<string>()
+    const stack = [...seeds]
+    while (stack.length) {
+      const n = stack.pop()!
+      if (reached.has(n)) continue
+      reached.add(n)
+      for (const d of edges.get(n) ?? []) if (!reached.has(d)) stack.push(d)
+    }
+    for (const path of edges.keys())
+      if (!reached.has(path)) out.push({ tag: "delete", msg: `${path}: module unreachable from any entrypoint — dead file. Drop it or wire it in.` })
+  }
+
+  // circular dependencies (DFS over the resolved import graph).
   const seen = new Set<string>()
   const path: string[] = []
   const onPath = new Set<string>()
@@ -298,6 +346,14 @@ export const unusedDeps = (imported: Set<string>, deps: string[], allow = RUNTIM
 // committer actually staged — so one agent's WIP can't fail another's commit.
 export const findingFiles = (msg: string): string[] => msg.match(/(?:src|scripts)\/[^\s:→]+|package\.json/g) ?? []
 
+// The library public barrel, read from package.json "exports" "." (falls back to the default).
+// Keeps the cross-core seam from drifting away from what the package actually publishes.
+export const coreBarrelFromPkg = (pkg: any): string => {
+  const dot = pkg?.exports?.["."]
+  const target = typeof dot === "string" ? dot : typeof dot?.import === "string" ? dot.import : typeof dot?.default === "string" ? dot.default : null
+  return target ? target.replace(/^\.\//, "") : DEFAULT_CORE_BARREL
+}
+
 const stagedSet = (): Set<string> => {
   const r = Bun.spawnSync(["git", "diff", "--cached", "--name-only"])
   if (!r.success) return new Set()
@@ -306,11 +362,21 @@ const stagedSet = (): Set<string> => {
 
 if (import.meta.main) {
   const staged = process.argv.includes("--staged")
+  const isLinted = (p: string) => p.startsWith("src/")
+  // src/ is LINTED; scripts/ + examples/ are CONSUMERS — they join the reference + import graph so
+  // a seam used only by a test/example reads as live, but they are not themselves linted.
   const files: { path: string; source: string }[] = []
-  for await (const p of new Bun.Glob("src/**/*.{ts,tsx}").scan(".")) files.push({ path: p, source: await Bun.file(p).text() })
+  for (const glob of ["src/**/*.{ts,tsx}", "scripts/**/*.{ts,tsx}", "examples/**/*.{ts,tsx}"])
+    for await (const p of new Bun.Glob(glob).scan(".")) files.push({ path: p, source: await Bun.file(p).text() })
   const a = buildAnalyzer(files)
   const pkg = await Bun.file("package.json").json()
-  const out = [...analyze(a), ...unusedDeps(importedRoots(a), Object.keys(pkg.dependencies ?? {}))]
+  // roots = the published library surface (package.json "exports") + runtime entrypoints.
+  const coreBarrel = coreBarrelFromPkg(pkg)
+  const roots = new Set<string>([coreBarrel, ...APP_ENTRYPOINTS].filter((p) => a.modules.has(p)))
+  const out = [
+    ...analyze(a, { roots, isLinted, coreBarrel }),
+    ...unusedDeps(importedRoots(a, isLinted), Object.keys(pkg.dependencies ?? {})),
+  ]
 
   // In --staged mode, a finding blocks only if it touches a staged file.
   const stage = staged ? stagedSet() : null

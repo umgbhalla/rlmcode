@@ -22,14 +22,23 @@ export type DebtResult = { markers: string[]; noTrigger: number; orphan: number;
 const MARKER = /^[\s*]*ponytail:\s*(.+)/is
 const PLACEHOLDER = /<ceiling>|<upgrade/
 
-// Map every attached comment back to its host node (AttachedComment carries no
-// offset, so we key on its text). A marker whose host is the Program root guards
-// no code — it's an orphan.
-const hostByComment = (m: Module): Map<string, Node> => {
-  const map = new Map<string, Node>()
+// Map every attached comment back to its host node. AttachedComment carries no
+// offset (only value/type/position), so text is the only join key — but two
+// identical `// ponytail:` lines must NOT collapse to the first host (that
+// misclassifies one as the other's orphan/live state). So key text -> hosts in
+// WALK ORDER, and the harvest consumes the Nth occurrence against the Nth host
+// (m.comments is source order, the walk is pre-order: same order, so the Nth
+// duplicate lines up). A marker whose host is the Program root guards no code —
+// it's an orphan.
+const hostsByComment = (m: Module): Map<string, Node[]> => {
+  const map = new Map<string, Node[]>()
   m.walk({
     enter: (node) => {
-      for (const c of node.comments ?? []) if (!map.has(c.value)) map.set(c.value, node)
+      for (const c of node.comments ?? []) {
+        const arr = map.get(c.value)
+        if (arr) arr.push(node)
+        else map.set(c.value, [node])
+      }
     },
   })
   return map
@@ -38,12 +47,14 @@ const hostByComment = (m: Module): Map<string, Node> => {
 export const harvest = (path: string, text: string): DebtResult => {
   const a = new Analyzer()
   const m = a.addFile(path, text, { attachComments: true })
-  const hosts = hostByComment(m)
+  const hosts = hostsByComment(m)
   const comments = m.comments
 
   const markers: string[] = []
   let noTrigger = 0
   let orphan = 0
+  // per-text cursor: the Nth comment of a given text matches the Nth host.
+  const hostCursor = new Map<string, number>()
   for (let i = 0; i < comments.length; i++) {
     const c = comments[i]!
     const match = c.value.match(MARKER)
@@ -64,7 +75,9 @@ export const harvest = (path: string, text: string): DebtResult => {
     }
 
     const hasTrigger = /upgrade:/i.test(body)
-    const host = hosts.get(c.value)
+    const seen = hostCursor.get(c.value) ?? 0
+    hostCursor.set(c.value, seen + 1)
+    const host = hosts.get(c.value)?.[seen]
     const isOrphan = !host || host.type === "Program"
     if (!hasTrigger) noTrigger++
     if (isOrphan) orphan++
