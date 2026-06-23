@@ -141,8 +141,15 @@ export const MOCK_TRANSCRIPT_TOOL: AxFunction = {
 const DIFF_OLD = ['export function greet(name: string) {', '  const msg = "hi " + name', '  return msg', '}'].join("\n")
 const DIFF_NEW = ['export function greet(name: string) {', '  const msg = "hello, " + name', '  return msg', '}'].join("\n")
 const WRITE_BODY = ['export const VERSION = "0.0.1"', 'export const NAME = "rlmcode"'].join("\n")
+// A SECOND edit on a .py file (a DIFFERENT filetype) so the diff-viewer gate proves the native
+// <diff> is FILETYPE-GENERAL — the .py path runs through the SAME populated SyntaxStyle as .ts (the
+// renderer is filetype-driven, not TS-hardcoded), which is the "syntax-highlighted" claim across a
+// second language. One changed line inside two context lines ⇒ a clean minimal -/+ diff.
+const PY_OLD = ['def greet(name):', '    return "hi " + name'].join("\n")
+const PY_NEW = ['def greet(name):', '    return "hello, " + name'].join("\n")
 const MOCK_DIFF_TOOLS: ReadonlyArray<{ id: string; name: string; args: string; result: string; isError: boolean }> = [
   { id: "df_edit", name: "edit_file", args: JSON.stringify({ path: "src/greet.ts", old_string: DIFF_OLD, new_string: DIFF_NEW }), result: "updated", isError: false },
+  { id: "df_py", name: "edit_file", args: JSON.stringify({ path: "src/greet.py", old_string: PY_OLD, new_string: PY_NEW }), result: "updated", isError: false },
   { id: "df_write", name: "write_file", args: JSON.stringify({ path: "src/version.ts", content: WRITE_BODY }), result: "written", isError: false },
 ]
 const feedDiffNodes = (emit: ActivitySink): void => {
