@@ -36,7 +36,11 @@ export type Row = {
 }
 
 const glyphOf = (s: OrchNode["status"]) => getIconShape(s === "running" ? "running" : s === "error" ? "error" : "done")
-const colorOf = (s: OrchNode["status"]) => (s === "error" ? theme.error : s === "done" ? theme.ok : theme.muted)
+// RATE-LIMIT VISIBILITY: a node currently backing off (running + a `retry` status) reads in the
+// WARNING color (yellow), not the muted running color — so the whole row + its "⏳ rate-limited…"
+// summary stand out as throttled/waiting, distinct from a node that's actively working.
+const colorOf = (n: OrchNode) =>
+  n.status === "error" ? theme.error : n.status === "done" ? theme.ok : n.retry ? theme.warning : theme.muted
 
 // A node's settled payload is often a serialized object ({"thought":"…","reply":"…"})
 // that, dumped raw into the summary cell, leaks `{"` braces and JSON noise into the
@@ -58,8 +62,14 @@ const humanText = (s: string): string => {
 // summary cell: while running, the phase IF it's meaningful (not the placeholder echo of
 // the node's own label/id — which rendered the infamous "node node"); else "running…".
 // Settled nodes show their payload with the JSON envelope stripped.
+// RATE-LIMIT VISIBILITY: a node currently backing off carries a `retry` status ("⏳ rate-limited
+// · retry 2/3 · 4s") — it WINS the summary cell over the phase, so the live tree SHOWS the 429
+// wait instead of a generic "running…". Cleared (back to phase) the moment the node makes progress.
 const summaryOf = (n: OrchNode): string => {
-  if (n.status === "running") return n.phase && n.phase !== n.label && n.phase !== n.id ? n.phase : "running…"
+  if (n.status === "running") {
+    if (n.retry) return n.retry
+    return n.phase && n.phase !== n.label && n.phase !== n.id ? n.phase : "running…"
+  }
   return humanText(n.result ?? n.phase ?? "")
 }
 
@@ -153,7 +163,7 @@ export const flatten = (orch: OrchTree, expNodes: ReadonlySet<string>, maxChildr
       prefix: isRoot ? "" : prefixOf(ancestors, isLast),
       bodyPrefix: stemOf(childAncestors),
       glyph: glyphOf(n.status),
-      color: colorOf(n.status),
+      color: colorOf(n),
       label: n.label,
       summary: summaryOf(n),
       tokens: n.tokens,

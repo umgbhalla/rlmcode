@@ -5,8 +5,15 @@
 // this SMALL — fixtures, not a second provider.
 import type { AxFunction } from "@ax-llm/ax"
 import type { Activity } from "./activity.ts"
-import type { ActivitySink, NodeEvent } from "./orch.ts"
+import { type ActivitySink, type NodeEvent, retryStatus } from "./orch.ts"
 import { getTurnEmit } from "./runtime.ts"
+
+// Holdable pace for the time-sensitive fixtures (the rate-limit retry below): a real backoff is
+// brief, so without a pause the "⏳ rate-limited" retry state flips to ✓ faster than the frame gate
+// can capture it. RLM_MOCK_DELAY_MS (the same knob mock-ai's stream uses) holds the retry state so
+// the frame gate sees it DURING the backoff; default 0 keeps non-timed tests instant.
+const MOCK_DELAY_MS = Number(process.env.RLM_MOCK_DELAY_MS ?? 0)
+const sleep = (ms: number): Promise<void> => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve())
 
 // ── CANNED ORCH FEED ────────────────────────────────────────────────────────────────
 // A fixed NodeEvent script so the orch tree renders deterministically with NO model: a
@@ -118,5 +125,37 @@ export const MOCK_TRANSCRIPT_TOOL: AxFunction = {
   func: async (_args: unknown, extra?: Readonly<{ sessionId?: string; abortSignal?: AbortSignal }>) => {
     feedTranscriptNodes(getTurnEmit(extra?.sessionId))
     return "ran 4 tools (1 error, 1 running)"
+  },
+}
+
+// ── CANNED RATE-LIMIT RETRY FEED (rate-limit-visible frame gate) — a child node that hits a 429,
+// emits the `retry` NodeEvent (so it shows "⏳ rate-limited · retry 2/3 · 4s" WHILE backing off),
+// HOLDS (RLM_MOCK_DELAY_MS) so the frame gate captures the live retry state, then RECOVERS (done ✓).
+// The retry detail uses retryStatus() — the SAME formatter the real path uses — so the fixture and
+// production agree byte-for-byte. NOT in production — replayed only by rate-limit.test under RLM_MOCK.
+const RL_BACKOFF_MS = 4000 // a fixed, legible backoff so the badge reads "· 4s" (test-stable)
+const feedRateLimitNodes = async (emit: ActivitySink, signal?: AbortSignal): Promise<void> => {
+  const push = (a: Activity): void => emit(a)
+  // root fan-out + one child that will hit the 429.
+  push({ kind: "node", nodeId: "orchestrate", event: "start", detail: "fan-out" })
+  push({ kind: "node", nodeId: "scan", parentId: "orchestrate", event: "start", detail: "scan routes" })
+  // the 429 RETRY — the live backoff signal (cause rate_limited, attempt 2/3, the 4s backoff).
+  push({ kind: "node", nodeId: "scan", event: "retry", detail: retryStatus("rate_limited", 2, 3, RL_BACKOFF_MS) })
+  await sleep(MOCK_DELAY_MS) // hold the "⏳ rate-limited" state so the frame gate captures it
+  if (signal?.aborted) return // a cancelled turn leaves the node mid-retry (no spurious recover)
+  // RECOVER — the retry cleared, the node finishes clean (✓), proving the backoff was transient.
+  push({ kind: "node", nodeId: "scan", event: "done", detail: "found 3 routes", tokens: 800 })
+}
+
+// TEST-ONLY rate-limit tool — replays a 429-then-recover node so the rate-limit frame gate
+// (scripts/tui/rate-limit.test.ts) asserts the "⏳ rate-limited · retry 2/3 · 4s" status shows
+// DURING the backoff, then ✓ on recover. Off in production (registered only under RLM_MOCK).
+export const MOCK_RATELIMIT_TOOL: AxFunction = {
+  name: "mock_ratelimit",
+  description: "TEST ONLY: replay a 429-then-recover node (visible retry backoff) for the headless TUI harness.",
+  parameters: { type: "object", properties: {}, required: [] },
+  func: async (_args: unknown, extra?: Readonly<{ sessionId?: string; abortSignal?: AbortSignal }>) => {
+    await feedRateLimitNodes(getTurnEmit(extra?.sessionId), extra?.abortSignal)
+    return "scanned routes (recovered after a rate-limit retry)"
   },
 }

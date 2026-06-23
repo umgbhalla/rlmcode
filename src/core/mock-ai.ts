@@ -73,6 +73,21 @@ const wantsTranscript = (req: Readonly<AxChatRequest<unknown>>): boolean => {
   return last !== undefined && typeof last.content === "string" && /transcript/i.test(last.content)
 }
 
+// RATE-LIMIT variant: when the user asks about a rate limit, the mock calls the test-only
+// `mock_ratelimit` tool (mock.ts) — it replays a 429-then-recover node (a VISIBLE retry backoff,
+// then ✓), so the rate-limit frame gate (scripts/tui/rate-limit.test.ts) asserts the live
+// "⏳ rate-limited · retry 2/3 · 4s" status shows DURING the backoff. Keyed off the prompt.
+const MOCK_RATELIMIT_TOOL = {
+  id: "call_mock_ratelimit",
+  type: "function" as const,
+  function: { name: "mock_ratelimit", params: JSON.stringify({}) },
+}
+const wantsRateLimit = (req: Readonly<AxChatRequest<unknown>>): boolean => {
+  const users = req.chatPrompt.filter((m) => m.role === "user")
+  const last = users[users.length - 1]
+  return last !== undefined && typeof last.content === "string" && /rate.?limit/i.test(last.content)
+}
+
 // GROUP variant: when the user message asks to explore, the mock scripts THREE CONSECUTIVE
 // explore tool calls (read_file → glob → grep) in ONE tool-loop step. ax executes all three,
 // appends their results to memory, then calls again → the final reply. These land as three
@@ -153,7 +168,9 @@ const scriptedChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResp
       ? [MOCK_ORCH_TOOL]
       : wantsTranscript(req)
         ? [MOCK_TRANSCRIPT_TOOL]
-        : [MOCK_TOOL]
+        : wantsRateLimit(req)
+          ? [MOCK_RATELIMIT_TOOL]
+          : [MOCK_TOOL]
   // On the tool-call step of an explore turn, surface the cluster's calls to the activity bus
   // (the mock service doesn't, see emitGroupCalls) so the three explore steps render + group.
   if (!hasToolResult && wantsGroup(req)) emitGroupCalls()
@@ -208,10 +225,10 @@ const streamReply = (): ReadableStream<AxChatResponse> => {
 }
 
 // The streaming scriptedChat: the FINAL reply step (tool result present, non-orch turn)
-// streams; the tool-call step and orch turns stay plain (their reply is the orch tree, not
-// streamed prose). Returns a ReadableStream only where the live render is under test.
+// streams; the tool-call step and orch/rate-limit turns stay plain (their reply is the orch tree,
+// not streamed prose). Returns a ReadableStream only where the live render is under test.
 const scriptedStreamChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResponse | ReadableStream<AxChatResponse>> =>
-  hasCurrentTurnToolResult(req) && !wantsOrch(req) && !wantsGroup(req) ? Promise.resolve(streamReply()) : scriptedChat(req)
+  hasCurrentTurnToolResult(req) && !wantsOrch(req) && !wantsGroup(req) && !wantsRateLimit(req) ? Promise.resolve(streamReply()) : scriptedChat(req)
 
 // The canned AI service — ax's real AxMockAIService with our scripted chat. `functions:
 // true` so ax permits the tool-call path. `streaming` toggles the live-delta variant (used

@@ -37,6 +37,16 @@ const orchWorthShowing = (orch: OrchTree): boolean => {
 export const computeShowOrch = (orch: OrchTree | undefined): orch is OrchTree =>
   orch !== undefined && orch.roots.length > 0 && orchWorthShowing(orch)
 
+// RATE-LIMIT VISIBILITY: the live retry status of the FIRST node currently backing off (or null
+// when none is). Drives the COMPOSER's rate-limit note — so while a background node retries a 429
+// the status row SHOWS "⏳ rate-limited · retry 2/3 · 4s" instead of a bare "thinking…", making the
+// throttle visible at the turn level too (not just buried in the tree). Pure; scans the node map.
+export const activeRetry = (orch: OrchTree | undefined): string | null => {
+  if (orch === undefined) return null
+  for (const n of Object.values(orch.nodes)) if (n.status === "running" && n.retry) return n.retry
+  return null
+}
+
 // Σ footer summary: the live run total — COST-METER tokens (preserved from orch.totalTokens)
 // · node count · error count. Computed over the whole node map (not just visible rows) so a
 // collapsed subtree still counts toward the totals.

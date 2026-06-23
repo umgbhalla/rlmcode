@@ -30,7 +30,7 @@ import { MODELS, type ModelName } from "../app/default-agent.ts"
 import { DialogOverlays, printableChar, useDialogs } from "./dialogs.tsx"
 import { WhichKey } from "./which-key.tsx"
 import { activeBindings, type Bind, dispatch, type KeyEventLike, matchesChord, useModeStack } from "./keys.ts"
-import { computeShowOrch, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
+import { activeRetry, computeShowOrch, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
 
 // The shared syntax style for the reply <markdown> + the tool <diff>: a SyntaxStyle with every
 // tree-sitter / markup / diff scope registered onto the theme palette (theme.ts makeSyntaxStyle),
@@ -93,9 +93,13 @@ type Work = { frame: string; elapsed: number }
 // CLEAN (only the persistent token·Cmd+K cluster shows, right-aligned). The spinner is rendered
 // by the composer itself, so the busy text carries no frame glyph here. The keybind help that
 // used to fill the idle bar is gone — Cmd+K (the palette) is the discovery surface now.
-const statusBar = (busy: boolean, armed: boolean, note: string | null, work: Work): { right: string; tone: string; live: boolean } => {
+const statusBar = (busy: boolean, armed: boolean, note: string | null, work: Work, retry: string | null): { right: string; tone: string; live: boolean } => {
   if (armed) return { right: "esc again to interrupt", tone: theme.error, live: true }
   if (note) return { right: note, tone: theme.ok, live: true } // transient (copied / paste collapsed) wins so it's never swallowed mid-turn
+  // RATE-LIMIT VISIBILITY: a node backing off (a 429 retry) takes priority over the generic
+  // "thinking…" so the throttle is visible at the turn level — "⏳ rate-limited · retry 2/3 · 4s ·
+  // esc interrupt". In the warning tone (not the busy spinner tone) so it reads as throttled.
+  if (retry) return { right: `${retry} · esc interrupt`, tone: theme.warning, live: true }
   if (busy) return { right: `thinking… ${work.elapsed}s · esc interrupt`, tone: theme.busy, live: true }
   return { right: "", tone: theme.muted, live: false }
 }
@@ -991,7 +995,10 @@ function App() {
   // the bar stays a single line.
   const footerCwd = shortCwd(process.cwd(), process.env.HOME ?? "")
   const sessTokens = sessionTokens(active.messages, orch)
-  const status = statusBar(busy, armed, note, work)
+  // RATE-LIMIT VISIBILITY: a node in the active session's orch tree currently backing off (429
+  // retry) surfaces its status to the composer (activeRetry), so the throttle shows at the turn
+  // level — not just buried in the tree. null when nothing is retrying ⇒ the usual busy/idle row.
+  const status = statusBar(busy, armed, note, work, activeRetry(orch))
   // Placeholder stays CLEAN — never the thinking/esc line (that was the duplicate the user hit:
   // it rendered inside the input area on the LEFT while the status row showed it again on the
   // right). The live status now lives ONLY on the right-aligned status row.
