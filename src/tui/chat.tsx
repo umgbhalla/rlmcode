@@ -21,6 +21,7 @@ import { type Row as OrchRow } from "./orch-tree.ts"
 import { ActionBar, shortCwd } from "./shell.tsx"
 import { Composer, useComposerFocus } from "./composer.tsx"
 import { AssistantReply, ErrorCard, ThinkingPart, UserCard } from "./messages.tsx"
+import { type Option, useDialogSelect } from "./dialog-select.tsx"
 import { type Command, Palette } from "./palette.tsx"
 import { type Binding, isWhichKeyToggle, WhichKey } from "./which-key.tsx"
 import { computeShowOrch, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
@@ -532,13 +533,12 @@ function App() {
   // list-view `d` arm-then-confirm: holds the session id awaiting a second `d` to close.
   const [armedDelete, setArmedDelete] = useState<string | null>(null)
   const focusedRef = useRef(true)
-  // COMMAND PALETTE (⌘K / Ctrl+K) state. Open → the composer YIELDS focus (captureFocus below)
-  // and the global key handler routes keys to onPaletteKey instead of the chat/list handlers, so
-  // the palette intercepts typing/nav deterministically (no focus war with the textarea). pq =
-  // the live filter query; pSel = the highlighted command index.
+  // COMMAND PALETTE (⌘K / Ctrl+K) open/close flag. Open → the composer YIELDS focus (captureFocus
+  // below) and the global key handler routes keys to onPaletteKey instead of the chat/list handlers,
+  // so the palette intercepts typing/nav deterministically (no focus war with the textarea). The
+  // query + highlighted-row state now live in the useDialogSelect CONTROLLER (palModel, built below
+  // over the command registry) — chat.tsx only owns whether the dialog is mounted.
   const [palette, setPalette] = useState(false)
-  const [pq, setPq] = useState("")
-  const [pSel, setPSel] = useState(0)
   // WHICH-KEY overlay (`?` in chat): a contextual keybind-hint panel reading the active node's
   // bindings. Like the palette it's a capture-focus overlay (composer yields) routed by the
   // global handler while open, so `?` / esc close it deterministically (no textarea focus war).
@@ -822,11 +822,23 @@ function App() {
     { title: "Scroll to top", hint: "Home", run: () => scrollPage("top") },
     { title: "Quit", hint: "ctrl+c", run: quit },
   ]
-  const palFiltered = pq.trim() === "" ? commands : commands.filter((c) => c.title.toLowerCase().includes(pq.toLowerCase()))
+  // Each command → a DialogSelect Option whose VALUE is the command's run thunk (so submit()
+  // invokes it) and whose hint passes straight through. The controller (useDialogSelect) owns the
+  // filter query + highlighted index + the substring filter + ↑↓ wrap that the palette used to
+  // hand-roll; chat.tsx just feeds it the live items and routes keystrokes. Rebuilt each render so
+  // "Switch: <session>" stays current — a fresh items array only re-derives the filter (cheap), it
+  // does NOT reset the selection (that's separate controller state).
+  const palItems: Option<() => void>[] = commands.map((c) => ({ title: c.title, value: c.run, hint: c.hint }))
+  const palModel = useDialogSelect(palItems, (run) => {
+    run()
+    closePalette()
+  })
+  // Closing resets the controller to a clean slate: setQuery("") clears the filter AND resets the
+  // highlight to the first row (useDialogSelect resets selected on every query change), so the next
+  // open starts fresh — same contract the old setPq("")/setPSel(0) pair gave.
   const closePalette = () => {
     setPalette(false)
-    setPq("")
-    setPSel(0)
+    palModel.setQuery("")
   }
   // Open the which-key overlay AND swallow the `?` that triggered it: opentui's focused textarea
   // also receives the printable `?` keystroke (the global useKeyboard doesn't stop the textarea from
@@ -842,27 +854,28 @@ function App() {
   const onWhichKeyKey = (k: any) => {
     if (k.name === "escape" || k.name === "return" || isWhichKeyToggle(k)) setWhichKey(false)
   }
-  // Palette key routing (active only while open): esc closes, ↵ runs the highlighted command,
-  // ↑↓ move, backspace edits, a printable char appends to the filter (and resets the highlight).
+  // Palette key routing (active only while open) — now drives the controller instead of local
+  // state: esc closes, ↵ submits the active command (onSelect runs it + closes), ↑↓/home/end move
+  // the selection, backspace edits, a printable char appends to the filter (controller resets the
+  // highlight to the top on each edit).
   const onPaletteKey = (k: any) => {
     if (k.name === "escape") return closePalette()
-    if (k.name === "return") {
-      palFiltered[Math.min(pSel, palFiltered.length - 1)]?.run()
-      return closePalette()
-    }
-    if (k.name === "up") return setPSel((s) => Math.max(0, s - 1))
-    if (k.name === "down") return setPSel((s) => Math.min(palFiltered.length - 1, s + 1))
-    if (k.name === "backspace") return void (setPq((q) => q.slice(0, -1)), setPSel(0))
+    if (k.name === "return") return palModel.submit()
+    if (k.name === "up") return palModel.move(-1)
+    if (k.name === "down") return palModel.move(1)
+    if (k.name === "home") return palModel.home()
+    if (k.name === "end") return palModel.end()
+    if (k.name === "backspace") return palModel.backspaceQuery()
     const ch = typeof k.sequence === "string" && k.sequence.length === 1 && k.sequence >= " " && !k.ctrl && !k.meta ? k.sequence : ""
-    if (ch !== "") return void (setPq((q) => q + ch), setPSel(0))
+    if (ch !== "") return palModel.appendQuery(ch)
   }
 
   useKeyboard((k) => {
     if (k.ctrl && k.name === "c") return quit()
     // ⌘K / Ctrl+K toggles the palette from anywhere (list or chat). While open it owns all keys.
+    // Reset the controller's filter (which also resets the highlight) so each open starts clean.
     if (k.ctrl && k.name === "k") {
-      setPq("")
-      setPSel(0)
+      palModel.setQuery("")
       return setPalette((p) => !p)
     }
     if (whichKey) return onWhichKeyKey(k)
@@ -881,7 +894,7 @@ function App() {
     return (
       <box flexDirection="column" style={{ height: "100%" }}>
         <List sessions={state.sessions} cursor={state.cursor} busySessions={busySessions} frame={work.frame} armedDelete={armedDelete} />
-        {palette ? <Palette query={pq} sel={pSel} commands={palFiltered} theme={t} /> : null}
+        {palette ? <Palette model={palModel} theme={t} /> : null}
       </box>
     )
   }
@@ -952,7 +965,7 @@ function App() {
       <ActionBar cwd={footerCwd} right="" theme={t} />
       {/* ⌘K command palette — absolute overlay on top of the transcript (termcast DialogOverlay).
           Rendered last so it floats over everything; chat.tsx owns its state + key routing. */}
-      {palette ? <Palette query={pq} sel={pSel} commands={palFiltered} theme={t} /> : null}
+      {palette ? <Palette model={palModel} theme={t} /> : null}
       {/* WHICH-KEY overlay (`?`) — contextual keybind hints for the chat node, read from the
           chatBindings() registry seam. Absolute overlay like the palette; presentational only. */}
       {whichKey ? <WhichKey bindings={chatBindings()} cols={width || 80} theme={t} /> : null}

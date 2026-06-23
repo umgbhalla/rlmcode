@@ -65,6 +65,9 @@ const resolveCoreTarget = (importerPath: string, specifier: string, resolved?: s
 // wire-autocomplete step) and exercised by the frame gate fixture scripts/tui/autocomplete-demo.tsx
 // (mounted by autocomplete.test.ts, OUTSIDE the src/-only scan). A root so its popup surface isn't
 // pruned before the composer consumes it.
+// src/tui/dialog-select.tsx is deliberately NOT a root: the palette refactor wired it in (palette.tsx
+// wraps DialogSelect + chat.tsx drives useDialogSelect), so it's reachable from chat.tsx and gets the
+// normal dead-export check like any other module — no root exemption needed.
 const ENTRY = new Set(["src/tui/chat.tsx", "src/core/orch.ts", "src/core/orch-recipes.ts", "src/core/sdk.ts", "src/core/run.ts", "src/core/mock.ts", "src/core/mock-ai.ts", "src/tui/ui/spinner.tsx", "src/tui/ui/row.tsx", "src/tui/ui/hooks.tsx", "src/tui/ui/animation-tick.tsx", "src/tui/autocomplete.tsx"])
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
 const NEST_BUDGET = 8 // block nesting depth per function
