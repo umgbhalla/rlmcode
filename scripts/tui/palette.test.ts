@@ -46,9 +46,14 @@ await report("palette", async (a) => {
     await d.waitForFrame((f) => /Scroll to bottom/.test(f) && !/no matches/.test(f), 5000)
 
     // RUN — Enter executes the highlighted command AND closes the palette (here: a scroll, safe).
+    // Wait for a FULLY-settled post-close frame: the dialog must be gone AND the composer back.
+    // (Gating only on the negative `!/Commands/` can match a transitional mid-teardown frame where
+    // the dialog title is torn off but its box + the composer footer haven't repainted yet — a
+    // PTY race. The conjunctive positive wait — dialog footer gone AND composer prompt back —
+    // pins the real behavior ("focus returns to the composer") without a transitional false-hit.)
     await d.key("Enter")
-    const ran = await d.waitForFrame((f) => !/Commands/.test(f), 5000)
-    a.hasNot(ran, /Commands/, "Enter runs the command and closes the palette")
+    const ran = await d.waitForFrame((f) => /message kimi/.test(f) && !/esc close/.test(f), 5000)
+    a.hasNot(ran, /esc close/, "Enter runs the command and closes the palette")
     a.has(ran, /message kimi/, "focus returns to the composer after the palette closes")
   } finally {
     await d.stop()
