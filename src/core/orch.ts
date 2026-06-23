@@ -1,7 +1,7 @@
 // Orchestration core: a faithful PORT of the Workflow engine onto @ax-llm/ax.
 // EXACTLY 5 orthogonal primitives, nothing else is engine. Promise-native at this
 // level — Effect stays at the session boundary (turn() in agent.ts) and in otel.ts,
-// NOT inside the combinators. runNode()/judge/loopUntilDry/workflow() are userland
+// NOT inside the combinators. runNode()/judge/workflow() are userland
 // recipes (each <15 lines in these 5 prims), DELIBERATELY not reified here.
 //
 // UNIFIED VOCABULARY — ONE WORD: the orchestration unit is a NODE. The core prim that

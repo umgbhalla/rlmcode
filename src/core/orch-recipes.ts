@@ -240,24 +240,6 @@ export const judge = async <C, I extends AxGenIn, O extends AxGenOut>(
   toInput: (candidates: ReadonlyArray<C>) => I,
 ): Promise<O> => node(judgeGen, judgeOpts)(ai, toInput(candidates))
 
-// loopUntilDry — run body repeatedly until isDry(prev,next) says it converged (or max
-// hit). Returns the last (accumulated) value. Body owns its own accumulation.
-// Adopted by orch-run.orchestrate() (re-runs the candidate fan-out until the
-// surviving-count converges).
-export const loopUntilDry = async <T>(
-  body: () => Promise<T>,
-  isDry: (prev: T, next: T) => boolean,
-  max = 8,
-): Promise<T> => {
-  let prev = await body()
-  for (let i = 1; i < max; i++) {
-    const next = await body()
-    if (isDry(prev, next)) return next
-    prev = next
-  }
-  return prev
-}
-
 // adversarialVerify — produce once, then fan the skeptics out via parallelLimit() (failed
 // skeptic → null, dropped), and let `accept` tally the boolean votes.
 // Adopted by orch-run.orchestrate() (skeptics vote on the judged answer).
