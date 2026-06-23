@@ -67,6 +67,12 @@ export type LaunchDriverOptions = {
   readonly rows?: number
   /** Extra env for the launched chat.tsx (AX2_MOCK=1 is always set). */
   readonly env?: Readonly<Record<string, string>>
+  /**
+   * Alternate entry to mount instead of chat.tsx — an absolute path to a `bun`-runnable file
+   * that boots its own createRoot/render. Used by the ui-atoms frame gate to mount a tiny
+   * fixture (a Row + Spinner) through the REAL renderer without launching the full app.
+   */
+  readonly entry?: string
 }
 
 // Mount chat.tsx headlessly under terminal-control with the mock AI wired in, and return the
@@ -77,7 +83,7 @@ export const launchDriver = async (opts: LaunchDriverOptions = {}): Promise<Driv
   const rows = opts.rows ?? 30
   const tc = await TerminalControl.make({ binaryPath: BINARY })
   const session: Session = await tc.launch({
-    command: ["bun", CHAT],
+    command: ["bun", opts.entry ?? CHAT],
     host: "opentui",
     viewport: { cols, rows },
     inheritEnv: false,
