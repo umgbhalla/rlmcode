@@ -8,14 +8,14 @@
 //               · PgUp/PgDn/Home/End scroll · click a ▸/▾ to expand
 //               · Esc back (idle) / Esc-twice interrupt (busy) · select to copy
 import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/atom-react"
-import { createCliRenderer, decodePasteBytes, SyntaxStyle } from "@opentui/core"
+import { createCliRenderer, decodePasteBytes } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useRef, useState } from "react"
 import { abortTurn } from "../app/default-agent.ts"
 import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, MODEL, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
-import { theme, useTheme } from "./theme.ts"
+import { makeSyntaxStyle, theme, useTheme } from "./theme.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
 import { type Row as OrchRow } from "./orch-tree.ts"
 import { ActionBar, shortCwd } from "./shell.tsx"
@@ -25,7 +25,11 @@ import { type Command, Palette } from "./palette.tsx"
 import { type Binding, isWhichKeyToggle, WhichKey } from "./which-key.tsx"
 import { computeShowOrch, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
 
-const mdStyle = SyntaxStyle.create()
+// The shared syntax style for the reply <markdown> + the tool <diff>: a SyntaxStyle with every
+// tree-sitter / markup / diff scope registered onto the theme palette (theme.ts makeSyntaxStyle),
+// so fenced ```lang code, markdown headings/bold/inline-code, and diff +/- lines render in the
+// theme's colors instead of the bare SyntaxStyle.create() default (which registered no styles).
+const mdStyle = makeSyntaxStyle()
 
 // Enter submits, Shift+Enter inserts a newline (override textarea defaults, which
 // are Enter=newline / Cmd+Enter=submit).

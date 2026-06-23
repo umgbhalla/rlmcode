@@ -14,6 +14,7 @@
 // ponytail: single hard-coded palette (no runtime theme switch / no useStore like termcast).
 // Upgrade: when a theme picker lands, swap getTheme() to read a selected name from atoms and
 // resolve via a DEFAULT_THEMES map (termcast getResolvedTheme shape), keeping useTheme() stable.
+import { SyntaxStyle } from "@opentui/core"
 
 // Catppuccin-Mocha source swatches (the named palette this theme is cut from).
 const mocha = {
@@ -70,6 +71,20 @@ export type ResolvedTheme = {
   readonly markdownLink: string
   readonly markdownCode: string
   readonly markdownEmph: string
+  readonly markdownStrong: string
+  // Syntax (tree-sitter code-block scopes — fenced ```lang blocks in replies + native <diff>).
+  // These are the tokens makeSyntaxStyle() registers onto opentui's SyntaxStyle so highlighted
+  // code resolves to the palette instead of the bare (empty) SyntaxStyle.create() default.
+  readonly syntaxKeyword: string
+  readonly syntaxString: string
+  readonly syntaxFunction: string
+  readonly syntaxNumber: string
+  readonly syntaxType: string
+  readonly syntaxComment: string
+  readonly syntaxVariable: string
+  readonly syntaxConstant: string
+  readonly syntaxOperator: string
+  readonly syntaxPunctuation: string
   // Legacy rlmcode role aliases (kept so existing chat.tsx / orch-tree.ts attrs resolve unchanged)
   readonly subtext: string
   readonly muted: string
@@ -112,6 +127,19 @@ const catppuccinMocha: ResolvedTheme = {
   markdownLink: mocha.blue,
   markdownCode: mocha.teal,
   markdownEmph: mocha.lavender,
+  markdownStrong: mocha.peach, // **bold** in replies (distinct from emph's lavender)
+  // Syntax — Catppuccin-Mocha's conventional code highlighting roles (the standard Mocha mapping:
+  // keyword=mauve, string=green, function=blue, number=peach, type=yellow, comment=overlay).
+  syntaxKeyword: mocha.mauve,
+  syntaxString: mocha.green,
+  syntaxFunction: mocha.blue,
+  syntaxNumber: mocha.peach,
+  syntaxType: mocha.yellow,
+  syntaxComment: mocha.overlay0,
+  syntaxVariable: mocha.text,
+  syntaxConstant: mocha.peach,
+  syntaxOperator: mocha.teal,
+  syntaxPunctuation: mocha.overlay2,
   // Legacy rlmcode role aliases — same hexes as before, kept so no other file needs editing.
   subtext: mocha.overlay2, // step narration
   muted: mocha.overlay1, // status / idle hints
@@ -123,9 +151,20 @@ const catppuccinMocha: ResolvedTheme = {
   white: mocha.white, // tool icon high-contrast
 }
 
+// DEFAULT_THEME: the named default (the one palette today). The seam a theme picker resolves a
+// SELECTED name against later (a DEFAULT_THEMES map, per the ponytail upgrade note above); for now
+// resolveTheme() always returns it. Named export so callers read intent, not the raw const.
+export const DEFAULT_THEME: ResolvedTheme = catppuccinMocha
+
+// resolveTheme(name?): the theme a given name resolves to. One palette today ⇒ always DEFAULT_THEME
+// (the `name` arg is the forward-compatible seam — termcast's getResolvedTheme(name) shape — so a
+// picker can pass a selection without changing call sites). Pure. getTheme()/the `theme` const both
+// flow through this, so it is the single resolution point a picker hooks (no dead seam).
+export const resolveTheme = (_name?: string): ResolvedTheme => DEFAULT_THEME
+
 // getTheme(): the module-const accessor (no useStore — rlmcode has one palette). Returns the
-// resolved token object; the single source of truth for every color in the TUI.
-export const getTheme = (): ResolvedTheme => catppuccinMocha
+// resolved token object via resolveTheme() — the single source of truth for every color in the TUI.
+export const getTheme = (): ResolvedTheme => resolveTheme()
 
 // useTheme(): React-component accessor matching termcast's hook signature, so component code
 // reads `const t = useTheme()`. With one static palette it's a thin wrapper over getTheme();
@@ -134,5 +173,53 @@ export const useTheme = (): ResolvedTheme => getTheme()
 
 // `theme`: the resolved token object, exported for non-component modules (orch-tree.ts) and the
 // existing chat.tsx attrs (`fg={theme.text}` / `borderColor={theme.border}`). Unchanged name so
-// the sweep is a no-op diff at the call sites.
-export const theme: ResolvedTheme = catppuccinMocha
+// the sweep is a no-op diff at the call sites. Resolved through resolveTheme() (== DEFAULT_THEME).
+export const theme: ResolvedTheme = resolveTheme()
+
+// SYNTAX SCOPE → TOKEN map: the tree-sitter / markup scope names opentui's <markdown> + <code> +
+// <diff> renderables emit (Markdown.ts createChunk groups: markup.heading/raw/strong/italic/link;
+// Code.ts tree-sitter groups: keyword/string/function/number/type/comment/…), each mapped to a
+// theme token. opentui's getStyle() falls back scope → first-segment → "default" (Markdown.ts:432-
+// 446), so registering these leaf scopes + a "default" covers the whole highlight surface. The bare
+// SyntaxStyle.create() rlmcode shipped registers NOTHING, so highlighted code rendered all one
+// color; this is the wiring that makes a fenced ```ts block + the native <diff> read in palette.
+const syntaxScopes = (t: ResolvedTheme): Record<string, { fg: string; bold?: boolean; italic?: boolean }> => ({
+  // fallback for any unmapped scope (Markdown.ts createChunk uses getStyle("default") as the floor).
+  default: { fg: t.markdownText },
+  // ── markdown (inline markup the reply <markdown> emits) ──
+  "markup.heading": { fg: t.markdownHeading, bold: true },
+  "markup.raw": { fg: t.markdownCode }, // inline `code` (+ markup.raw.inline via segment fallback)
+  "markup.strong": { fg: t.markdownStrong, bold: true },
+  "markup.italic": { fg: t.markdownEmph, italic: true },
+  "markup.link": { fg: t.markdownLink },
+  "markup.link.label": { fg: t.markdownLink },
+  "markup.link.url": { fg: t.markdownLink, italic: true },
+  "markup.list": { fg: t.markdownText },
+  "markup.quote": { fg: t.textMuted, italic: true },
+  // ── code (tree-sitter scopes for fenced ```lang blocks + native <diff>) ──
+  keyword: { fg: t.syntaxKeyword },
+  string: { fg: t.syntaxString },
+  function: { fg: t.syntaxFunction },
+  number: { fg: t.syntaxNumber },
+  type: { fg: t.syntaxType },
+  comment: { fg: t.syntaxComment, italic: true },
+  variable: { fg: t.syntaxVariable },
+  constant: { fg: t.syntaxConstant },
+  operator: { fg: t.syntaxOperator },
+  punctuation: { fg: t.syntaxPunctuation },
+  // ── diff (native <diff> renderable line scopes) ──
+  "diff.plus": { fg: t.diffAdded },
+  "diff.minus": { fg: t.diffRemoved },
+})
+
+// makeSyntaxStyle(theme?): a REAL opentui SyntaxStyle with every scope above registered onto the
+// active palette — the single shared style chat.tsx feeds to <markdown syntaxStyle> and <diff
+// syntaxStyle>. Uses opentui's registerStyle (syntax-style.d.ts:48) per scope. REPLACES the bare
+// SyntaxStyle.create() (zero registered styles ⇒ code rendered flat); now keyword/string/comment/…
+// + markdown headings/code/bold + diff +/- all resolve to theme tokens. getStyle() round-trips the
+// registered fg, so theme.test asserts the wiring without a frame (a deterministic RGBA compare).
+export const makeSyntaxStyle = (t: ResolvedTheme = DEFAULT_THEME): SyntaxStyle => {
+  const style = SyntaxStyle.create()
+  for (const [scope, def] of Object.entries(syntaxScopes(t))) style.registerStyle(scope, def)
+  return style
+}

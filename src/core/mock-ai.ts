@@ -27,6 +27,17 @@ const MOCK_THOUGHT =
 // since the UI renders GitHub-flavored markdown (chat.tsx).
 const MOCK_REPLY = "Found **3 matches** in `src/`. Done."
 
+// CODE variant reply: a fenced ```ts block so the reply <markdown> runs its tree-sitter code
+// highlighter through the now-populated SyntaxStyle (theme.ts makeSyntaxStyle). The theme frame
+// test drives a "show code" turn and asserts the code body renders (proving syntax scopes wired,
+// not the bare SyntaxStyle.create() that highlighted nothing). Deterministic, harmless content.
+const MOCK_CODE_REPLY = 'Here:\n\n```ts\nconst greet = "hello"\nconsole.log(greet)\n```'
+const wantsCode = (req: Readonly<AxChatRequest<unknown>>): boolean => {
+  const users = req.chatPrompt.filter((m) => m.role === "user")
+  const last = users[users.length - 1]
+  return last !== undefined && typeof last.content === "string" && /show code/i.test(last.content)
+}
+
 // One canned tool call: a `bash` invocation the real tool loop executes (the BASE_TOOLS
 // bash runs unsandboxed, so the args are a harmless echo — deterministic stdout).
 const MOCK_TOOL = {
@@ -124,8 +135,11 @@ const scriptedChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResp
   // On the tool-call step of an explore turn, surface the cluster's calls to the activity bus
   // (the mock service doesn't, see emitGroupCalls) so the three explore steps render + group.
   if (!hasToolResult && wantsGroup(req)) emitGroupCalls()
+  // The final reply is the fenced code block for a "show code" turn (syntax-highlight render
+  // path), else the standard MOCK_REPLY. Both arrive once the (single bash) tool step settles.
+  const reply = wantsCode(req) ? MOCK_CODE_REPLY : MOCK_REPLY
   const result = hasToolResult
-    ? { index: 0, content: MOCK_REPLY, thought: MOCK_THOUGHT, finishReason: "stop" as const }
+    ? { index: 0, content: reply, thought: MOCK_THOUGHT, finishReason: "stop" as const }
     : { index: 0, content: "", thought: MOCK_THOUGHT, functionCalls: calls, finishReason: "function_call" as const }
   return Promise.resolve({
     remoteId: "mock-resp-1",
