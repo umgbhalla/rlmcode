@@ -1,0 +1,6 @@
+{
+  "name": "rlmcode-site",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-23",
+  "routes": [{ "pattern": "rlm.quel.computer", "custom_domain": true }]
+}

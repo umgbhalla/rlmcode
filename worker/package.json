@@ -1,0 +1,13 @@
+{
+  "name": "rlmcode-site",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker serving the rlmcode landing page.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}
