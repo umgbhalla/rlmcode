@@ -49,10 +49,12 @@ const RLM_WORKFLOW_OVERLAY = [
   // everywhere is a NODE. (rlm_workflow's fixed strategies are now just a few lines of script.)
   "## Orchestration",
   "You can run deterministic multi-node flows, not just single replies. ONE tool: `workflow({ script })` — AUTHOR a JS orchestration script the engine runs. The unit is always a NODE.",
-  // WHEN to orchestrate.
-  "WHEN to orchestrate: (1) the task SPLITS into independent parts that don't depend on each other's output — fan them out with `parallel`; (2) you want the BEST of N attempts or to VERIFY an answer — generate N and `judge`, or run N skeptics and vote; (3) a BIG blob (long file, pasted log, whole concatenated module) won't fit the window — mine it with the `rlm` prim.",
-  // WHEN NOT.
-  "WHEN NOT: a trivial or strictly sequential task — DO IT DIRECTLY with your own file/shell tools. Do NOT fan out a one-liner. Do NOT spin up a node to read one file or run one command. Sequential steps (read → edit → test) are ONE node's task (yours): orchestration is for INDEPENDENT work or N-way redundancy, never to wrap a single linear chore.",
+  // GUARDRAIL FIRST (FIX C / over-exploration): a thinking model reads the WHOLE prompt before it
+  // reasons, so leading with the orchestration patterns PRIMES it to fan out a trivial ask. Put the
+  // "do it directly" rule at the TOP — the DEFAULT is a direct answer; orchestration is the exception.
+  "DEFAULT: answer directly. Most asks — a question, a one-file edit, a single command, a short sequential chore (read → edit → test) — are ONE node's work (yours): just use your own file/shell tools and reply. Do NOT fan out. Do NOT spin up a node to read one file or run one command. Do NOT wrap a single linear task in a workflow. Reach for `workflow` ONLY when the next paragraph's conditions genuinely hold.",
+  // WHEN to orchestrate (the exception, AFTER the default).
+  "WHEN to orchestrate (the exception): (1) the task SPLITS into independent parts that don't depend on each other's output — fan them out with `parallel`; (2) you want the BEST of N attempts or to VERIFY an answer — generate N and `judge`, or run N skeptics and vote; (3) a BIG blob (long file, pasted log, whole concatenated module) won't fit the window — mine it with the `rlm` prim. If none of these hold, answer directly.",
   // The prims.
   "`workflow({ script })`: the script body uses these prims (the orchestration API): `phase(title)` groups the nodes that follow under a live tree heading; `log(msg)` narrates; `agent(prompt, {label?, model?, effort?, schema?})` spawns ONE sub-agent NODE (file/shell tools) → its text (or a validated object with schema, or null if it dies); `parallel(thunks)` is a BARRIER (all concurrent, ≤8 at once, a throwing thunk → null — `.filter(Boolean)`); `pipeline(items, ...stages)` flows each item through every stage with NO barrier (`stage(prev, item, i)`); `judge(candidates, criteria?)` picks the best verbatim; `rlm(context, query)` mines a BIG blob in a code runtime kept OUT of the prompt (the RLM node-kind — just a prim); `budget` is `{total, spent(), remaining()}`. `return <value>` is what comes back to you.",
   // Patterns as scripts (replacing the old fixed strategy menu).

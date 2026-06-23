@@ -58,12 +58,21 @@ export const BASE_PROMPT = [
   "Tools: bash, read_file, write_file, edit_file, glob, grep. When a request needs real work,",
   "USE the tools to inspect/modify files and run commands BEFORE answering — don't guess.",
   "Verify with a tool when unsure. Keep replies concise and concrete; show the result that matters.",
+  // DIRECT-ANSWER STEER (FIX C / over-exploration): a thinking model tends to over-explore — many
+  // tool steps on a trivial ask. Steer it to match effort to the task: a simple question gets a
+  // direct answer in ONE turn; only dig into files/commands when the task actually needs it.
+  "Match effort to the task: answer a simple/trivial ask DIRECTLY in one turn — do NOT read files or run commands a trivial question doesn't need. Take only the tool steps the task truly requires; stop once you can answer.",
   "Format replies in GitHub-flavored markdown (use `code`, lists, and ```fences``` where helpful).",
   // MULTI-MODEL: tell the agent (and every node) the two-model pool + thinking-level knobs.
   MODEL_DOC,
 ].join(" ")
 
-const MAX_STEPS = Number(process.env.RLM_MAX_STEPS ?? 50) // max tool-call iterations per turn
+// max tool-call iterations per turn. Default 24 (FIX C / over-exploration): a thinking model was
+// doing ~12 steps on a TRIVIAL ask under the old 50 ceiling — a tighter default bounds the blast
+// radius of a runaway explore while leaving real multi-step work ample room. RLM_MAX_STEPS overrides
+// (raise it for a genuinely long task). The ceiling is enforced GRACEFULLY in-loop (agent.ts
+// finalizeOnMaxSteps forces a final reply with tools stripped), never a hard throw.
+const MAX_STEPS = Number(process.env.RLM_MAX_STEPS ?? 24)
 // Hard per-turn TOKEN ceiling, enforced by orch's Budget (charged after each node
 // from the forward result's usage). Distinct from MAX_STEPS (tool-call iterations,
 // still recovered by turn() in agent.ts): this is a real token gate that throws
