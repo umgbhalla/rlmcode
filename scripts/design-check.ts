@@ -55,7 +55,12 @@ const resolveCoreTarget = (importerPath: string, specifier: string, resolved?: s
 // canned node feed). Consumed by scripts/tui/*.test.ts and the agent.ts AX2_MOCK runtime
 // swap — the tests OUTSIDE the src/-only scan — so they're roots, like sdk.ts, lest their
 // seam surface (MOCK_NODES / makeMockAI / MOCK_FIXTURE) be pruned to its in-src callers.
-const ENTRY = new Set(["src/tui/chat.tsx", "src/core/orch.ts", "src/core/orch-recipes.ts", "src/core/sdk.ts", "src/core/run.ts", "src/core/mock.ts", "src/core/mock-ai.ts"])
+// src/tui/ui/* = the lifted termcast UI atoms (Spinner / Row / useEvent / useAnimationTick) —
+// a presentation foundation landed AHEAD of its chat.tsx wiring and exercised by the frame
+// gate fixture scripts/tui/ui-atoms-demo.tsx (mounted by ui-atoms.test.ts, OUTSIDE the
+// src/-only scan). Roots like sdk.ts/mock.ts so the atom surface isn't pruned to its (empty,
+// pending integration) in-src callers before the sequential chat.tsx re-skin consumes it.
+const ENTRY = new Set(["src/tui/chat.tsx", "src/core/orch.ts", "src/core/orch-recipes.ts", "src/core/sdk.ts", "src/core/run.ts", "src/core/mock.ts", "src/core/mock-ai.ts", "src/tui/ui/spinner.tsx", "src/tui/ui/row.tsx", "src/tui/ui/hooks.tsx", "src/tui/ui/animation-tick.tsx"])
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
 const NEST_BUDGET = 8 // block nesting depth per function
 const PARAM_BUDGET = 6 // parameters per function

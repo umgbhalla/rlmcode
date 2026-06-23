@@ -6,35 +6,45 @@ import React from "react"
 
 type TickListener = (tick: number) => void
 
-let globalTick = 0
-let intervalId: ReturnType<typeof setInterval> | null = null
-const listeners = new Set<TickListener>()
-
 const BASE_INTERVAL_MS = 20
 
-const startGlobalTick = (): void => {
-  if (intervalId) return
-  intervalId = setInterval(() => {
-    globalTick++
-    listeners.forEach((listener) => listener(globalTick))
-  }, BASE_INTERVAL_MS)
+// The shared-tick singleton is encapsulated in ONE factory closure: the mutable cursor
+// (`globalTick`) and the timer handle (`intervalId`) live inside `createTicker`, not at
+// module scope, so start/stop/subscribe thread that state through their shared parent
+// rather than writing free module bindings (no hidden cross-closure module coupling).
+const createTicker = (): { subscribe: (listener: TickListener) => () => void } => {
+  let globalTick = 0
+  let intervalId: ReturnType<typeof setInterval> | null = null
+  const listeners = new Set<TickListener>()
+
+  const start = (): void => {
+    if (intervalId) return
+    intervalId = setInterval(() => {
+      globalTick++
+      listeners.forEach((listener) => listener(globalTick))
+    }, BASE_INTERVAL_MS)
+  }
+
+  const stop = (): void => {
+    if (intervalId) {
+      clearInterval(intervalId)
+      intervalId = null
+    }
+  }
+
+  const subscribe = (listener: TickListener): (() => void) => {
+    listeners.add(listener)
+    if (listeners.size === 1) start()
+    return () => {
+      listeners.delete(listener)
+      if (listeners.size === 0) stop()
+    }
+  }
+
+  return { subscribe }
 }
 
-const stopGlobalTick = (): void => {
-  if (intervalId) {
-    clearInterval(intervalId)
-    intervalId = null
-  }
-}
-
-const subscribe = (listener: TickListener): (() => void) => {
-  listeners.add(listener)
-  if (listeners.size === 1) startGlobalTick()
-  return () => {
-    listeners.delete(listener)
-    if (listeners.size === 0) stopGlobalTick()
-  }
-}
+const ticker = createTicker()
 
 /**
  * Subscribe to the shared animation tick.
@@ -49,7 +59,7 @@ export const useAnimationTick = (divisor: number = 1): number => {
       setTick(0)
       return
     }
-    const unsubscribe = subscribe((currentTick) => {
+    const unsubscribe = ticker.subscribe((currentTick) => {
       if (currentTick % divisor === 0) setTick(Math.floor(currentTick / divisor))
     })
     return unsubscribe
