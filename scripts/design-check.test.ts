@@ -2,7 +2,7 @@
 // Runnable check for the design gate (ponytail: non-trivial logic leaves a
 // check behind). Plain asserts, no framework. One fixture per finding tag:
 // if the walker/heuristics drift, this fails instead of silently passing.
-import { analyze, buildAnalyzer, type Finding, pkgRoot, unusedDeps } from "./design-check.ts"
+import { analyze, buildAnalyzer, coreBarrelFromPkg, type Finding, pkgRoot, unusedDeps } from "./design-check.ts"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {
@@ -94,6 +94,43 @@ const u = unusedDeps(new Set(["effect"]), ["effect", "leftover-pkg", "@otel/peer
 assert(u.some((x) => x.msg.includes("leftover-pkg")), "unused dep not flagged")
 assert(!u.some((x) => x.msg.includes('"effect"')), "used dep false-flagged")
 assert(!u.some((x) => x.msg.includes("@otel/peer")), "allow-listed dep flagged")
+
+// reachability: a dead CLUSTER (a<->b, nothing reaches it) is flagged unreachable
+// even though each side keeps the other's per-symbol refcount > 0 — the precise
+// win over a refcount-only dead-export check.
+const reachFiles = [
+  { path: "src/entry.ts", source: 'import { live } from "./live.ts"\nexport const e = live' },
+  { path: "src/live.ts", source: "export const live = 1" },
+  { path: "src/deadA.ts", source: 'import { b } from "./deadB.ts"\nexport const a = b' },
+  { path: "src/deadB.ts", source: 'import { a } from "./deadA.ts"\nexport const b = a' },
+]
+const reach = analyze(buildAnalyzer(reachFiles), { roots: new Set(["src/entry.ts"]) })
+assert(has(reach, "delete", "src/deadA.ts: module unreachable"), "dead-cluster member A not flagged unreachable")
+assert(has(reach, "delete", "src/deadB.ts: module unreachable"), "dead-cluster member B not flagged unreachable")
+assert(!reach.some((f) => f.msg.startsWith("src/live.ts") && f.msg.includes("unreachable")), "reachable module false-flagged unreachable")
+assert(!reach.some((f) => f.msg.startsWith("src/entry.ts") && f.msg.includes("unreachable")), "root false-flagged unreachable")
+
+// reachability is OFF without roots (fixture default) — no "unreachable" findings,
+// so the per-tag unit fixtures above drive analyze() exactly as before.
+assert(!an(reachFiles).some((f) => f.msg.includes("unreachable")), "reachability ran without roots")
+
+// a NON-LINTED consumer (test/example/script) reference makes a module reachable:
+// a seam used only by tests is live with NO hand-maintained keep-alive entry, and the
+// consumer file is itself neither linted nor reported (incl. its own link errors).
+const consumerFiles = [
+  { path: "src/entry.ts", source: "export const e = 1" },
+  { path: "src/seam.ts", source: "export const seam = 1" },
+  { path: "scripts/x.test.ts", source: 'import { seam } from "../src/seam.ts"\nimport { gone } from "../src/entry.ts"\nexport const t = [seam, gone]' },
+]
+const consumed = analyze(buildAnalyzer(consumerFiles), { roots: new Set(["src/entry.ts"]), isLinted: (p) => p.startsWith("src/") })
+assert(!consumed.some((f) => f.msg.includes("src/seam.ts") && f.msg.includes("unreachable")), "consumer-only module false-flagged unreachable")
+assert(!consumed.some((f) => f.msg.startsWith("scripts/")), "non-linted consumer was linted/reported")
+
+// coreBarrelFromPkg: the cross-core seam is read from package.json "exports" "."
+// (string OR conditional), falling back to the default so it can't silently drift.
+assert(coreBarrelFromPkg({ exports: { ".": "./src/core/sdk.ts" } }) === "src/core/sdk.ts", "barrel from string export")
+assert(coreBarrelFromPkg({ exports: { ".": { import: "./src/core/sdk.ts" } } }) === "src/core/sdk.ts", "barrel from import condition")
+assert(coreBarrelFromPkg({}) === "src/core/sdk.ts", "barrel falls back to default")
 
 // pkgRoot
 assert(pkgRoot("@scope/pkg/sub") === "@scope/pkg", "scoped pkgRoot")

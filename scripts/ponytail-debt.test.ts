@@ -48,6 +48,19 @@ assert(orph.markers.some((m) => m.includes("[orphan]")), "orphan marker not tagg
 const live = harvest("l.ts", "// ponytail: shortcut. Upgrade: later.\nexport const x = 1")
 assert(live.orphan === 0, `live marker wrongly flagged orphan: ${live.orphan}`)
 
+// TWO IDENTICAL marker texts must each be harvested as a DISTINCT marker against
+// its OWN host — not collapsed onto the first host (the old text-keyed map mapped
+// both to host #1, so one occurrence inherited the other's orphan/live verdict).
+const dup = harvest("dup.ts", [
+  "// ponytail: same note. Upgrade: x.",
+  "export const a = 1",
+  "// ponytail: same note. Upgrade: x.",
+  "export const b = 2",
+].join("\n"))
+assert(dup.markers.length === 2, `both identical markers should harvest: got ${dup.markers.length}`)
+assert(dup.orphan === 0, `identical live markers wrongly orphaned: ${dup.orphan}`)
+assert(dup.markers.filter((m) => m.includes("dup.ts:")).length === 2, "identical markers collapsed to one span")
+
 if (failed > 0) {
   console.error(`ponytail-debt.test: ${failed} failure(s).`)
   process.exit(1)
