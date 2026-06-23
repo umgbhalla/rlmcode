@@ -2,10 +2,10 @@
 
 > A self-orchestrating TUI coding agent. The model doesn't just call tools — it **authors and runs JS orchestration scripts** mid-turn, rendered live as a nested trace tree.
 
-![rlmcode demo](assets/demo.gif)
+<!-- Screenshots/demo GIF go here once captured (see assets/demo.tape for the vhs script). -->
 
 Multi-session terminal coding agent. Bun + Effect v4 core, opentui (React) UI, real
-OpenTelemetry → local [`motel`](../motel). LLM = Cloudflare Workers AI
+OpenTelemetry → local [`motel`](https://github.com/kitlangton/motel). LLM = Cloudflare Workers AI
 (`@cf/moonshotai/kimi-k2.7-code` / `@cf/zai-org/glm-5.2`) via [`@ax-llm/ax`](https://github.com/ax-llm/ax).
 
 ## What makes it different
@@ -22,18 +22,41 @@ OpenTelemetry → local [`motel`](../motel). LLM = Cloudflare Workers AI
 - **One trace per session.** `chat.session → chat.turn → workflow → nodes`, real 3-signal
   OpenTelemetry exported to `motel` — the trace mirrors the live tree.
 
-![rlmcode TUI](assets/tui.png)
-![rlmcode trace in motel](assets/motel.png)
+## Prerequisites
+
+- [Bun](https://bun.sh) (≥ 1.3) — runtime + package manager.
+- A [Cloudflare](https://dash.cloudflare.com) account with Workers AI, and an API token
+  (Workers AI permission) — for the real model. **Skip this** with `AX2_MOCK=1` (canned AI).
+- Optional: the `termctrl` binary for the headless TUI test gate —
+  `cargo install --git https://github.com/kitlangton/terminal-control terminal-control`.
+
+## Install
+
+```bash
+bun install
+cp .env.example .env   # then fill in CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
+```
 
 ## Quickstart
 
-`.env` needs `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`.
+```bash
+bun run chat                 # the agent (needs CF creds in .env)
+AX2_MOCK=1 bun run chat      # no credentials — canned AI, real turn loop + TUI
+```
+
+> ⚠️ **Safety:** the agent executes model-generated shell commands and JS **unsandboxed** in
+> the working directory (`src/core/tools.ts`), and `bun run live` lets the model author + run
+> code. Run only in a trusted directory, container, or VM.
+
+### Tracing (optional)
 
 ```bash
 bun run motel        # local trace ingest + API (127.0.0.1:27686)
-bun run motel:tui    # the motel trace viewer (optional)
-bun run chat         # the agent
+bun run motel:tui    # the motel trace viewer
 ```
+
+The `motel`/`motel:tui` scripts run a local clone at `../motel`
+(`git clone https://github.com/kitlangton/motel ../motel`) — see the note at the bottom.
 
 ## Architecture
 
@@ -53,7 +76,13 @@ bun run test:tui  # headless TUI frame gate (terminal-control PTY, mocked AI, ze
 bun run live      # real CF-Kimi proof: the model authors + runs a workflow script
 ```
 
+## License
+
+MIT — see [LICENSE](LICENSE). Ported/reused third-party code is credited in
+[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
+
 ## Note: run `motel` from the local clone
 
 `bun add -g @kitlangton/motel` (npm 0.1.0) is **broken** against current Effect/opentui betas.
-`bun run motel` / `motel:tui` run the local `../motel`, which pins compatible deps.
+`bun run motel` / `motel:tui` run a local clone at `../motel`
+(`git clone https://github.com/kitlangton/motel ../motel`), which pins compatible deps.
