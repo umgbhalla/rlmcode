@@ -44,6 +44,12 @@ export type OrchNode = {
   readonly phase: string
   readonly status: "running" | "done" | "error"
   readonly result?: string | undefined
+  // RATE-LIMIT VISIBILITY: the live retry status ("⏳ rate-limited · retry 2/3 · 4s") while a
+  // transient (429/5xx) backoff is in flight — set by a `retry` NodeEvent, CLEARED the moment the
+  // node makes progress (its next start/done/error). The tree row renders it as the node summary
+  // (orch-tree summaryOf) and the composer surfaces it, so a 429 backoff is no longer silent.
+  // undefined whenever the node is not currently backing off.
+  readonly retry?: string | undefined
   // COST-METER: this node's OWN token usage (from its done NodeEvent). undefined until
   // the node settles (or if it ran without budget/usage tracking).
   readonly tokens?: number | undefined
@@ -238,14 +244,23 @@ const reduceNode = (t: OrchTree, ev: Extract<TurnEvent, { type: "node" }>): Orch
   }
   if (prev === undefined) return t
   const parentPatch = parentId !== undefined ? { parentId } : {}
+  // RATE-LIMIT VISIBILITY: a `retry` event sets the live `retry` STATUS (its detail is the
+  // formatted "⏳ rate-limited · retry 2/3 · 4s" from orch.retryStatus) and leaves the node
+  // RUNNING — it routes detail to `retry`, NOT to `result` (the node hasn't produced anything).
+  // Every OTHER non-start event CLEARS `retry` (set to undefined): a delta means the node resumed
+  // making progress, and done/error means it settled — so the backoff badge never lingers.
+  if (ev.event === "retry") {
+    const node: OrchNode = { ...prev, ...parentPatch, status: "running", retry: ev.detail }
+    return { ...t, nodes: { ...t.nodes, [ev.nodeId]: node } }
+  }
   const resultPatch = ev.detail !== undefined ? { result: ev.detail } : {}
   const tokensPatch = ev.event === "done" && ev.tokens !== undefined ? { tokens: ev.tokens } : {}
   const next: OrchNode =
     ev.event === "done"
-      ? { ...prev, ...parentPatch, status: "done", ...resultPatch, ...tokensPatch }
+      ? { ...prev, ...parentPatch, status: "done", retry: undefined, ...resultPatch, ...tokensPatch }
       : ev.event === "error"
-        ? { ...prev, ...parentPatch, status: "error", ...resultPatch }
-        : { ...prev, ...parentPatch }
+        ? { ...prev, ...parentPatch, status: "error", retry: undefined, ...resultPatch }
+        : { ...prev, ...parentPatch, retry: undefined }
   const nodes = { ...t.nodes, [ev.nodeId]: next }
   const totalTokens = Object.values(nodes).reduce((sum, n) => sum + (n.tokens ?? 0), 0)
   return { ...t, nodes, totalTokens }

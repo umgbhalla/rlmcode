@@ -82,11 +82,24 @@ export type NodeOpts = {
   rateLimiter?: AxRateLimiterFunction | undefined
 }
 
+// RATE-LIMIT VISIBILITY: the CAUSE of a transient retry — a 429 (rate-limit, the most common CF
+// failure) vs any other transient (5xx / network / request-timeout). Carried on the `retry`
+// NodeEvent so the live tree + composer can word a 429 distinctly ("rate-limited") from a generic
+// transient hiccup ("retrying"). Logic/budget errors are NEVER retried, so they never reach here.
+export type RetryCause = "rate_limited" | "transient"
+
 // A node lifecycle event over the EXISTING activity bus + OTel span annotation —
 // do NOT invent a second event system. Consumed by emit() (a thin hook).
 export type NodeEvent =
   | { readonly type: "start"; readonly nodeId: string; readonly parentId?: string | undefined; readonly phase: string }
   | { readonly type: "delta"; readonly nodeId: string; readonly chunk: string }
+  // RATE-LIMIT VISIBILITY: a transient (429/5xx/network) failure is about to be retried after a
+  // backoff. Emitted by withRetry's onRetry (orch-resilience) BEFORE the backoff sleep, so the node
+  // shows it's WAITING (not silently "thinking…") while it backs off — the gap that made a 429
+  // indistinguishable from the crawl/hang. `attempt`/`max` are 1-based ("retry 2/3"); `delayMs` is
+  // the backoff this retry waits. atoms folds it into a `retry` status on the node (cleared on the
+  // next start/done/error), so the tree row + the composer surface "⏳ rate-limited · retry 2/3 · 4s".
+  | { readonly type: "retry"; readonly nodeId: string; readonly cause: RetryCause; readonly attempt: number; readonly max: number; readonly delayMs: number }
   // COST-METER: `tokens` is this node's OWN token usage (the leaf forward's totalTokens,
   // derived by tokensOf() from the usage triple). Optional — a node that didn't charge a
   // budget (no usageOf) omits it. atoms folds it into the OrchTree per-node + run total.
@@ -139,6 +152,17 @@ export class BudgetExhaustedError extends Error {
 // per-node token count on its done event, and the headless test drives fake usage here.
 export const tokensOf = (u: BudgetUsage | undefined): number =>
   u === undefined ? 0 : typeof u.totalTokens === "number" ? u.totalTokens : (u.promptTokens ?? 0) + (u.completionTokens ?? 0)
+
+// RATE-LIMIT VISIBILITY: the SINGLE source of truth for the retry status string a retrying node
+// shows — "⏳ rate-limited · retry 2/3 · 4s" for a 429, "⏳ retrying 2/3 · 4s" for a generic
+// transient. The ⏳ glyph + wording is what the tree row (orch-tree summaryOf) AND the composer
+// status both render, and what the frame gate asserts. Backoff ms rounds UP to whole seconds so a
+// sub-second backoff still reads "1s" (never "0s"). Pure — exported so emit() + the UI agree.
+export const retryStatus = (cause: RetryCause, attempt: number, max: number, delayMs: number): string => {
+  const secs = Math.max(1, Math.ceil(delayMs / 1000))
+  const label = cause === "rate_limited" ? "rate-limited · retry" : "retrying"
+  return `⏳ ${label} ${attempt}/${max} · ${secs}s`
+}
 
 // 1. node — the ONLY thing that calls ax. Curried so opts bind once, then (ai,input)
 // runs the forward. opts is cast to Readonly<AxProgramForwardOptions> at the boundary:
@@ -199,11 +223,16 @@ export const emit = (event: NodeEvent, sink: ActivitySink, _opts?: EmitOpts): Ef
     const activity: Activity =
       event.type === "delta"
         ? { kind: "node", nodeId: event.nodeId, event: "delta", parentId: undefined, detail: event.chunk }
-        : event.type === "done"
-          ? { kind: "node", nodeId: event.nodeId, event: "done", parentId: undefined, detail: clip(event.result), tokens: event.tokens }
-          : event.type === "error"
-            ? { kind: "node", nodeId: event.nodeId, event: "error", parentId: undefined, detail: causeText(event.cause) }
-            : { kind: "node", nodeId: event.nodeId, event: "start", parentId: event.parentId, detail: event.phase }
+        : event.type === "retry"
+          ? // RATE-LIMIT VISIBILITY: a retry carries the formatted status string (retryStatus, the
+            // one source of truth) as `detail` so atoms sets it as the node's live `retry` status —
+            // visible WHILE backing off (the node stays "running"), not swallowed like the old delta.
+            { kind: "node", nodeId: event.nodeId, event: "retry", parentId: undefined, detail: retryStatus(event.cause, event.attempt, event.max, event.delayMs) }
+          : event.type === "done"
+            ? { kind: "node", nodeId: event.nodeId, event: "done", parentId: undefined, detail: clip(event.result), tokens: event.tokens }
+            : event.type === "error"
+              ? { kind: "node", nodeId: event.nodeId, event: "error", parentId: undefined, detail: causeText(event.cause) }
+              : { kind: "node", nodeId: event.nodeId, event: "start", parentId: event.parentId, detail: event.phase }
     sink(activity)
 
     // 1b) SPAN GRANULARITY (telemetry 2b) — mirror this NodeEvent as a REAL child span so
@@ -222,6 +251,9 @@ export const emit = (event: NodeEvent, sink: ActivitySink, _opts?: EmitOpts): Ef
         "orch.node.id": event.nodeId,
         ...(event.type === "start" ? { "orch.node.parent_id": event.parentId ?? "", "orch.node.phase": event.phase } : {}),
         ...(event.type === "delta" ? { "orch.node.chunk": event.chunk } : {}),
+        // RATE-LIMIT VISIBILITY: a retry stamps the trace with the cause + attempt + backoff, so a
+        // 429 storm is legible in motel's span view (the old delta named neither cause nor N/M).
+        ...(event.type === "retry" ? { "orch.node.retry_cause": event.cause, "orch.node.retry_attempt": event.attempt, "orch.node.retry_max": event.max, "orch.node.retry_delay_ms": event.delayMs } : {}),
         ...(event.type === "done" ? { "orch.node.result": clip(event.result), ...(event.tokens !== undefined ? { "orch.node.tokens": event.tokens } : {}) } : {}),
         ...(event.type === "error" ? { "orch.node.cause": causeText(event.cause) } : {}),
       })

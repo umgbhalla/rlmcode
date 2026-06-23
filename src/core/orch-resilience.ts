@@ -15,11 +15,12 @@
 //     retried — re-running yields the same error and burns tokens/time.
 // Default = NOT transient (fail fast). Only the known-transient shapes opt INTO a retry.
 import { AxFunctionError, type AxAIService, type AxGen, type AxGenIn, type AxGenOut } from "@ax-llm/ax"
-import { BudgetExhaustedError, type NodeOpts, node } from "./orch.ts"
+import { BudgetExhaustedError, type NodeOpts, node, type RetryCause } from "./orch.ts"
 
 // Max forward attempts for a transient failure (the first try + retries). Env override
 // RLM_NODE_RETRIES (a RETRY count; attempts = retries + 1). Clamped 1..5, default 3 attempts.
-const NODE_ATTEMPTS = (() => {
+// EXPORTED so the node path (runNode) can label a retry "N/M" with the real attempt ceiling.
+export const NODE_ATTEMPTS = (() => {
   const v = Number(process.env.RLM_NODE_RETRIES ?? 2) + 1
   return Number.isFinite(v) ? Math.min(5, Math.max(1, Math.floor(v))) : 3
 })()
@@ -75,6 +76,13 @@ const isTransient = (err: unknown): boolean => {
   if (typeof name === "string" && /Network|Timeout|StreamTerminated/i.test(name)) return true
   return false
 }
+
+// RATE-LIMIT VISIBILITY: which KIND of transient is this — a 429 (rate-limit, the most common CF
+// error) or a generic transient (5xx / network / timeout)? Only called on an already-transient
+// error (isTransient true), so the duck-typed 429 status is the sole discriminator; anything else
+// transient is "transient". Drives the distinct "rate-limited" vs "retrying" wording in the UI.
+export const classifyTransient = (err: unknown): RetryCause =>
+  err != null && typeof err === "object" && (err as { status?: unknown }).status === 429 ? "rate_limited" : "transient"
 
 // Sleep that ALSO respects an abort signal — a cancelled turn cuts the backoff wait short
 // (rejects) instead of stalling the full delay before honoring the cancel.
