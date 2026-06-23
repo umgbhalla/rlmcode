@@ -9,6 +9,9 @@ artifacts
 # background-agent git worktrees (transient)
 .claude/worktrees/
 
+# Effect/opencode reference-codebase research clones (never committed — read-only learning)
+.research/
+
 # local agent config (machine-specific, not for distribution)
 .codex/
 .agents/
