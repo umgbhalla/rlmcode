@@ -2,6 +2,7 @@
   "name": "ax2-loop-agent",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": "./src/core/sdk.ts",

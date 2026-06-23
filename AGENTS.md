@@ -97,7 +97,8 @@ headless pseudo-terminal and asserting against the captured cell-grid text. De-f
 the gate is deterministic (no real timers/network; frame-stable waits) and runs 10/10 green.
 
 - **`scripts/tui/driver.ts`** — mounts `bun src/tui/chat.tsx` under
-  [`terminal-control`](vendor/terminal-control) (the vendored PTY driver by opentui's author)
+  [`terminal-control`](https://github.com/kitlangton/terminal-control) (the PTY driver by
+  opentui's author; install the `termctrl` binary via `cargo install`, see below)
   with `AX2_MOCK=1`, and exposes `{ frame, type, key, click, waitFor, waitForFrame, stop }`. It
   drives the REAL app boot + input/focus path (not an in-process render tree), so the bugs above
   are catchable. Waits use the frame-stable `waitFor` poll, never `setTimeout`-then-assert.
@@ -150,7 +151,7 @@ re-export surface — `index.ts`/`sdk.ts`, mostly `export … from`) stays tight
 lines so the public API can't sprawl; an **internal implementation** file gets **500**.
 Nesting depth budget is **8**. If a file approaches its budget, split by concern (types,
 pure helpers, effects, UI) rather than growing it. Tests and auto-generated files are
-exempt. `src/chat.tsx` and `build-viz.ts` are grandfathered; new files must stay under
+exempt. `src/chat.tsx` is grandfathered; new files must stay under
 the budget.
 
 ## Extended ponytail scan

@@ -80,7 +80,7 @@ const isBarrel = (path: string, source: string): boolean =>
     !/^export\s+(const|function|async|class|enum|default)\b/m.test(source))
 
 // Existing oversized files grandfathered in. New files must stay under LINE_BUDGET.
-const OVERSIZED_ALLOWLIST = new Set(["src/tui/chat.tsx", "build-viz.ts"])
+const OVERSIZED_ALLOWLIST = new Set(["src/tui/chat.tsx"])
 
 // Dependencies that duplicate a Bun/modern-JS native. Curated (low false
 // positive) — flags the package, not "you wrote a manual loop".

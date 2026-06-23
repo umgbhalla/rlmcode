@@ -8,3 +8,8 @@ artifacts
 
 # background-agent git worktrees (transient)
 .claude/worktrees/
+
+# local agent orchestration scripts (machine-specific paths, not for distribution)
+.claude/workflows/
+.codex/
+.agents/
