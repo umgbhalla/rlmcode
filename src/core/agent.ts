@@ -20,6 +20,7 @@ import { BASE_TOOLS } from "./tools.ts"
 import { setNodeSpanTracer, setTurnContext } from "./orch-spans.ts"
 import { BASE_PROMPT, limits, makeOnEvent, rateLimiter, setTurnEmit } from "./runtime.ts"
 import { setMockEmit } from "./mock-ai.ts"
+import { drainWithWatchdog } from "./stream-watchdog.ts"
 import { WORKFLOW_TOOLS } from "./workflow.ts"
 
 // Step/token ceilings default to today's app values (limits, from runtime.ts): maxSteps is
@@ -349,15 +350,12 @@ export const createAgent = (config: AxAgentConfig) => {
                 logger: makeLiveLogger(emit),
                 debug: true,
               }
-              let reply = ""
-              for await (const d of chat.streamingForward(service, { message: msg }, opts as Parameters<typeof chat.streamingForward>[2])) {
-                const delta = (d as { delta?: { reply?: string; thought?: string } }).delta ?? {}
-                if (delta.thought) emit({ kind: "thinkingDelta", text: delta.thought })
-                if (delta.reply) {
-                  reply += delta.reply
-                  emit({ kind: "replyDelta", text: delta.reply })
-                }
-              }
+              // STALL-WATCHDOG (FIX A): drain the stream under a per-chunk stall deadline + an
+              // outer wall-clock cap, both threading `aborter` so a fire cancels the CF request and
+              // breaks the loop (→ run.ts .finally → queue.close → a "⚠ …" partial). Good turns are
+              // byte-identical: the watchdog only ever fires on dead air / a runaway.
+              const stream = chat.streamingForward(service, { message: msg }, opts as Parameters<typeof chat.streamingForward>[2])
+              const reply = await drainWithWatchdog(stream, aborter, emit)
               // ADVISORY budget charge (runNode used to do this; the streaming drain bypasses it).
               budget.charge(usageOf(chat))
               return { reply }
