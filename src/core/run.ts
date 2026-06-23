@@ -195,6 +195,27 @@ const earlyReply = (why: string): TurnEvent => ({
   result: { reply: `⚠ ${why}`, stopReason: "error", usage: {}, aborted: false, error: { kind: "unknown", message: why } },
 })
 
+// PER-SESSION TURN MUTEX. The seam DOCUMENTS "one in-flight turn per session" (sdk.ts) but only
+// the TUI's busyAtom ever ENFORCED it — an SDK/remote consumer firing two runTurn(sameSession)
+// calls would race the shared chat gen (agent.ts), the sessionId-keyed Maps (agent.ts/runtime.ts),
+// and the shared AxMemory (sessions.ts). This tail-chains turns per sessionId: a second turn awaits
+// the first's release before it opens its queue, making the documented invariant an ENFORCED one.
+// One Map entry per live session (overwritten, not per-turn) — reclaimed when the chain drains.
+const turnLocks = new Map<string, Promise<void>>()
+const acquireTurn = async (sessionId: string): Promise<() => void> => {
+  let release!: () => void
+  const mine = new Promise<void>((r) => (release = r))
+  const prior = turnLocks.get(sessionId) ?? Promise.resolve()
+  const tail = prior.then(() => mine)
+  turnLocks.set(sessionId, tail)
+  await prior // wait for the prior turn on THIS session to release
+  return () => {
+    release()
+    // Best-effort reclaim: if no later turn replaced the tail, drop the entry (no per-session leak).
+    if (turnLocks.get(sessionId) === tail) turnLocks.delete(sessionId)
+  }
+}
+
 // makeRunTurn — bind the turn boundary to a specific agent DRIVER. Returns the plain
 // AsyncGenerator runTurn. Effect runs INSIDE on coreRuntime; the outside is a for-await-of. The
 // final yield is ALWAYS a single {type:'reply'} — success, error, or abort. Never two, never zero.
@@ -202,50 +223,82 @@ export const makeRunTurn =
   (driver: TurnDriver) =>
   async function* runTurn(sessionId: string, message: string, opts?: TurnOptions): AsyncGenerator<TurnEvent, void, void> {
     const text = message.trim()
-    // Empty message: still honor final-reply-once with a single terminal reply.
+    // Empty message: still honor final-reply-once with a single terminal reply. No session/lock work.
     if (text.length === 0) {
       yield earlyReply("empty message")
       return
     }
-    // Lazily open the session on first use (the SDK path); the TUI pre-creates it, so this is a
-    // no-op there (ensureSession returns the existing richer-span entry).
-    const rt = ensureSession(sessionId)
-
-    // PER-TURN emit: THE per-turn closure that replaces the deleted module-global sink. Every
-    // Activity (mapped to a flat TurnEvent) pushes into THIS turn's queue. It is threaded NATIVELY
-    // into turn() — which wires it into all three producers: ax's logger (makeLiveLogger(emit) in
-    // the forward opts), the orch NodeEvent path (makeOnEvent(emit) + getTurnEmit for tool
-    // handlers), and the streaming reply/thinking deltas. No module-global sink whatsoever.
-    const queue = new TurnQueue<TurnEvent>()
-    const emit = (a: Activity): void => queue.push(toEvent(a))
-
-    // Abort: a caller signal aborts THIS session's in-flight turn (wraps the driver's abortTurn).
-    const onAbort = (): void => void driver.abortTurn(sessionId)
-    if (opts?.signal !== undefined) {
-      if (opts.signal.aborted) onAbort()
-      else opts.signal.addEventListener("abort", onAbort, { once: true })
+    // Serialize turns for THIS session (enforce the documented one-turn-per-session invariant)
+    // before touching any shared per-session state. Released in the finally below — even on an
+    // early for-await break (the generator's return() runs it).
+    const release = await acquireTurn(sessionId)
+    try {
+      yield* drive(driver, sessionId, text, opts)
+    } finally {
+      release()
     }
+  }
 
-    // Run turn()'s Effect on the headless runtime as a detached promise; map success/failure into
-    // the SINGLE terminal reply. Effect/Cause/ChatError never escape this closure. turn()'s Effect
-    // requires OtelTracerProvider — coreRuntime (TracingLive) supplies it, so the program type
-    // keeps that requirement and runPromise discharges it (don't annotate R=never).
-    const program = driver.turn(rt.mem, rt.parent, sessionId, emit)(text).pipe(
-      Effect.map(okResult),
-      Effect.catchCause((c) => Effect.succeed(errorResult(c))),
-    )
-    const replyPromise: Promise<TurnResult> = coreRuntime
-      .runPromise(program)
-      .catch((e: unknown) => errorResult(Cause.fail(e)))
-      .finally(() => {
-        if (opts?.signal !== undefined) opts.signal.removeEventListener("abort", onAbort)
-        queue.close()
-      })
+// The actual turn drive, bracketed by the per-session mutex above. ALWAYS ends in exactly one
+// {type:'reply'}. On consumer abandonment (early for-await break) the generator's return() unwinds
+// HERE: we abort the detached turn and await its settle BEFORE the mutex releases, so the NEXT
+// same-session turn can never start while a still-running one mutates the shared gen/memory.
+async function* drive(
+  driver: TurnDriver,
+  sessionId: string,
+  text: string,
+  opts?: TurnOptions,
+): AsyncGenerator<TurnEvent, void, void> {
+  // Lazily open the session on first use (the SDK path); the TUI pre-creates it, so this is a
+  // no-op there (ensureSession returns the existing richer-span entry).
+  const rt = ensureSession(sessionId)
 
+  // PER-TURN emit: THE per-turn closure that replaces the deleted module-global sink. Every
+  // Activity (mapped to a flat TurnEvent) pushes into THIS turn's queue. It is threaded NATIVELY
+  // into turn() — which wires it into all three producers: ax's logger (makeLiveLogger(emit) in
+  // the forward opts), the orch NodeEvent path (makeOnEvent(emit) + getTurnEmit for tool
+  // handlers), and the streaming reply/thinking deltas. No module-global sink whatsoever.
+  const queue = new TurnQueue<TurnEvent>()
+  const emit = (a: Activity): void => queue.push(toEvent(a))
+
+  // Abort: a caller signal aborts THIS session's in-flight turn (wraps the driver's abortTurn).
+  const onAbort = (): void => void driver.abortTurn(sessionId)
+  if (opts?.signal !== undefined) {
+    if (opts.signal.aborted) onAbort()
+    else opts.signal.addEventListener("abort", onAbort, { once: true })
+  }
+
+  // Run turn()'s Effect on the headless runtime as a detached promise; map success/failure into
+  // the SINGLE terminal reply. Effect/Cause/ChatError never escape this closure. turn()'s Effect
+  // requires OtelTracerProvider — coreRuntime (TracingLive) supplies it, so the program type
+  // keeps that requirement and runPromise discharges it (don't annotate R=never).
+  let settled = false
+  const program = driver.turn(rt.mem, rt.parent, sessionId, emit)(text).pipe(
+    Effect.map(okResult),
+    Effect.catchCause((c) => Effect.succeed(errorResult(c))),
+  )
+  const replyPromise: Promise<TurnResult> = coreRuntime
+    .runPromise(program)
+    .catch((e: unknown) => errorResult(Cause.fail(e)))
+    .finally(() => {
+      settled = true
+      if (opts?.signal !== undefined) opts.signal.removeEventListener("abort", onAbort)
+      queue.close()
+    })
+
+  try {
     // DRAIN: yield every queued activity event as it arrives. The queue closes when the turn
     // settles (the .finally above), ending the drain — so the loop never hangs.
     for await (const ev of queue.drain()) yield ev
 
     // TERMINAL: the one and only reply, always, even on error/abort.
     yield { type: "reply", result: await replyPromise }
+  } finally {
+    // CONSUMER ABANDONMENT (early break): the turn is still detached + running. Abort it and wait
+    // for it to settle so the released mutex doesn't hand the shared gen/memory to a racing turn.
+    if (!settled) {
+      onAbort()
+      await replyPromise.catch(() => {})
+    }
   }
+}
