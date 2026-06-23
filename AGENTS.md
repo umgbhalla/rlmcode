@@ -69,26 +69,66 @@ imports count). The TUI consumes the engine ONLY through the barrel + the app ha
     bun run emit         # headless trace smoke
     bun run sdk:smoke    # barrel-only SDK consumer (examples/sdk-usage.ts) — the SDK seam gate
     bun run lint         # check + oxlint + test + analyze + debt (run before commit)
-    bun run check        # tsc --noEmit + Effect LS (Effect anti-patterns)
-    bun run oxlint       # oxlint tier-1 errors (tier-2 suspicious/perf warn)
-    bun run oxlint:report # tier upgrade roadmap + tier-3 preview counts
-    bun run analyze      # yuku semantic design analysis (incl. the crosscore boundary rule)
-    bun run debt         # ponytail debt ledger
+    bun run check        # tsc --noEmit + effect-LS diagnostics ×2 (whole-tree + src/core/ tier)
+    bun run oxlint       # oxlint tier-1 correctness + tier-2 suspicious/perf (all ERROR today)
+    bun run oxlint:report # tier upgrade roadmap + next-tier preview counts
+    bun run analyze      # yuku semantic design analysis (crosscore boundary + budgets + write-flow)
+    bun run debt         # ponytail debt ledger (static, blocking)
+    bun run debt:audit   # churn-ranked over-engineering candidates → docs/DEBT-AUDIT.md (advisory)
     bun run test:tui     # HEADLESS TUI GATE — see below (needs the termctrl binary + a PTY)
+    bun run live         # LIVE integration (RLM_LIVE=1, real Cloudflare) — SEPARATE, never in lint
+    bun run live:focus   # focused live probe (RLM_FOCUS_LIVE=1) — on-demand / local only
 
-## Static analysis — what & WHEN to run
+## Static analysis — the gate philosophy
+
+The quality gate is **four complementary layers**, none of which can be dropped: `tsc` (types) +
+`@effect/language-service` (Effect idioms) + **oxlint** (per-statement) + **yuku** (cross-file
+reachability + the `crosscore` SDK-barrel boundary + mutate/capture write-flow). oxlint catches what
+yuku can't (per-statement smells); yuku catches what oxlint can't (cross-file dead code, the barrel
+seam, closure write-flow); effect-LS catches what neither sees (floating effects, leaking
+requirements, side-effects in Effect code). Keep all four.
+
+**Rustc severity model.** Every rule lands at a tier: **ERROR** blocks the gate (rustc `deny`),
+**WARN** is surfaced + counted but non-blocking (rustc `warn` — gradual-rollout / advisory), **OFF**
+(`allow`). We do NOT flip all ~98 effect-LS checks to error blindly — diagnostics are staged by tier
+(the ERROR/WARN/OFF split lives in the two tsconfig plugin configs, see below). `check` exits 0 on a
+warnings-only run; only an ERROR-tier finding fails it.
+
+**Effect-driven mandate (the mutable-state ban).** `src/core/` is Effect v4 / effect-smol. The
+side-effect detectors (`globalDate`, `globalRandom`, `processEnvInEffect`, `globalTimersInEffect`,
+`newPromise`, `cryptoRandomUUIDInEffect`, `asyncFunction`, …) are **ERROR inside `src/core/`** and
+**OFF at the edge** (`src/app/`, `src/tui/`, `src/otel.ts`) — side-effects are pushed to the
+composition edge; in the engine they go through `Clock` / `Random` / `Config` / Effect scheduling.
+Raw module-scope mutable state (`let`/`var` reassigned at module scope) is banned (`oxlint` `no-var`,
+`no-param-reassign`; yuku `mutate`/`capture` write-flow) — loop-local `let` inside a function body
+stays allowed. **`Ref`/`SubscriptionRef` are SANCTIONED** — the ban targets raw mutation + global
+side-effects, never Effect's reactive primitives.
+
+Effect-LS has no per-directory severity, so the core-vs-edge split is two tsconfigs: `tsconfig.json`
+(whole `src/`, side-effect detectors OFF) and `tsconfig.core.json` (extends it, scoped to
+`src/core/**`, side-effect detectors ERROR). `bun run check` runs `tsc` then BOTH diagnostics passes.
+
+### what & WHEN to run
 
 | command | what it checks | run it when |
 |---|---|---|
-| `bun run check` | `tsc` + `@effect/language-service` — types + Effect anti-patterns (floating effects, missing service deps, error-channel bugs) | after **any** edit to `.ts`/`.tsx`, especially Effect code (`core/agent.ts`, `core/run.ts`, `tui/atoms.ts`, `otel.ts`, `core/sessions.ts`). The fast inner loop. |
-| `bun run oxlint` | `oxlint` via `scripts/oxlint-check.ts` — tier 1 `correctness` + tier 2 `suspicious`/`perf` both error (0 warnings today); tier 3 preview via `oxlint:report`. Scope: `src` + `scripts` + `examples`. Does **not** duplicate yuku crosscore/CC/mutate/capture. | after any edit to `.ts`/`.tsx`. Fast (~10ms). `oxlint:fix` for auto-fix; `oxlint:upgrade` bumps the dep + prints the next tier preview. |
-| `bun run analyze` | `yuku-analyzer` via `scripts/design-check.ts` — **semantic/architecture** on `src/` only: crosscore barrel seam, dead exports/modules, cycles, CC/nest/params budgets, mutate/capture write-flow. Scripts/examples join the import graph but are not structurally linted. Complements oxlint; `scripts/lint-coordination.test.ts` guards against fighting fixes. | after adding/removing exports or modules, or when a function grows branchy. Before committing structural changes. |
-| `bun run debt` | `ponytail:` marker ledger — fails on any marker with no `Upgrade:` line | after adding a `ponytail:` shortcut comment; it forces every shortcut to name its upgrade path. |
-| `bun run lint` | `check` + `oxlint` + `test` + `analyze` + `debt` (all of the above) | **before every commit**, and in CI. One gate. Must be green to ship. |
+| `bun run check` | `tsc --noEmit` (+ the strict flags `noUncheckedIndexedAccess`, `erasableSyntaxOnly`, `isolatedModules`, `noImplicitOverride`, `noFallthroughCasesInSwitch`, `moduleDetection: force`, `noUncheckedSideEffectImports`) **then** `@effect/language-service diagnostics` twice — once on `tsconfig.json` (whole tree, side-effects OFF) and once on `tsconfig.core.json` (`src/core/`, side-effects ERROR). ERROR tier = floatingEffect / missingEffectContext / leakingRequirements / error-channel bugs / side-effect-in-core; WARN tier = style opportunities (counted, non-blocking). | after **any** edit to `.ts`/`.tsx`, especially Effect code (`core/agent.ts`, `core/run.ts`, `tui/atoms.ts`, `otel.ts`, `core/sessions.ts`). The fast inner loop. |
+| `bun run oxlint` | `oxlint` via `scripts/oxlint-check.ts` — tier 1 `correctness` + tier 2 `suspicious`/`perf` both ERROR (0 warnings today); next-tier preview via `oxlint:report`. Enforces the mutable-state ban (`no-var`, `no-param-reassign`) + import hygiene + consistent type-imports. Scope: `src` + `scripts` + `examples`. Does **not** duplicate yuku crosscore/CC/mutate/capture; `scripts/lint-coordination.test.ts` guards the two from fighting fixes. | after any edit to `.ts`/`.tsx`. Fast (~10ms). `oxlint:fix` for auto-fix; `oxlint:upgrade` bumps the dep + prints the next-tier preview. |
+| `bun run analyze` | `yuku-analyzer` via `scripts/design-check.ts` — **semantic/architecture** on `src/`: crosscore barrel seam, dead exports/modules, cycles, the mutate/capture write-flow, and the size/CC/nest/params budgets. Budgets are currently FIXED named consts (`CC_BUDGET`, `NEST_BUDGET`, `INDEX_LINE_BUDGET`/`LINE_BUDGET`, `PARAM_BUDGET`) and every finding is ERROR-tier (blocking, or staged-blocking under `--staged`). The DYNAMIC budget rubric (role × export-fan × 90d-churn × complexity-density, with a WARN tier for "approaching budget" / hotspots) is the planned next rework of this script — not yet shipped. | after adding/removing exports or modules, or when a function grows branchy. Before committing structural changes. |
+| `bun run debt` | `ponytail:` marker ledger — fails on any marker with no `Upgrade:` line. Static, deterministic, BLOCKING. | after adding a `ponytail:` shortcut comment; it forces every shortcut to name its upgrade path. |
+| `bun run debt:audit` | `scripts/debt-audit.ts` — churn-ranked over-engineering CANDIDATE list (`priority = weight × 90d-churn[file]`, hot files surface) → `docs/DEBT-AUDIT.md`. **Advisory by construction: never wired into `lint`, never exits non-zero on findings.** The deterministic half of the `/ponytail-audit` pass. | when reviewing debt; the agent's semantic half runs the `/ponytail-audit` skill (below). |
+| `bun run lint` | `check` + `oxlint` + `test` + `analyze` + `debt` — all four layers + the hermetic test suite. ERROR tier blocks; WARN tier counts. | **before every commit**, and in CI. One gate. Must be green to ship. |
 
-Workflow: edit → `bun run check` (tight loop) → when done → `bun run lint` → commit.
-Budgets in `scripts/design-check.ts` (CC 18, nest 5, params 6) are tunable; raise only
-with a reason, not to silence a real smell.
+**When the AGENT runs `lint`, it ALSO runs the `/ponytail-audit` skill** (the
+`ponytail:ponytail-audit` whole-repo over-engineering scan) as an **advisory, non-blocking** pass:
+`bun run debt:audit` computes the churn-ranked candidate list, the skill fills in the semantic
+findings. It is the slow (LLM) semantic layer over the fast deterministic `debt` gate — it informs,
+it does not block. A finding may escalate to blocking only by the explicit rule (debt age > 2 months
+AND churn ≥ median); default OFF until the false-positive rate is known.
+
+Workflow: edit → `bun run check` (tight loop) → when done → `bun run lint` (+ `/ponytail-audit`
+advisory) → commit. Budgets in `scripts/design-check.ts` are named consts at the top of the file,
+tunable **only with a reason**, never to silence a real smell.
 
 ## Headless TUI gate (`bun run test:tui`) — the TUI is now headless-testable
 
@@ -141,11 +181,31 @@ full `test:tui` is its own gate, run locally / in a PTY-capable runner before sh
 changes. The deterministic mock UNIT (`scripts/tui/mock.test.ts`, zero PTY) is the part `lint`
 keeps in its `test` target, so `bun run lint` stays green on a bare CI box.
 
+## Test policy
+
+**Hermetic gate — zero network, zero live AI.** All inference in `bun run lint`, `bun run test`, and
+`bun run test:tui` runs through the canned `AxAIService` in `src/core/mock-ai.ts` behind `RLM_MOCK=1`
+(a structural fake with fixed replies — deterministic, frame-stable). NO live Cloudflare / `@ax-llm/ax`
+calls on the gate. Live integration is a SEPARATE, on-demand gate: `bun run live` (`RLM_LIVE=1`) /
+`bun run live:focus` (`RLM_FOCUS_LIVE=1`), local-only, never on the PR critical path (slow + flaky).
+New tests mock the AI seam; never assert against a real model response.
+
+**Tests rot across version bumps — rewrite, don't migrate.** On any version bump of `rlmcode` OR a
+load-bearing dependency (`@ax-llm/ax`, `effect`, `@opentui/*`), treat the affected test files as
+ROTTED, not authoritative: DELETE the affected `scripts/*.test.ts` / `scripts/tui/*.test.ts` and
+rewrite them end-to-end against the new code's intent. Do NOT patch brittle assertions inline or
+copy-paste old test bodies. Each rewritten test covers mock-first happy-path + ONE key edge case per
+behavior. A tests-only change skips the changelog entry; a version bump forces the rewrite.
+
 ## tsconfig discipline
 
-Strict flags are non-negotiable: `strict`, `noUnusedLocals`,
-`noUnusedParameters`, `exactOptionalPropertyTypes`. Do not relax them to silence
-errors; fix the underlying type or add an explicit, locally justified assertion.
+Strict flags are non-negotiable: `strict`, `noUnusedLocals`, `noUnusedParameters`,
+`exactOptionalPropertyTypes`, plus `noUncheckedIndexedAccess`, `noUncheckedSideEffectImports`,
+`erasableSyntaxOnly`, `isolatedModules`, `noImplicitOverride`, `noFallthroughCasesInSwitch`, and
+`moduleDetection: force`. Do not relax them to silence errors; fix the underlying type or add an
+explicit, locally justified assertion. Same rule for the effect-LS ERROR tier and the oxlint ERROR
+tier — fix the code (real refactors: floating-effect wrapping, `leakingRequirements`,
+side-effects → `Clock`/`Random`/`Config`), never downgrade the rule to pass the gate.
 
 ## File-size budget
 
@@ -154,8 +214,9 @@ re-export surface — `index.ts`/`sdk.ts`, mostly `export … from`) stays tight
 lines so the public API can't sprawl; an **internal implementation** file gets **500**.
 Nesting depth budget is **8**. If a file approaches its budget, split by concern (types,
 pure helpers, effects, UI) rather than growing it. Tests and auto-generated files are
-exempt. `src/chat.tsx` is grandfathered; new files must stay under
-the budget.
+exempt. `src/tui/chat.tsx` is grandfathered (`OVERSIZED_ALLOWLIST`); new files must stay
+under the budget. (These fixed ceilings are slated to become the role × export-fan ×
+churn × density dynamic rubric in the next `design-check.ts` rework — see the analyze row.)
 
 ## Extended ponytail scan
 
