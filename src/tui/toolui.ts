@@ -201,12 +201,22 @@ export const toolHasBody = (name: string, result: string, isError: boolean): boo
   }
 }
 
+// A unified-diff body line ("-del"/"+add"/" ctx") → a toned PreviewLine: the leading sign maps to
+// the tone (del/add/dim) and is STRIPPED from the text (the renderer re-adds it via previewSign), so
+// the fallback reads as a real -/+ diff, not a sign-glued dump. Shared by the edit_file fallback.
+const diffLineToPreview = (l: string): PreviewLine => {
+  const sign = l[0]
+  const text = l.slice(1)
+  return sign === "+" ? { text, tone: "add" } : sign === "-" ? { text, tone: "del" } : { text, tone: "dim" }
+}
+
 /** The explicit, per-tool detail body shown when a tool row is expanded. `cols` = char budget
  * per line (width-aware truncation). `max` = the LINE cap: when set (tool-view.tsx passes
  * collapseMax(name) collapsed, or a large number expanded) it OVERRIDES the per-tool default, so
  * the collapse "first N + … +M more" is a SINGLE authority (headLines appends the "… +M more"
- * line itself). edit_file/write_file render via toolDiff (native <diff>) so they fall through here
- * only as a text fallback. */
+ * line itself). edit_file/write_file render via toolDiff (native <diff>) — this is the TINY FALLBACK
+ * they hit ONLY when the diff is too big for the native renderer (toolDiff returns null): a minimal
+ * LCS -/+ diff (edit) / a head of the added content (write), NOT the old whole-block del+add dump. */
 export const toolPreview = (name: string, args: string, result: string, isError: boolean, cols = 200, max?: number): PreviewLine[] => {
   if (isError || /^error:/.test(result.trim())) return [{ text: result.trim().slice(0, 200), tone: "del" }]
   const empty = /^\(no (output|matches)\)/.test(result.trim()) || result.trim() === ""
@@ -221,10 +231,13 @@ export const toolPreview = (name: string, args: string, result: string, isError:
       return content ? headLines(content, cap(8), cols) : [{ text: result, tone: "dim" }]
     }
     case "edit_file": {
-      const lim = cap(6)
-      const del: PreviewLine[] = field(args, "old_string").split("\n").slice(0, lim).map((l) => ({ text: l, tone: "del" as const }))
-      const add: PreviewLine[] = field(args, "new_string").split("\n").slice(0, lim).map((l) => ({ text: l, tone: "add" as const }))
-      return [...del, ...add]
+      // TINY FALLBACK (native <diff> is the primary render): a real minimal LCS diff (context +
+      // the -/+ lines) so even the text fallback shows ONLY what changed, not a full-rewrite dump.
+      const diff = lcsDiffLines(field(args, "old_string").split("\n"), field(args, "new_string").split("\n"))
+      const clamp = (t: string) => (t.length > cols ? `${t.slice(0, cols - 1)}…` : t)
+      const lines = diff.slice(0, cap(6)).map((l) => { const p = diffLineToPreview(l); return { ...p, text: clamp(p.text) } })
+      if (diff.length > cap(6)) lines.push({ text: `… +${diff.length - cap(6)} more`, tone: "dim" })
+      return lines
     }
     case "glob":
     case "grep":

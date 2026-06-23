@@ -73,6 +73,22 @@ const wantsTranscript = (req: Readonly<AxChatRequest<unknown>>): boolean => {
   return last !== undefined && typeof last.content === "string" && /transcript/i.test(last.content)
 }
 
+// DIFF variant: when the user asks to show a diff, the mock calls the test-only `mock_diff` tool
+// (mock.ts) — it replays a settled edit_file + write_file cluster under one subagent node, so the
+// MATURED diff render (tool-view.tsx ToolBody → the native opentui <diff>) draws from canned data.
+// The diff-viewer frame gate (scripts/tui/diff-viewer.test.ts) asserts the native +/- + line-number
+// render over the crude LCS <text> fallback. Keyed off the prompt like the other variants.
+const MOCK_DIFF_TOOL = {
+  id: "call_mock_diff",
+  type: "function" as const,
+  function: { name: "mock_diff", params: JSON.stringify({}) },
+}
+const wantsDiff = (req: Readonly<AxChatRequest<unknown>>): boolean => {
+  const users = req.chatPrompt.filter((m) => m.role === "user")
+  const last = users[users.length - 1]
+  return last !== undefined && typeof last.content === "string" && /\bdiff\b/i.test(last.content)
+}
+
 // RATE-LIMIT variant: when the user asks about a rate limit, the mock calls the test-only
 // `mock_ratelimit` tool (mock.ts) — it replays a 429-then-recover node (a VISIBLE retry backoff,
 // then ✓), so the rate-limit frame gate (scripts/tui/rate-limit.test.ts) asserts the live
@@ -168,9 +184,11 @@ const scriptedChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResp
       ? [MOCK_ORCH_TOOL]
       : wantsTranscript(req)
         ? [MOCK_TRANSCRIPT_TOOL]
-        : wantsRateLimit(req)
-          ? [MOCK_RATELIMIT_TOOL]
-          : [MOCK_TOOL]
+        : wantsDiff(req)
+          ? [MOCK_DIFF_TOOL]
+          : wantsRateLimit(req)
+            ? [MOCK_RATELIMIT_TOOL]
+            : [MOCK_TOOL]
   // On the tool-call step of an explore turn, surface the cluster's calls to the activity bus
   // (the mock service doesn't, see emitGroupCalls) so the three explore steps render + group.
   if (!hasToolResult && wantsGroup(req)) emitGroupCalls()
@@ -228,7 +246,9 @@ const streamReply = (): ReadableStream<AxChatResponse> => {
 // streams; the tool-call step and orch/rate-limit turns stay plain (their reply is the orch tree,
 // not streamed prose). Returns a ReadableStream only where the live render is under test.
 const scriptedStreamChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResponse | ReadableStream<AxChatResponse>> =>
-  hasCurrentTurnToolResult(req) && !wantsOrch(req) && !wantsGroup(req) && !wantsRateLimit(req) ? Promise.resolve(streamReply()) : scriptedChat(req)
+  hasCurrentTurnToolResult(req) && !wantsOrch(req) && !wantsGroup(req) && !wantsRateLimit(req) && !wantsDiff(req)
+    ? Promise.resolve(streamReply())
+    : scriptedChat(req)
 
 // The canned AI service — ax's real AxMockAIService with our scripted chat. `functions:
 // true` so ax permits the tool-call path. `streaming` toggles the live-delta variant (used

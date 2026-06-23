@@ -128,6 +128,46 @@ export const MOCK_TRANSCRIPT_TOOL: AxFunction = {
   },
 }
 
+// ── CANNED DIFF FEED (diff-viewer frame gate) — a settled edit_file + a settled write_file owned by
+// one still-running `editor` subagent NODE, so the MATURED diff render (tool-view.tsx ToolBody) draws
+// the native opentui <diff> from canned data. edit_file carries deterministic old/new strings whose
+// LCS (toolui.toolDiff) yields a clean context + one -/+ pair; write_file is an all-add diff. The
+// content tokens are unique + line-stable so the frame gate can assert the native diff (line numbers +
+// the +/- gutter, content with the leading sign STRIPPED) over the crude LCS <text> fallback it
+// replaces. NOT in production — replayed only by scripts/tui/diff-viewer.test.ts under RLM_MOCK.
+//   The edit changes ONE line (the greeting string) inside three context lines, so the diff reads as a
+// real minimal edit (context kept, one - then one +), not a whole-block rewrite. .ts filetype drives
+// the syntax highlighter through the populated SyntaxStyle (theme.makeSyntaxStyle).
+const DIFF_OLD = ['export function greet(name: string) {', '  const msg = "hi " + name', '  return msg', '}'].join("\n")
+const DIFF_NEW = ['export function greet(name: string) {', '  const msg = "hello, " + name', '  return msg', '}'].join("\n")
+const WRITE_BODY = ['export const VERSION = "0.0.1"', 'export const NAME = "rlmcode"'].join("\n")
+const MOCK_DIFF_TOOLS: ReadonlyArray<{ id: string; name: string; args: string; result: string; isError: boolean }> = [
+  { id: "df_edit", name: "edit_file", args: JSON.stringify({ path: "src/greet.ts", old_string: DIFF_OLD, new_string: DIFF_NEW }), result: "updated", isError: false },
+  { id: "df_write", name: "write_file", args: JSON.stringify({ path: "src/version.ts", content: WRITE_BODY }), result: "written", isError: false },
+]
+const feedDiffNodes = (emit: ActivitySink): void => {
+  const push = (a: Activity): void => emit(a)
+  // one running subagent node owns the file-mutation tools (start, never done ⇒ stays expanded).
+  push({ kind: "node", nodeId: "editor", event: "start", detail: "subagent" })
+  for (const t of MOCK_DIFF_TOOLS) {
+    push({ kind: "tool", id: t.id, name: t.name, args: t.args, nodeId: "editor" })
+    push({ kind: "result", id: t.id, result: t.result, isError: t.isError, nodeId: "editor" })
+  }
+}
+
+// TEST-ONLY diff tool — replays a canned edit_file + write_file cluster so the diff-viewer frame gate
+// (scripts/tui/diff-viewer.test.ts) can assert the native opentui <diff> render (syntax-highlighted
+// +/- lines, line numbers, split/unified by width). Off in production (registered only under RLM_MOCK).
+export const MOCK_DIFF_TOOL: AxFunction = {
+  name: "mock_diff",
+  description: "TEST ONLY: replay a canned edit_file + write_file cluster (native diff render) for the headless TUI harness.",
+  parameters: { type: "object", properties: {}, required: [] },
+  func: async (_args: unknown, extra?: Readonly<{ sessionId?: string; abortSignal?: AbortSignal }>) => {
+    feedDiffNodes(getTurnEmit(extra?.sessionId))
+    return "edited 2 files (1 edit, 1 write)"
+  },
+}
+
 // ── CANNED RATE-LIMIT RETRY FEED (rate-limit-visible frame gate) — a child node that hits a 429,
 // emits the `retry` NodeEvent (so it shows "⏳ rate-limited · retry 2/3 · 4s" WHILE backing off),
 // HOLDS (RLM_MOCK_DELAY_MS) so the frame gate captures the live retry state, then RECOVERS (done ✓).
