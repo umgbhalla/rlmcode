@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // FRAME GATE — MESSAGE CARDS. Mounts the REAL chat.tsx headlessly (terminal-control PTY +
-// AX2_MOCK) and proves the transcript renders the opencode-ported message cards (messages.tsx,
+// RLM_MOCK) and proves the transcript renders the opencode-ported message cards (messages.tsx,
 // Solid→React): a USER CARD (left-border accent card), an ASSISTANT REPLY with the
 // "▣ model · duration" footer line, and a RED ERROR CARD for a failed turn.
 //

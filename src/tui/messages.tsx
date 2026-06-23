@@ -10,7 +10,7 @@
 //     borderColor=theme.error), so a failure is unmissable instead of painted success-green.
 //
 // PART_MAPPING dispatch (opencode :1556-1570/:1640): the assistant card walks its parts and
-// dispatches each by type → component. ax2's Turn carries the assistant content as a small,
+// dispatches each by type → component. rlmcode's Turn carries the assistant content as a small,
 // fixed part list (reasoning? + text), so AssistantReply renders the dispatch inline rather
 // than mapping a dynamic Part[] — same shape (reasoning above text, footer after), no Solid
 // <Dynamic>. The tool parts stay in chat.tsx's step stream (grouped + collapsible there).

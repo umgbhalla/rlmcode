@@ -18,26 +18,26 @@ import { AxFunctionError, type AxAIService, type AxGen, type AxGenIn, type AxGen
 import { BudgetExhaustedError, type NodeOpts, node } from "./orch.ts"
 
 // Max forward attempts for a transient failure (the first try + retries). Env override
-// AX2_NODE_RETRIES (a RETRY count; attempts = retries + 1). Clamped 1..5, default 3 attempts.
+// RLM_NODE_RETRIES (a RETRY count; attempts = retries + 1). Clamped 1..5, default 3 attempts.
 const NODE_ATTEMPTS = (() => {
-  const v = Number(process.env.AX2_NODE_RETRIES ?? 2) + 1
+  const v = Number(process.env.RLM_NODE_RETRIES ?? 2) + 1
   return Number.isFinite(v) ? Math.min(5, Math.max(1, Math.floor(v))) : 3
 })()
 
-// Base backoff (ms) for the FIRST retry; doubles each subsequent retry. AX2_NODE_BACKOFF_MS
+// Base backoff (ms) for the FIRST retry; doubles each subsequent retry. RLM_NODE_BACKOFF_MS
 // overrides. Clamped >= 0 so a bad env can't go negative.
 const NODE_BACKOFF_MS = (() => {
-  const v = Number(process.env.AX2_NODE_BACKOFF_MS ?? 250)
+  const v = Number(process.env.RLM_NODE_BACKOFF_MS ?? 250)
   return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 250
 })()
 
 // Per-node TIMEOUT (ms): a node that runs longer than this is ABORTED and counts as a
 // failure (fanOut maps it to null), so one hung node never stalls the whole fan-out.
-// AX2_LEAF_TIMEOUT_MS overrides (legacy "leaf" env name kept for stability). Clamped to
+// RLM_LEAF_TIMEOUT_MS overrides (legacy "leaf" env name kept for stability). Clamped to
 // a sane floor; default 120s (a real exploration node can run minutes — but a HANG is
 // unbounded, and this is the backstop, not the common case).
 export const LEAF_TIMEOUT_MS = (() => {
-  const v = Number(process.env.AX2_LEAF_TIMEOUT_MS ?? 120_000)
+  const v = Number(process.env.RLM_LEAF_TIMEOUT_MS ?? 120_000)
   return Number.isFinite(v) && v > 0 ? Math.max(1_000, Math.floor(v)) : 120_000
 })()
 

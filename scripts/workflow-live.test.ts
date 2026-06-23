@@ -11,8 +11,8 @@
 //   (b) rlm() BLOB-MINE — a script that does return await rlm(BIG_BLOB, '…/auth route…'). Asserts
 //       the buried fact (registerAuthRoute) comes back — the rlm node-kind works AS a prim.
 //
-// GATED behind AX2_LIVE=1 (costs nothing in normal lint). Run:
-//   AX2_LIVE=1 bun --env-file=.env scripts/workflow-live.test.ts   (or `bun run live`)
+// GATED behind RLM_LIVE=1 (costs nothing in normal lint). Run:
+//   RLM_LIVE=1 bun --env-file=.env scripts/workflow-live.test.ts   (or `bun run live`)
 import { ai, type AxAIService } from "@ax-llm/ax"
 import type { Activity } from "../src/core/activity.ts"
 import { WORKFLOW_TOOLS } from "../src/core/workflow.ts"
@@ -33,9 +33,9 @@ const buildLiveAi = (): AxAIService => {
   return svc
 }
 
-const live = process.env.AX2_LIVE === "1"
+const live = process.env.RLM_LIVE === "1"
 if (!live) {
-  console.log("workflow-live.test: skipped (set AX2_LIVE=1 to run the real CF-Kimi workflow proof)")
+  console.log("workflow-live.test: skipped (set RLM_LIVE=1 to run the real CF-Kimi workflow proof)")
   process.exit(0)
 }
 

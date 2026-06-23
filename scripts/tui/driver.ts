@@ -9,9 +9,9 @@
 // a real pseudo-terminal, captures the rendered cell grid as text, and injects typed text /
 // named keys / raw bytes (mouse) — exactly the surface this gate needs. The `--host opentui`
 // launch flag is built for this. We confirmed a trivial render+capture boots before building
-// on it (AX2_MOCK=1 + the lazy-llm seam let chat.tsx mount with NO Cloudflare env).
+// on it (RLM_MOCK=1 + the lazy-llm seam let chat.tsx mount with NO Cloudflare env).
 //
-// DETERMINISM: every test mounts with AX2_MOCK=1 — the canned mock AI (mock-ai.ts, zero
+// DETERMINISM: every test mounts with RLM_MOCK=1 — the canned mock AI (mock-ai.ts, zero
 // network) drives the REAL turn loop; the mock orch tool (mock.ts) replays canned NodeEvents
 // through the REAL activity bus. No timers, no network. Waits use terminal-control's
 // frame-stable predicate poll (waitFor over captured text), never setTimeout-then-assert.
@@ -65,7 +65,7 @@ const sgr = (x: number, y: number, press: boolean): Uint8Array =>
 export type LaunchDriverOptions = {
   readonly cols?: number
   readonly rows?: number
-  /** Extra env for the launched chat.tsx (AX2_MOCK=1 is always set). */
+  /** Extra env for the launched chat.tsx (RLM_MOCK=1 is always set). */
   readonly env?: Readonly<Record<string, string>>
   /**
    * Alternate entry to mount instead of chat.tsx — an absolute path to a `bun`-runnable file
@@ -76,7 +76,7 @@ export type LaunchDriverOptions = {
 }
 
 // Mount chat.tsx headlessly under terminal-control with the mock AI wired in, and return the
-// reusable driver. `inheritEnv: false` keeps the app env hermetic (only AX2_MOCK + our extras
+// reusable driver. `inheritEnv: false` keeps the app env hermetic (only RLM_MOCK + our extras
 // + a minimal PATH/HOME for bun), so a developer's real CLOUDFLARE_* never leaks into a test.
 export const launchDriver = async (opts: LaunchDriverOptions = {}): Promise<Driver> => {
   const cols = opts.cols ?? 100
@@ -88,7 +88,7 @@ export const launchDriver = async (opts: LaunchDriverOptions = {}): Promise<Driv
     viewport: { cols, rows },
     inheritEnv: false,
     env: {
-      AX2_MOCK: "1",
+      RLM_MOCK: "1",
       PATH: process.env.PATH ?? "",
       HOME: process.env.HOME ?? "",
       TERM: "xterm-256color",

@@ -1,10 +1,10 @@
 // The canned AI service — split from mock.ts so it imports NOTHING from agent.ts
-// (mock.ts → agent.ts; agent.ts → mock-ai.ts for the AX2_MOCK seam; keeping the AI
+// (mock.ts → agent.ts; agent.ts → mock-ai.ts for the RLM_MOCK seam; keeping the AI
 // builder here breaks that cycle). Zero network, zero Cloudflare.
 import { AxMockAIService, type AxChatRequest, type AxChatResponse } from "@ax-llm/ax"
 import type { ActivitySink } from "./orch.ts"
 
-// TEST-ONLY per-turn activity sink (off in prod — only reachable under AX2_MOCK). The activity
+// TEST-ONLY per-turn activity sink (off in prod — only reachable under RLM_MOCK). The activity
 // bus is per-turn now (no module-global sink): turn() threads runTurn's per-turn `emit` here via
 // setMockEmit() at the top of each turn, so the GROUP variant below can surface its tool-CALL
 // rows onto THIS turn's live feed (AxMockAIService.chat() bypasses ax's response logging, so
@@ -36,7 +36,7 @@ const MOCK_TOOL = {
 }
 
 // ORCH variant: when the user message asks to orchestrate, the mock instead calls the
-// test-only `mock_orch` tool (registered under the AX2_MOCK seam in agent.ts). That tool
+// test-only `mock_orch` tool (registered under the RLM_MOCK seam in agent.ts). That tool
 // replays the canned NodeEvent feed (mock.ts) through the REAL activity bus, so the REAL
 // atoms node-routing + REAL flatten() draw the velocity tree in the live UI — no network,
 // no real orchestration. Keyed off the prompt so the same scriptedChat covers both the
@@ -146,12 +146,12 @@ const REPLY_PIECES = ["Found **3 ", "matches** in ", "`src/`. Done."] as const
 // thinkingDelta/replyDelta → the live thinking block + streamed reply cursor in chat.tsx.
 // NOT a fake: it is ax's documented streaming surface (chatResponse may return a
 // ReadableStream), exercising the SAME render path the real CF-Kimi stream drives.
-// AX2_MOCK_DELAY_MS (default 0) paces the stream: a pause after the thought chunk and between
+// RLM_MOCK_DELAY_MS (default 0) paces the stream: a pause after the thought chunk and between
 // reply pieces, so the busy/thinking state is HOLDABLE for a screenshot/recording and the demo
 // looks like a real turn (not a sub-second flash). Default 0 keeps the frame tests fast +
 // deterministic (they assert the settled frame, not timing). ponytail: a fixed sleep, not a
 // token-rate model. Upgrade: pace by real CF inter-chunk latency if a recording needs it.
-const MOCK_DELAY_MS = Number(process.env.AX2_MOCK_DELAY_MS ?? 0)
+const MOCK_DELAY_MS = Number(process.env.RLM_MOCK_DELAY_MS ?? 0)
 const sleep = (ms: number): Promise<void> => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve())
 const streamReply = (): ReadableStream<AxChatResponse> => {
   const usage = { ai: "mock", model: MOCK_MODEL, tokens: MOCK_TOKENS }
@@ -179,7 +179,7 @@ const scriptedStreamChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxCh
 
 // The canned AI service — ax's real AxMockAIService with our scripted chat. `functions:
 // true` so ax permits the tool-call path. `streaming` toggles the live-delta variant (used
-// only by the streaming frame test via AX2_MOCK_STREAM); default false keeps direct
+// only by the streaming frame test via RLM_MOCK_STREAM); default false keeps direct
 // `ai.chat()` callers (mock.test) on the single-response contract. Built fresh per call so
 // two harnesses never share latch state.
 export const makeMockAI = (streaming = false): AxMockAIService<string> =>

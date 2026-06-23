@@ -26,7 +26,7 @@ OpenTelemetry → local [`motel`](https://github.com/kitlangton/motel). LLM = Cl
 
 - [Bun](https://bun.sh) (≥ 1.3) — runtime + package manager.
 - A [Cloudflare](https://dash.cloudflare.com) account with Workers AI, and an API token
-  (Workers AI permission) — for the real model. **Skip this** with `AX2_MOCK=1` (canned AI).
+  (Workers AI permission) — for the real model. **Skip this** with `RLM_MOCK=1` (canned AI).
 - Optional: the `termctrl` binary for the headless TUI test gate —
   `cargo install --git https://github.com/kitlangton/terminal-control terminal-control`.
 
@@ -41,7 +41,7 @@ cp .env.example .env   # then fill in CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_
 
 ```bash
 bun run chat                 # the agent (needs CF creds in .env)
-AX2_MOCK=1 bun run chat      # no credentials — canned AI, real turn loop + TUI
+RLM_MOCK=1 bun run chat      # no credentials — canned AI, real turn loop + TUI
 ```
 
 > ⚠️ **Safety:** the agent executes model-generated shell commands and JS **unsandboxed** in

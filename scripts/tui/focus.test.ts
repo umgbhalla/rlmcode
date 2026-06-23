@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
-// FRAME GATE — FOCUS. Mounts the REAL chat.tsx headlessly (terminal-control PTY + AX2_MOCK
+// FRAME GATE — FOCUS. Mounts the REAL chat.tsx headlessly (terminal-control PTY + RLM_MOCK
 // mock AI) and asserts the focus contract AGAINST CAPTURED FRAMES — the exact bug that once
 // shipped "green" while the input was stranded. This is the FIRST frame test, so it doubles
-// as the AX2_MOCK seam-integration check (blocker #4): if the seam is broken, chat.tsx never
+// as the RLM_MOCK seam-integration check (blocker #4): if the seam is broken, chat.tsx never
 // boots and waitFor times out here.
 //
 // CONTRACT (captureFocus model, composer.tsx useComposerFocus): the composer textarea is the

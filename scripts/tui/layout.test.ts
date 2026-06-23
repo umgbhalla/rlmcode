@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // FRAME GATE — LAYOUT / NO-OVERLAP. Mounts the REAL chat.tsx headlessly (terminal-control
-// PTY + AX2_MOCK) and proves the bottom chrome (composer input + status line) ALWAYS keeps
+// PTY + RLM_MOCK) and proves the bottom chrome (composer input + status line) ALWAYS keeps
 // its own space under a full transcript — the "transcript text overlaps the input box" bug.
 //
 // THE CONTRACT (chat.tsx): the scrollbox is flexGrow:1; the composer wrapper AND the status
@@ -39,7 +39,7 @@ await report("layout.test", async (a) => {
     // dots. These are the SPEC's frame proof that the shell rendered.
     a.has(f, /Cmd\+K commands/, "footer action-bar shows the Cmd+K commands affordance (right cluster)")
     a.has(f, /tok ·.*\$/, "footer action-bar shows the token/cost cost-meter (right cluster)")
-    a.hasNot(f, /LSP|MCP|Permission/, "footer drops opencode's LSP/MCP/permission dots (ax2 has neither)")
+    a.hasNot(f, /LSP|MCP|Permission/, "footer drops opencode's LSP/MCP/permission dots (rlmcode has neither)")
   } finally {
     await d.stop()
   }

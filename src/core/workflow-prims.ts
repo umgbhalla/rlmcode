@@ -27,9 +27,9 @@ import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 
 // In-flight concurrency for a parallel() barrier — at most this many nodes run simultaneously;
-// the rest QUEUE (parallelLimit). AX2_ORCH_CONCURRENCY overrides; default 8 (clamped 1..100).
+// the rest QUEUE (parallelLimit). RLM_ORCH_CONCURRENCY overrides; default 8 (clamped 1..100).
 const ORCH_CONCURRENCY = (() => {
-  const v = Number(process.env.AX2_ORCH_CONCURRENCY ?? 8)
+  const v = Number(process.env.RLM_ORCH_CONCURRENCY ?? 8)
   return Number.isFinite(v) ? Math.min(100, Math.max(1, Math.floor(v))) : 8
 })()
 
@@ -77,7 +77,7 @@ export type WorkflowPrims = {
 // the boundary state the tool handler supplies (the same shape rlm-workflow.ts's boundary()
 // mints): ai = the shared service, rootId = the tree root the nodes nest under, budget = the
 // advisory ceiling, signal = the turn's abort, choice = the default per-node model routing.
-// `args` is the script's input (usually undefined for ax2 self-orchestration).
+// `args` is the script's input (usually undefined for rlmcode self-orchestration).
 export const buildWorkflowPrims = (
   ai: AxAIService,
   rootId: string,
@@ -267,7 +267,7 @@ export const buildWorkflowPrims = (
     remaining: () => (refresh(), remainingSnapshot),
   }
 
-  // `args` is the script's input — always undefined for ax2 self-orchestration (the model
+  // `args` is the script's input — always undefined for rlmcode self-orchestration (the model
   // authors the whole script body; there is no separate input payload). Kept on the prim surface
   // for assistant-Workflow-API parity.
   return { phase, log, agent, parallel, pipeline, judge, rlm, budget: budgetView, args: undefined }

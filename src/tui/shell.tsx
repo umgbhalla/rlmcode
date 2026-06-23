@@ -6,7 +6,7 @@
 //     pinned composer; termcast list.tsx :1887-1929 flexShrink:0 footer slot).
 //   - <ActionBar>: the footer action-bar — cwd (left) · token/cost + "Cmd+K commands" (right),
 //     justifyContent:space-between, flexShrink:0 (opencode footer.tsx:52-91 layout). DELIBERATELY
-//     DROPS opencode's LSP/MCP/permission dots — ax2 has neither subsystem (SPEC).
+//     DROPS opencode's LSP/MCP/permission dots — rlmcode has neither subsystem (SPEC).
 import { type ResolvedTheme } from "./theme.ts"
 
 // cwd shortened to "~/…/leaf" style so the action-bar stays a single quiet line. The home
@@ -19,7 +19,7 @@ export const shortCwd = (cwd: string, home: string): string => {
 }
 
 // Cost-meter for the action-bar: total tokens summed over the session's settled turns, plus a
-// rough USD estimate. ax2 has no real per-token price table (CF Workers AI is flat/free in
+// rough USD estimate. rlmcode has no real per-token price table (CF Workers AI is flat/free in
 // dev), so cost is a coarse blended estimate — surfaced so the bar carries the "token/cost"
 // the SPEC asks for, not a billing-grade figure.
 // ponytail: flat blended $/Mtok constant (no per-model price table).

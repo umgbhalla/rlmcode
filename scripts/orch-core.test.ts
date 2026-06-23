@@ -90,7 +90,7 @@ await (async () => {
   // 3b) runNode() GRACEFUL-FINALIZE CLEANER (the degenerate maxSteps<=1 case): when the
   // first forward returns kimi's RAW tool-call SENTINEL tokens as text (not prose), runNode
   // runs ONE no-tools NUDGE forward on the SAME mem and swaps in the nudged reply ONLY if it
-  // is clean. This unit-tests that path off-LLM (the live probe is AX2_LIVE-gated and cannot
+  // is clean. This unit-tests that path off-LLM (the live probe is RLM_LIVE-gated and cannot
   // run in CI). A scripted fake gen returns the sentinel on call 1 and clean prose on call 2,
   // and RECORDS the opts of each forward so we can assert the nudge ran with functionCall:'none'
   // + maxSteps:1 (the last-resort cleaner contract).

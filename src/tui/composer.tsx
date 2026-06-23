@@ -121,7 +121,7 @@ export function Composer({
           placeholderColor={theme.muted}
         />
       </box>
-      {/* 2. metadata row — model name (LSP/MCP dropped: ax2 has neither) */}
+      {/* 2. metadata row — model name (LSP/MCP dropped: rlmcode has neither) */}
       <box flexDirection="row" gap={1} style={{ paddingLeft: 2, flexShrink: 0 }}>
         <text fg={theme.textMuted}>{modelLabel(model)}</text>
       </box>

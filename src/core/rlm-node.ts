@@ -1,6 +1,6 @@
 // RLM NODE — a node-kind callable via the rlm() prim in workflow({script}). `runRlm` is
 // the context-mining node: a REAL single-level @ax-llm/ax RLM (the distiller → executor →
-// responder loop over runtime-held context), bridged into ax2's live node-event tree as one
+// responder loop over runtime-held context), bridged into rlmcode's live node-event tree as one
 // prim among agent/parallel/pipeline/judge, so it renders NESTED under the chat.turn span.
 // It is NOT a standalone tool and NOT invoked via a fixed strategy-menu: the workflow-prims.ts
 // rlm() binding invokes it directly, on the SAME event bus / budget / trace.
@@ -16,7 +16,7 @@
 //      a prim binding, not an AxFunction on the chat gen. The agent()/rlm() prim nodes carry only
 //      BASE_TOOLS (file/shell), so a node cannot re-orchestrate. The
 //      RLM's own executor runs JS in the AxJSRuntime sandbox (TIMING permission only —
-//      no network/fs/process); it has NO ax2 file/shell tools and cannot re-orchestrate.
+//      no network/fs/process); it has NO rlmcode file/shell tools and cannot re-orchestrate.
 //   2. BUDGET ceiling (ADVISORY/soft): the RLM runs under its OWN allocate(SOFT, HARD);
 //      usage is charged PER EXECUTOR TURN off actorTurnCallback.usage (streamed live), not
 //      once-after. Crossing the SOFT line only nudges — the RLM answer is ALWAYS returned.
@@ -50,11 +50,11 @@ import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 // many executor turns + sub-LM queries, so ~2M is a sane "this run is getting big" marker.
 // Charged PER EXECUTOR TURN off actorTurnCallback.usage (streamed live) — crossing it only
 // nudges; the RLM answer is ALWAYS returned (the soft-budget root-cause fix).
-const RLM_TOKEN_BUDGET = Number(process.env.AX2_RLM_TOKEN_BUDGET ?? 2_000_000)
+const RLM_TOKEN_BUDGET = Number(process.env.RLM_RLM_TOKEN_BUDGET ?? 2_000_000)
 
 // HARD runaway backstop — the ONLY ceiling that aborts (BudgetExhaustedError). Very high
 // (~20M) so a single genuine RLM run never trips it; it only catches a true runaway loop.
-const RLM_TOKEN_HARD = Number(process.env.AX2_RLM_TOKEN_HARD ?? 20_000_000)
+const RLM_TOKEN_HARD = Number(process.env.RLM_RLM_TOKEN_HARD ?? 20_000_000)
 
 // Wall-clock TIMEOUT for a whole RLM run. The per-NODE LEAF_TIMEOUT_MS (120s, orch-resilience)
 // is the wrong backstop for an RLM: it explores a big blob across MANY executor turns +
@@ -63,9 +63,9 @@ const RLM_TOKEN_HARD = Number(process.env.AX2_RLM_TOKEN_HARD ?? 20_000_000)
 // never actually applied — but we add a MUCH larger, RLM-specific ceiling here as the real
 // backstop against a hung run, while still honoring the turn's abortSignal for a true cancel
 // (withTimeout forks a child signal off `signal`, so cancel + timeout both abort the forward).
-// AX2_RLM_TIMEOUT_MS overrides; default 600s. Clamped to a sane floor.
+// RLM_RLM_TIMEOUT_MS overrides; default 600s. Clamped to a sane floor.
 const RLM_TIMEOUT_MS = (() => {
-  const v = Number(process.env.AX2_RLM_TIMEOUT_MS ?? 600_000)
+  const v = Number(process.env.RLM_RLM_TIMEOUT_MS ?? 600_000)
   return Number.isFinite(v) && v > 0 ? Math.max(10_000, Math.floor(v)) : 600_000
 })()
 

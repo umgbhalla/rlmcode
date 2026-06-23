@@ -4,7 +4,7 @@
 // atom, just a module-local list the input handler walks with up/down.
 import { appendFileSync, existsSync, readFileSync } from "node:fs"
 
-const FILE = ".ax2_history.jsonl"
+const FILE = ".rlmcode_history.jsonl"
 const CAP = 50
 
 const load = (): string[] => {

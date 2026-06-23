@@ -23,7 +23,7 @@ import * as Layer from "effect/Layer"
 import * as ManagedRuntime from "effect/ManagedRuntime"
 import * as Atom from "effect/unstable/reactivity/Atom"
 
-export const SERVICE_NAME = "ax2-chat"
+export const SERVICE_NAME = "rlmcode"
 export const SERVICE_VERSION = "0.1.0"
 
 const BASE = process.env.MOTEL_OTLP_URL ?? "http://127.0.0.1:27686"
@@ -39,7 +39,7 @@ const resourceCfg = {
   serviceVersion: SERVICE_VERSION,
   attributes: {
     "deployment.environment.name": "local",
-    "service.instance.id": "ax2.local",
+    "service.instance.id": "rlmcode.local",
   },
 }
 

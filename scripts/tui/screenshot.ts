@@ -1,5 +1,5 @@
 // TUI SCREENSHOT/RECORDING CAPTURE — drives the REAL chat.tsx headlessly under terminal-control
-// (AX2_MOCK=1, zero network) into a rich EXPANDED state (new session → a turn → the orchestration
+// (RLM_MOCK=1, zero network) into a rich EXPANDED state (new session → a turn → the orchestration
 // node-tree fully expanded with per-node tool clusters → streaming reply), and writes the captured
 // cell-grid frame to assets/demo-frame.txt. Used for the README screenshot; the vhs .tape
 // (assets/demo.tape) renders the animated gif from the same flow.
@@ -15,7 +15,7 @@ const OUT = process.env.SHOT_OUT ?? "assets/demo-frame.txt"
 
 const main = async (): Promise<void> => {
   // No velocity cap → the full node tree shows (the showpiece). Stream on for the thinking block.
-  const d = await launchDriver({ cols: COLS, rows: ROWS, env: { AX2_MOCK_STREAM: "1", AX2_ORCH_MAX_SHOWN: "999" } })
+  const d = await launchDriver({ cols: COLS, rows: ROWS, env: { RLM_MOCK_STREAM: "1", RLM_ORCH_MAX_SHOWN: "999" } })
   try {
     await d.waitForFrame((f) => /press n|SESSIONS|no sessions/i.test(f), 8000)
     await d.key("n") // new session

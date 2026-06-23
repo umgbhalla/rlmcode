@@ -13,9 +13,9 @@ Set Padding 24
 Set Margin 12
 Set BorderRadius 10
 
-Env AX2_MOCK "1"
-Env AX2_MOCK_STREAM "1"
-Env AX2_ORCH_MAX_SHOWN "999"
+Env RLM_MOCK "1"
+Env RLM_MOCK_STREAM "1"
+Env RLM_ORCH_MAX_SHOWN "999"
 
 Hide
 Type "bun src/tui/chat.tsx" Enter

@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 // FRAME GATE — ICONS. Proves the lifted icon map (src/tui/icons.ts, a name→terminal-safe
-// glyph Record + getIconShape with a ● fallback, the termcast subset ax2 renders) actually
+// glyph Record + getIconShape with a ● fallback, the termcast subset rlmcode renders) actually
 // PAINTS through the live app — not merely compiles. Two halves:
 //
-//  1. UNIT: getIconShape resolves the ax2 render roles to the right glyph and falls back to
+//  1. UNIT: getIconShape resolves the rlmcode render roles to the right glyph and falls back to
 //     ● for an unknown name (the termcast contract).
 //  2. FRAME: an ORCHESTRATE turn routes the node status + tool glyphs through getIconShape
 //     (orch-tree.glyphOf / moreRow, toolui.toolIcon). We capture the LIVE frame and assert
@@ -15,7 +15,7 @@ import { launchDriver } from "./driver.ts"
 import { report } from "./assert.ts"
 
 await report("icons.test", async (a) => {
-  // ── 1. UNIT — the map resolves ax2's roles + the ● fallback ──────────────────────────
+  // ── 1. UNIT — the map resolves rlmcode's roles + the ● fallback ──────────────────────────
   a.ok(getIconShape("error") === "✗", "getIconShape('error') === ✗")
   a.ok(getIconShape("done") === "✓", "getIconShape('done') === ✓")
   a.ok(getIconShape("running") === "◌", "getIconShape('running') === ◌")
@@ -29,9 +29,9 @@ await report("icons.test", async (a) => {
   a.ok(getIconShape("nope-unknown") === "●", "unknown name falls back to ●")
 
   // ── 2. FRAME — the node-status glyphs PAINT in the live orch tree ─────────────────────
-  // A tight velocity cap (AX2_ORCH_MAX_SHOWN=2) makes research's 3 children collapse into a
+  // A tight velocity cap (RLM_ORCH_MAX_SHOWN=2) makes research's 3 children collapse into a
   // "┄ +1 earlier" marker, so the icon-sourced ┄ is on-screen alongside the ✓/✗ glyphs.
-  const d = await launchDriver({ env: { AX2_ORCH_MAX_SHOWN: "2" } })
+  const d = await launchDriver({ env: { RLM_ORCH_MAX_SHOWN: "2" } })
   try {
     await d.waitFor((f) => /no sessions/.test(f), { label: "list" })
     await d.type("n")

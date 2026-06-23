@@ -7,7 +7,7 @@ Thanks for your interest. The full engineering contract lives in [AGENTS.md](AGE
 
 ```bash
 bun install
-cp .env.example .env   # fill in CF creds, or use AX2_MOCK=1 to skip them
+cp .env.example .env   # fill in CF creds, or use RLM_MOCK=1 to skip them
 ```
 
 ## The loop

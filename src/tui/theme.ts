@@ -4,10 +4,10 @@
 // Shape ported from termcast's ResolvedTheme (../termcast/src/themes.ts) so the token
 // vocabulary matches the opencode/termcast-grade shell the rest of the TUI migrates toward
 // (text/textMuted/background/backgroundPanel/backgroundElement/primary/accent/border/
-// borderActive/success/warning/error/info + the markdown/diff tokens ax2 actually renders).
+// borderActive/success/warning/error/info + the markdown/diff tokens rlmcode actually renders).
 // Catppuccin-Mocha is the ONE default palette — chosen to MATCH the colors already shipped,
 // so this is a pure re-shape: every hex below is byte-identical to what chat.tsx rendered
-// before, just named by termcast role. The legacy ax2 role names (subtext/dim/faint/ok/busy/
+// before, just named by termcast role. The legacy rlmcode role names (subtext/dim/faint/ok/busy/
 // focus/white) are kept as ALIASES onto the same hexes so chat.tsx / orch-tree.ts need no
 // edit beyond the existing `import { theme }`.
 //
@@ -60,17 +60,17 @@ export type ResolvedTheme = {
   // Border
   readonly border: string
   readonly borderActive: string
-  // Diff (the subset ax2's tool previews / native <diff> drive)
+  // Diff (the subset rlmcode's tool previews / native <diff> drive)
   readonly diffAdded: string
   readonly diffRemoved: string
   readonly diffContext: string
-  // Markdown (the subset ax2's reply <markdown> drives)
+  // Markdown (the subset rlmcode's reply <markdown> drives)
   readonly markdownText: string
   readonly markdownHeading: string
   readonly markdownLink: string
   readonly markdownCode: string
   readonly markdownEmph: string
-  // Legacy ax2 role aliases (kept so existing chat.tsx / orch-tree.ts attrs resolve unchanged)
+  // Legacy rlmcode role aliases (kept so existing chat.tsx / orch-tree.ts attrs resolve unchanged)
   readonly subtext: string
   readonly muted: string
   readonly dim: string
@@ -81,7 +81,7 @@ export type ResolvedTheme = {
   readonly white: string
 }
 
-// The ONE default palette. Every value MATCHES the colors ax2 already shipped (the render is
+// The ONE default palette. Every value MATCHES the colors rlmcode already shipped (the render is
 // byte-identical); the new termcast-role names are added alongside the legacy aliases.
 const catppuccinMocha: ResolvedTheme = {
   // Text
@@ -93,7 +93,7 @@ const catppuccinMocha: ResolvedTheme = {
   backgroundElement: mocha.surface0, // raised element (selected row)
   // Primary / accent
   primary: mocha.blue, // brand / interactive primary
-  accent: "#66aaff", // user message / composer border / cursor (legacy ax2 accent)
+  accent: "#66aaff", // user message / composer border / cursor (legacy rlmcode accent)
   // Semantic
   info: mocha.blue,
   success: mocha.green, // success / agent reply marker  (== legacy `ok`)
@@ -112,18 +112,18 @@ const catppuccinMocha: ResolvedTheme = {
   markdownLink: mocha.blue,
   markdownCode: mocha.teal,
   markdownEmph: mocha.lavender,
-  // Legacy ax2 role aliases — same hexes as before, kept so no other file needs editing.
+  // Legacy rlmcode role aliases — same hexes as before, kept so no other file needs editing.
   subtext: mocha.overlay2, // step narration
   muted: mocha.overlay1, // status / idle hints
   dim: mocha.overlay0, // secondary meta (thinking, group summary, σ)
   faint: mocha.surface2, // faint gutter / streamed-thinking body
   ok: mocha.green, // success / agent reply marker
-  busy: "#ffd166", // in-flight spinner / budget warning (legacy ax2 busy)
+  busy: "#ffd166", // in-flight spinner / budget warning (legacy rlmcode busy)
   focus: mocha.yellow, // keyboard focus ❯ gutter
   white: mocha.white, // tool icon high-contrast
 }
 
-// getTheme(): the module-const accessor (no useStore — ax2 has one palette). Returns the
+// getTheme(): the module-const accessor (no useStore — rlmcode has one palette). Returns the
 // resolved token object; the single source of truth for every color in the TUI.
 export const getTheme = (): ResolvedTheme => catppuccinMocha
 

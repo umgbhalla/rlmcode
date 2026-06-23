@@ -52,7 +52,7 @@ const resolveCoreTarget = (importerPath: string, specifier: string, resolved?: s
 // examples/sdk-usage.ts, outside the src/-only scan) — a root so its public-API
 // re-exports aren't flagged dead.
 // src/mock.ts + src/mock-ai.ts = the NARROW test-only mock seam (the deterministic AI +
-// canned node feed). Consumed by scripts/tui/*.test.ts and the agent.ts AX2_MOCK runtime
+// canned node feed). Consumed by scripts/tui/*.test.ts and the agent.ts RLM_MOCK runtime
 // swap — the tests OUTSIDE the src/-only scan — so they're roots, like sdk.ts, lest their
 // seam surface (MOCK_NODES / makeMockAI / MOCK_FIXTURE) be pruned to its in-src callers.
 // src/tui/ui/* = the lifted termcast UI atoms (Spinner / Row / useEvent / useAnimationTick) —

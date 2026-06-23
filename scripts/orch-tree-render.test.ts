@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Golden test for the VELOCITY UNICODE TREE flatten() (src/tui/orch-tree.ts). Plain
-// asserts, no framework (ax2 style — see design-check.test.ts). Builds a known tree
+// asserts, no framework (rlmcode style — see design-check.test.ts). Builds a known tree
 // (fan-out + nested children + an error node + a COLLAPSED settled subtree) and asserts
 // the EXACT connector prefixes (├─ │ └─ blanks), render order, and the per-node payload
 // (glyph, tools ring, collapsed tool-count label, expansion) the renderer depends on.

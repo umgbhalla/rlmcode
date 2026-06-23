@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// FRAME GATE — COMPOSER. Mounts the REAL chat.tsx headlessly (terminal-control PTY + AX2_MOCK)
+// FRAME GATE — COMPOSER. Mounts the REAL chat.tsx headlessly (terminal-control PTY + RLM_MOCK)
 // and asserts the composer card (composer.tsx, opencode prompt/index.tsx:1403-1762 ported):
 //   - the bordered textarea (left │ border) + its "message kimi" placeholder,
 //   - the METADATA row (the model name leaf — "kimi-k2.7-code"),
@@ -34,7 +34,7 @@ await report("composer.test", async (a) => {
     a.has(composer, "message kimi", "composer placeholder visible (input focused)")
     a.has(composer, "kimi-k2.7-code", "composer METADATA row shows the model name")
     a.has(composer, /tok ·.*\$.* · Cmd\+K commands/, "composer STATUS row shows the token·cost / Cmd+K cluster")
-    a.hasNot(composer, /LSP|MCP|Permission/, "composer drops opencode's LSP/MCP/permission dots (ax2 has neither)")
+    a.hasNot(composer, /LSP|MCP|Permission/, "composer drops opencode's LSP/MCP/permission dots (rlmcode has neither)")
 
     // ── send a message → reply lands; then CLICK a transcript row and confirm STILL typable ──
     await d.type("hello composer")

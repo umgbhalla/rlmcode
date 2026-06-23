@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// LIVE telemetry verification (telemetry leaps 1/2/2b/3). GATED behind AX2_LIVE=1.
+// LIVE telemetry verification (telemetry leaps 1/2/2b/3). GATED behind RLM_LIVE=1.
 // Drives the REAL run_rlm path against CF-Kimi, capturing spans into an InMemorySpanExporter
 // so we can PROVE: (2b) >1 child span under run_rlm (the internal stages — distiller /
 // executor turns / responder — are no longer one black box); and we read reasoning tokens +
@@ -26,8 +26,8 @@ const buildLiveAi = (): AxAIService => {
   return svc
 }
 
-if (process.env.AX2_LIVE !== "1") {
-  console.log("telemetry-live.test: skipped: set AX2_LIVE=1")
+if (process.env.RLM_LIVE !== "1") {
+  console.log("telemetry-live.test: skipped: set RLM_LIVE=1")
   process.exit(0)
 }
 

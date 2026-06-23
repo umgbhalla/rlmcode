@@ -1,4 +1,4 @@
-// Runnable headless SDK smoke: an EXTERNAL caller drives the ax2 core with NO Cloudflare env and
+// Runnable headless SDK smoke: an EXTERNAL caller drives the rlmcode core with NO Cloudflare env and
 // NO Effect / OTel / @effect/atom wiring. Proves the public barrel (src/core/sdk.ts): createAgent
 // over a caller-supplied AxAIService, then runTurn as a PLAIN AsyncGenerator (for-await-of). This
 // file is the regression gate for the whole extraction — it imports ONLY the public surface.
@@ -8,7 +8,7 @@ import { AxMockAIService } from "@ax-llm/ax"
 // The ENTIRE surface a caller needs comes from the barrel — no reaching into internals.
 import { type AxAIService, createAgent } from "../src/core/sdk.ts"
 
-// ── plain ax2-style assertions ──────────────────────────────────────────────────
+// ── plain rlmcode-style assertions ──────────────────────────────────────────────────
 let failed = 0
 const assert = (cond: boolean, msg: string) => {
   if (!cond) {

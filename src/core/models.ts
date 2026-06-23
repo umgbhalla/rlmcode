@@ -76,9 +76,9 @@ export const resolveModel = (name?: string): ModelEntry => {
 // models that spend completion tokens on reasoning FIRST, a small maxTokens leaves no
 // room for real `content` (verified: empty content at max_tokens=64). This floor
 // guarantees a thinking node always has budget to emit output AFTER its reasoning.
-// AX2_NODE_MAX_TOKENS overrides; default 8192 (ample for a node's text reply + thinking).
+// RLM_NODE_MAX_TOKENS overrides; default 8192 (ample for a node's text reply + thinking).
 export const NODE_MAX_TOKENS = (() => {
-  const v = Number(process.env.AX2_NODE_MAX_TOKENS ?? 8192)
+  const v = Number(process.env.RLM_NODE_MAX_TOKENS ?? 8192)
   return Number.isFinite(v) && v > 0 ? Math.max(1024, Math.floor(v)) : 8192
 })()
 

@@ -2,7 +2,7 @@
 // FRAME GATE — THEME. Proves the theme re-shape (src/tui/theme.ts lifted to a termcast-style
 // ResolvedTheme token object, Catppuccin-Mocha as the ONE default palette) is a pure re-skin:
 //
-//  (1) RENDER UNCHANGED — mount the REAL chat.tsx headlessly (terminal-control PTY + AX2_MOCK
+//  (1) RENDER UNCHANGED — mount the REAL chat.tsx headlessly (terminal-control PTY + RLM_MOCK
 //      mock AI, zero Cloudflare), drive a mock turn, and capture a real frame. Every color attr
 //      in chat.tsx / orch-tree.ts resolves through `theme.*`; if the re-shape dropped or renamed
 //      a token the components read, those modules wouldn't compile / the frame wouldn't render

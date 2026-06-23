@@ -16,7 +16,7 @@ import { theme } from "./theme.ts"
 // VELOCITY CAP — max fan-out children shown per node at once (running + most-recent
 // settled); older ones collapse into one "┄ +N earlier" row. ~ORCH_CONCURRENCY worth, so
 // the tree shows roughly what's in flight + just-finished, not a 100-branch wall.
-export const ORCH_MAX_SHOWN = Number(process.env.AX2_ORCH_MAX_SHOWN ?? 8)
+export const ORCH_MAX_SHOWN = Number(process.env.RLM_ORCH_MAX_SHOWN ?? 8)
 
 // COST-METER token formatter shared with chat.tsx's turn meta — kept here as the type so
 // WorkflowPart can format the Σ footer without importing back into chat.tsx.

@@ -1,4 +1,4 @@
-// Tiny shared assert kit for the headless TUI frame tests — ax2 fixture style (plain
+// Tiny shared assert kit for the headless TUI frame tests — rlmcode fixture style (plain
 // asserts, no framework; see scripts/orch-tree-render.test.ts). Each test file imports
 // `report()` and exits non-zero on any failure, so `bun scripts/tui/*.test.ts` is a gate.
 //

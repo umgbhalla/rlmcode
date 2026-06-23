@@ -69,7 +69,7 @@ export interface Agent {
   info(): AgentInfo
 }
 
-const AX2_VERSION = "0.1.0"
+const RLM_VERSION = "0.1.0"
 const AX_VERSION = "22.0.5"
 
 // Resolve the tools option to a concrete AxFunction[] (the internal createAgent's input).
@@ -110,7 +110,7 @@ export function createAgent(options: AgentOptions): Agent {
       tokenBudget,
       toolNames,
       systemPromptChars: SYSTEM_PROMPT_CHARS,
-      version: AX2_VERSION,
+      version: RLM_VERSION,
       axVersion: AX_VERSION,
     }),
   }

@@ -18,8 +18,8 @@
 //
 // Headless: @opentui/core/testing builds a CliRenderer over in-memory streams,
 // so this runs in CI with no TTY. It does NOT call the model, so it needs no
-// .env / AX2_LIVE — but we still gate it behind a flag so `bun run lint` stays
-// fast and deterministic. Run: AX2_FOCUS_LIVE=1 bun scripts/focus-live.test.ts
+// .env / RLM_LIVE — but we still gate it behind a flag so `bun run lint` stays
+// fast and deterministic. Run: RLM_FOCUS_LIVE=1 bun scripts/focus-live.test.ts
 import { testRender } from "@opentui/react/test-utils"
 import { act, useEffect, useRef, useState } from "react"
 import { createElement as h } from "react"
@@ -34,8 +34,8 @@ const assert = (cond: boolean, msg: string) => {
   }
 }
 
-if (process.env.AX2_FOCUS_LIVE !== "1") {
-  console.log("focus-live.test: skipped: set AX2_FOCUS_LIVE=1")
+if (process.env.RLM_FOCUS_LIVE !== "1") {
+  console.log("focus-live.test: skipped: set RLM_FOCUS_LIVE=1")
   process.exit(0)
 }
 
@@ -47,7 +47,7 @@ if (process.env.AX2_FOCUS_LIVE !== "1") {
 // an orchestration re-render. The fix under test: the useEffect keyed on the
 // expansion Set that re-calls taRef.current.focus(). Toggle USE_FIX off to watch
 // (3) fail — proof the assertion actually depends on the fix.
-const USE_FIX = process.env.AX2_FOCUS_NOFIX !== "1"
+const USE_FIX = process.env.RLM_FOCUS_NOFIX !== "1"
 
 function Harness({ onReady }: { onReady: (api: { ta: () => any; other: () => any; row: () => any; clickRow: () => void; nodeCount: () => number }) => void }) {
   const taRef = useRef<any>(null)

@@ -48,10 +48,10 @@ await report("node-tree.test", async (a) => {
 
     // ── VELOCITY ROLLING WINDOW: with a tight cap, a node keeps the last N children +
     // collapses the older into one "┄ +M earlier" row (the fan-out wall guard). A second
-    // mount with AX2_ORCH_MAX_SHOWN=2 makes research (3 kids) show 2 + "+1 earlier". The Σ
+    // mount with RLM_ORCH_MAX_SHOWN=2 makes research (3 kids) show 2 + "+1 earlier". The Σ
     // still counts ALL nodes (the hidden ones aren't dropped, just folded). ────────────
     await d.stop()
-    const capped = await launchDriver({ env: { AX2_ORCH_MAX_SHOWN: "2" } })
+    const capped = await launchDriver({ env: { RLM_ORCH_MAX_SHOWN: "2" } })
     try {
       await capped.waitFor((f) => /no sessions/.test(f))
       await capped.type("n")

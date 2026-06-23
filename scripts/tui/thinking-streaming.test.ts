@@ -4,7 +4,7 @@
 // replyDelta; atoms grows the in-flight message; chat.tsx renders the live thinking block +
 // streamed reply). This test drives that REAL streaming path with a REAL ax stream — no fake.
 //
-// THE STREAM IS REAL (not faked): under AX2_MOCK_STREAM=1 the mock's FINAL reply step returns
+// THE STREAM IS REAL (not faked): under RLM_MOCK_STREAM=1 the mock's FINAL reply step returns
 // a ReadableStream<AxChatResponse> (ax's documented streaming surface, mock-ai.ts) whose
 // chunks carry the cumulative `thought` first (reasoning_content) then incremental `content`
 // pieces. ax consumes it as a stream and fires the SAME per-chunk logger the CF-Kimi stream
@@ -20,8 +20,8 @@ import { launchDriver } from "./driver.ts"
 import { report } from "./assert.ts"
 
 await report("thinking-streaming.test", async (a) => {
-  // ── STREAMING (AX2_MOCK_STREAM=1): the live thinking block + streamed reply render ──────
-  const d = await launchDriver({ env: { AX2_MOCK_STREAM: "1" } })
+  // ── STREAMING (RLM_MOCK_STREAM=1): the live thinking block + streamed reply render ──────
+  const d = await launchDriver({ env: { RLM_MOCK_STREAM: "1" } })
   try {
     await d.waitFor((f) => /no sessions/.test(f), { label: "list" })
     await d.type("n")

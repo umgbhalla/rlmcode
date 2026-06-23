@@ -1,7 +1,7 @@
 // DETERMINISTIC MOCK FEED — the canned NodeEvent script so the orch tree renders from
 // fixed data with NO forward()/network. TEST-ONLY: consumed by scripts/tui/mock.test.ts
 // (outside the src/-only design-check scan, so mock.ts is an ENTRY root there). The
-// zero-network AI itself lives in mock-ai.ts; the agent.ts AX2_MOCK seam mounts it. Keep
+// zero-network AI itself lives in mock-ai.ts; the agent.ts RLM_MOCK seam mounts it. Keep
 // this SMALL — fixtures, not a second provider.
 import type { AxFunction } from "@ax-llm/ax"
 import type { Activity } from "./activity.ts"
@@ -65,7 +65,7 @@ const feedMockNodes = (emit: ActivitySink): void => {
   }
 }
 
-// TEST-ONLY orch tool (registered into the mock chat gen's toolset under the AX2_MOCK seam
+// TEST-ONLY orch tool (registered into the mock chat gen's toolset under the RLM_MOCK seam
 // in agent.ts). When the mock AI scripts a call to it, it replays MOCK_NODES through the PER-TURN
 // emit (recovered via getTurnEmit(sessionId) — ax forwards only a fixed extra to a tool func) so
 // the orch-tree frame renders from canned data. Returns a fixed string so the tool loop settles

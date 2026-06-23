@@ -15,15 +15,15 @@ export const MODEL = KIMI
 
 // SERVICE-LEVEL throttle: a min-interval (token-free) rate limiter attached to the CF-Kimi
 // service so even an unbounded `parallel` fan-out (or many concurrent turns) never fires
-// faster than AX2_MAX_RPS requests/second at the CF API. This is the SECOND throttle layer
+// faster than RLM_MAX_RPS requests/second at the CF API. This is the SECOND throttle layer
 // under parallelLimit (orch-recipes.ts) — parallelLimit caps how many forwards are IN FLIGHT;
 // this caps how FAST they start. minIntervalRateLimiter serializes the start of each forward
 // behind a shared `next-allowed` clock: each reqFunc waits until at least 1/RPS seconds after
 // the previous one began, then runs. AxRateLimiterFunction must return the reqFunc's result
 // (Promise or stream) — we just delay, then call through. Default 12 RPS (sensible for CF
-// Workers AI); AX2_MAX_RPS overrides. Clamped to >= 0.1 so a bad env never divides by zero.
+// Workers AI); RLM_MAX_RPS overrides. Clamped to >= 0.1 so a bad env never divides by zero.
 const MAX_RPS = (() => {
-  const v = Number(process.env.AX2_MAX_RPS ?? 12)
+  const v = Number(process.env.RLM_MAX_RPS ?? 12)
   return Number.isFinite(v) && v > 0 ? Math.max(0.1, v) : 12
 })()
 const minIntervalRateLimiter = (rps: number): AxRateLimiterFunction => {
@@ -63,12 +63,12 @@ export const BASE_PROMPT = [
   MODEL_DOC,
 ].join(" ")
 
-const MAX_STEPS = Number(process.env.AX2_MAX_STEPS ?? 50) // max tool-call iterations per turn
+const MAX_STEPS = Number(process.env.RLM_MAX_STEPS ?? 50) // max tool-call iterations per turn
 // Hard per-turn TOKEN ceiling, enforced by orch's Budget (charged after each node
 // from the forward result's usage). Distinct from MAX_STEPS (tool-call iterations,
 // still recovered by turn() in agent.ts): this is a real token gate that throws
 // BudgetExhaustedError when a turn's cumulative usage crosses it.
-const TOKEN_BUDGET = Number(process.env.AX2_TOKEN_BUDGET ?? 2_000_000)
+const TOKEN_BUDGET = Number(process.env.RLM_TOKEN_BUDGET ?? 2_000_000)
 
 // The shared AI service. Exported so turn() (agent.ts) and the rlm-workflow driver
 // (rlm-workflow.ts) drive the SAME provider — one
@@ -77,11 +77,11 @@ const TOKEN_BUDGET = Number(process.env.AX2_TOKEN_BUDGET ?? 2_000_000)
 // in place). The finish-reason capture fetch is NO LONGER set here — it is now a
 // PER-TURN forward option (a per-turn capture wrapper threaded into each turn's
 // forward opts), so the latch is per-turn (concurrency-safe), not a service mutation.
-// NARROW TEST-ONLY SEAM (off in prod): AX2_MOCK=1 swaps the eagerly-constructed CF
+// NARROW TEST-ONLY SEAM (off in prod): RLM_MOCK=1 swaps the eagerly-constructed CF
 // service for the canned mock AI (mock-ai.ts — zero network). Without this, `ai({…})`
 // throws "OpenAI API key not set" at module load when the CF env is absent, so a headless
 // harness (no .env) can't even boot chat.tsx. Unset ⇒ the unchanged CF construction.
-export const llm: AxAIService = process.env.AX2_MOCK === "1"
+export const llm: AxAIService = process.env.RLM_MOCK === "1"
   ? makeMockAI()
   : ai({
       name: "openai",

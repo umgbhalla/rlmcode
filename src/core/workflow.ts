@@ -28,8 +28,8 @@ import { buildWorkflowPrims, type WorkflowPrims } from "./workflow-prims.ts"
 // Per-workflow SOFT token ceiling (advisory nudge line) + HARD runaway backstop (the ONLY one
 // that throws). Same budget shape as rlm-workflow.ts — a real exploration run spends 70k–400k
 // tokens, so ~2M is a sane "getting big" marker and ~20M only catches a true runaway loop.
-const WF_TOKEN_BUDGET = Number(process.env.AX2_ORCH_TOKEN_BUDGET ?? 2_000_000)
-const WF_TOKEN_HARD = Number(process.env.AX2_ORCH_TOKEN_HARD ?? 20_000_000)
+const WF_TOKEN_BUDGET = Number(process.env.RLM_ORCH_TOKEN_BUDGET ?? 2_000_000)
+const WF_TOKEN_HARD = Number(process.env.RLM_ORCH_TOKEN_HARD ?? 20_000_000)
 
 const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
 const fmtTok = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k tok` : `${n} tok`)

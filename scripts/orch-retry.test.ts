@@ -13,8 +13,8 @@ import { AxFunctionError, type AxAIService, type AxGen } from "@ax-llm/ax"
 // Fast, deterministic backoff so the headless test runs in well under a second. These must
 // be set BEFORE orch-recipes.ts is evaluated (it reads them at module-load), so we set them
 // here and dynamic-import the recipes below — static imports would hoist above this.
-process.env.AX2_NODE_BACKOFF_MS = "2"
-process.env.AX2_NODE_RETRIES = "2"
+process.env.RLM_NODE_BACKOFF_MS = "2"
+process.env.RLM_NODE_RETRIES = "2"
 const { NodeTimeoutError, parallelLimit, resilientNode, runNode, withRetry, withTimeout } = await import("../src/core/orch-recipes.ts")
 type EmitSink = import("../src/core/orch-recipes.ts").EmitSink
 const { BudgetExhaustedError } = await import("../src/core/orch.ts")

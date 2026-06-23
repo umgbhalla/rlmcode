@@ -4,7 +4,7 @@
 // canned AI drives a REAL ax tool loop (tool_calls step → tool result → final reply with
 // reasoning_content), yielding the EXACT scripted strings + usage; (2) the canned
 // NodeEvent feed renders through the REAL velocity-tree renderer (flatten) into a stable
-// unicode frame. Plain asserts, no framework — ax2 fixture style (see orch-cost.test).
+// unicode frame. Plain asserts, no framework — rlmcode fixture style (see orch-cost.test).
 import { ax } from "@ax-llm/ax"
 import { AxMemory } from "@ax-llm/ax"
 import { makeMockAI, MOCK_FIXTURE, MOCK_MODEL } from "../../src/core/mock-ai.ts"

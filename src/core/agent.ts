@@ -247,8 +247,8 @@ export const createAgent = (config: AxAgentConfig) => {
         // TEST-ONLY (off in prod): point the mock AI's group-variant tool-CALL feed at THIS
         // turn's emit. The mock service bypasses ax's response logging, so its read/glob/grep
         // cluster's call rows would never reach the live feed otherwise; setMockEmit re-binds the
-        // sink per turn (serialized turns, so no cross-feed). Unset AX2_MOCK ⇒ never called.
-        if (process.env.AX2_MOCK === "1") setMockEmit(emit)
+        // sink per turn (serialized turns, so no cross-feed). Unset RLM_MOCK ⇒ never called.
+        if (process.env.RLM_MOCK === "1") setMockEmit(emit)
         // Stash THIS turn's emit + OTel context by sessionId so a tool handler (workflow/RLM)
         // can recover them: ax forwards a FIXED extra (sessionId/ai/abortSignal/…) to a tool
         // func — NOT arbitrary forward opts — so neither the per-turn `emit` nor the traceContext
@@ -465,8 +465,8 @@ export const createAgent = (config: AxAgentConfig) => {
 // turn()'s exact Effect type (error+context channels) is preserved for callers (run.ts).
 export type AxAgentSDK = ReturnType<typeof createAgent>
 
-// NB: the DEFAULT app agent (the AX2_MOCK env branch + the CF-`llm` construction) is NOT built
+// NB: the DEFAULT app agent (the RLM_MOCK env branch + the CF-`llm` construction) is NOT built
 // here anymore — env coupling is APP wiring, moved to src/app/default-agent.ts (hide #6). This
 // module is pure DI: it exports the createAgent FACTORY; the app picks the concrete service.
-// The test-only mock SEAM that turn() still reads (setMockEmit, gated on AX2_MOCK) stays — it is
+// The test-only mock SEAM that turn() still reads (setMockEmit, gated on RLM_MOCK) stays — it is
 // a per-turn sink rebind, not a service-construction branch.

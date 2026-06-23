@@ -1,4 +1,4 @@
-# ax2 — multi-session TUI coding agent
+# rlmcode — multi-session TUI coding agent
 
 Bun + TypeScript. Effect v4 core, opentui (React) UI, real OpenTelemetry → local
 `motel`. LLM = Cloudflare Workers AI (`@cf/moonshotai/kimi-k2.7-code`) via `@ax-llm/ax`.
@@ -33,13 +33,13 @@ imports count). The TUI consumes the engine ONLY through the barrel + the app ha
     workflow*.ts the in-process `workflow` self-orchestration tool + its primitives
     rlm-node.ts  single-level RLM node (distiller→executor) bridged into the node-event tree
     runtime.ts   per-session turn emit/context Map; generic getUsage probe for orch budgeting
-    mock-ai.ts   canned AxAIService + mock_orch tool (off in prod; `AX2_MOCK=1`)
+    mock-ai.ts   canned AxAIService + mock_orch tool (off in prod; `RLM_MOCK=1`)
     models.ts    model ids + limits
     otel.ts      (`src/otel.ts`) NodeSdk 3-signal → motel; global OTel context; appRuntime
 
 ### `src/app/` — composition layer (the only non-core place allowed to deep-import core)
 
-    default-agent.ts  owns defaultAgent + the AX2_MOCK env branch + CF `llm` construction.
+    default-agent.ts  owns defaultAgent + the RLM_MOCK env branch + CF `llm` construction.
                       Exports the app's pre-wired surface: runTurn (= makeRunTurn(defaultAgent)),
                       abortTurn, projectDocLoaded, sessionsRT/deleteSession. This is where env
                       coupling lives — SDK consumers inject their OWN AxAIService instead.
@@ -61,7 +61,7 @@ imports count). The TUI consumes the engine ONLY through the barrel + the app ha
 
 ## Run
 
-`.env`: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. Opt: `AX2_MAX_STEPS` (default 50).
+`.env`: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. Opt: `RLM_MAX_STEPS` (default 50).
 
     bun run motel        # local motel ingest (127.0.0.1:27686) — NOT npm @kitlangton/motel (broken)
     bun run motel:tui    # motel TUI
@@ -99,7 +99,7 @@ the gate is deterministic (no real timers/network; frame-stable waits) and runs 
 - **`scripts/tui/driver.ts`** — mounts `bun src/tui/chat.tsx` under
   [`terminal-control`](https://github.com/kitlangton/terminal-control) (the PTY driver by
   opentui's author; install the `termctrl` binary via `cargo install`, see below)
-  with `AX2_MOCK=1`, and exposes `{ frame, type, key, click, waitFor, waitForFrame, stop }`. It
+  with `RLM_MOCK=1`, and exposes `{ frame, type, key, click, waitFor, waitForFrame, stop }`. It
   drives the REAL app boot + input/focus path (not an in-process render tree), so the bugs above
   are catchable. Waits use the frame-stable `waitFor` poll, never `setTimeout`-then-assert.
 - **`scripts/tui/*.test.ts`** — `mock` (the deterministic mock unit, no PTY), then `smoke`,
@@ -107,12 +107,12 @@ the gate is deterministic (no real timers/network; frame-stable waits) and runs 
   `tool-grouping-steps`. Each asserts STABLE structure (the `❯` focus gutter, `├─ └─ │`
   connectors, the Σ footer, `✗` error cards) over captured frames — not a byte-exact golden
   (the spinner glyph cycles). They run SEQUENTIALLY (`&&`) so PTY mounts never overlap.
-- **Mock layer** (`src/core/mock-ai.ts` + `src/core/mock.ts`, off in prod behind `AX2_MOCK=1`):
+- **Mock layer** (`src/core/mock-ai.ts` + `src/core/mock.ts`, off in prod behind `RLM_MOCK=1`):
   a canned `AxAIService` (zero network) drives the REAL turn loop; a `mock_orch` tool replays
   canned NodeEvents + a per-node tool cluster through the REAL per-turn activity bus so the orch
   tree renders from fixed data. `agent.ts` reads the seam ONCE; unset ⇒ the unchanged CF path.
   The activity bus is PER-TURN (`run.ts` threads each turn's `emit` into `turn()`); under
-  `AX2_MOCK` `setMockEmit(emit)` points the mock's group-variant tool-CALL feed at that sink.
+  `RLM_MOCK` `setMockEmit(emit)` points the mock's group-variant tool-CALL feed at that sink.
 
 ### How to add a TUI test
 

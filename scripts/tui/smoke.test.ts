@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 // FRAME GATE — SMOKE. The minimal proof the harness works end to end: mount the REAL chat.tsx
-// headlessly (terminal-control PTY + AX2_MOCK mock AI, zero Cloudflare/network), capture the
+// headlessly (terminal-control PTY + RLM_MOCK mock AI, zero Cloudflare/network), capture the
 // INITIAL rendered frame via the reusable driver, and assert the session-list prompt is
 // present in that frame. This is the cheapest "does it render + can we assert a real frame"
-// check — if the AX2_MOCK seam or the headless mount breaks, waitForFrame here times out.
+// check — if the RLM_MOCK seam or the headless mount breaks, waitForFrame here times out.
 //
 // Uses the SPEC frame-stable wait (driver.waitForFrame(predicate, deadlineMs)) — NEVER a
 // setTimeout-then-assert — so it is deterministic and flake-free.

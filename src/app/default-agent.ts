@@ -5,7 +5,7 @@
 // process.env and pick a concrete service — that decision lives HERE, not in core. Moving it
 // out of agent.ts (hide #6) keeps the core agent factory pure DI.
 //
-// NARROW TEST-ONLY SEAM (off in prod): AX2_MOCK=1 swaps the CF service for the canned mock AI
+// NARROW TEST-ONLY SEAM (off in prod): RLM_MOCK=1 swaps the CF service for the canned mock AI
 // (mock-ai.ts — zero network), so the headless TUI gate drives the REAL turn loop with no
 // Cloudflare env. The flag is read ONCE here; unset ⇒ the unchanged CF path. mock-ai.ts imports
 // nothing from agent.ts, so the seam introduces no init cycle.
@@ -23,11 +23,11 @@ import { llm, MODEL } from "../core/runtime.ts"
 import { deleteSession, sessionsRT } from "../core/sessions.ts"
 
 // The DEFAULT app agent — constructed ONCE over the CF-Kimi `llm` (runtime.ts) at the app's
-// default model, or the canned mock AI under AX2_MOCK. This is the single construction site the
+// default model, or the canned mock AI under RLM_MOCK. This is the single construction site the
 // TUI pulls its turn boundary from.
 const defaultAgent =
-  process.env.AX2_MOCK === "1"
-    ? createAgent({ ai: makeMockAI(process.env.AX2_MOCK_STREAM === "1"), model: MOCK_MODEL, tools: [...BASE_TOOLS, MOCK_ORCH_TOOL] })
+  process.env.RLM_MOCK === "1"
+    ? createAgent({ ai: makeMockAI(process.env.RLM_MOCK_STREAM === "1"), model: MOCK_MODEL, tools: [...BASE_TOOLS, MOCK_ORCH_TOOL] })
     : createAgent({ ai: llm, model: MODEL })
 
 // The DEFAULT-agent turn boundary used by the TUI's sendAtom: a serializable AsyncGenerator of
