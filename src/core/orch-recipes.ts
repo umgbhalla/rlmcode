@@ -93,7 +93,7 @@ const withNodeLogger = (opts: NodeOpts, nodeId: string): NodeOpts =>
 // Real ax types end-to-end (AxStepHooks / AxStepContext.removeFunctions) — no `any`.
 //
 // The in-loop finalize is clean when the model has done >=1 real tool step before the cap (the
-// realistic case: RLM_MAX_STEPS default 50, verified clean at low caps >=2). At the DEGENERATE cap
+// realistic case: RLM_MAX_STEPS default 24, verified clean at low caps >=2). At the DEGENERATE cap
 // maxSteps=1 (first step is also the last, ZERO prior tool work) kimi, primed by a tool-heavy
 // system prompt, can emit raw `<|tool_call_begin|>` sentinel tokens as text instead of prose — a
 // non-empty but garbage reply. That degenerate shape is now CAUGHT and coerced: runNode() (below)
