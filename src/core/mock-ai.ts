@@ -86,6 +86,16 @@ const wantsOrch = (req: Readonly<AxChatRequest<unknown>>): boolean => {
   return last !== undefined && typeof last.content === "string" && /orchestrate/i.test(last.content)
 }
 
+// FAIL variant: when the user message asks to "fail", scriptedChat THROWS, so the REAL turn
+// loop's catchCause (run.ts errorResult) maps it to a "⚠ …" reply — the deterministic path the
+// transcript ERROR CARD renders (messages.tsx ErrorCard). Keyed off the prompt like the other
+// variants so one scriptedChat covers the error frame test without a real provider failure.
+const wantsFail = (req: Readonly<AxChatRequest<unknown>>): boolean => {
+  const users = req.chatPrompt.filter((m) => m.role === "user")
+  const last = users[users.length - 1]
+  return last !== undefined && typeof last.content === "string" && /\bfail\b/i.test(last.content)
+}
+
 // Fixed usage triple (prompt/completion/total + reasoning) so token meta + cost-meter
 // read deterministic numbers. reasoningTokens drives the THINKING attribution path.
 const MOCK_TOKENS = { promptTokens: 100, completionTokens: 40, totalTokens: 140, reasoningTokens: 25 }
@@ -104,6 +114,8 @@ const hasCurrentTurnToolResult = (req: Readonly<AxChatRequest<unknown>>): boolea
   return req.chatPrompt.slice(lastUser + 1).some((m) => m.role === "function")
 }
 const scriptedChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResponse> => {
+  // FAIL turn: reject so the REAL catchCause maps it to a "⚠ …" reply → the transcript ErrorCard.
+  if (wantsFail(req)) return Promise.reject(new Error("mock turn failed on request"))
   const hasToolResult = hasCurrentTurnToolResult(req)
   // The explore turn fans out the read/glob/grep cluster (grouping path); the orchestrate
   // turn calls mock_orch; everything else runs the single bash step. One call returns one

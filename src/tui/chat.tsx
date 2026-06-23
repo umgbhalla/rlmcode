@@ -8,7 +8,7 @@
 //               · PgUp/PgDn/Home/End scroll · click a ▸/▾ to expand
 //               · Esc back (idle) / Esc-twice interrupt (busy) · select to copy
 import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/atom-react"
-import { createCliRenderer, decodePasteBytes, RenderableEvents, SyntaxStyle, TextAttributes } from "@opentui/core"
+import { createCliRenderer, decodePasteBytes, RenderableEvents, SyntaxStyle } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { abortTurn } from "../app/default-agent.ts"
@@ -19,6 +19,7 @@ import { theme, useTheme } from "./theme.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
 import { flatten, type Row as OrchRow } from "./orch-tree.ts"
 import { ActionBar, actionBarRight, shortCwd } from "./shell.tsx"
+import { AssistantReply, ErrorCard, ThinkingPart, UserCard } from "./messages.tsx"
 
 const mdStyle = SyntaxStyle.create()
 
@@ -46,18 +47,6 @@ const sessionTokens = (messages: readonly Msg[], orch: OrchTree | undefined): nu
   let n = orch?.totalTokens ?? 0
   for (const m of messages) if (m.kind === "agent" && typeof m.meta?.tokens === "number") n += m.meta.tokens
   return n
-}
-
-// Map a provider finishReason to something a human reads (raw "length" etc. is opaque).
-const fmtReason = (r: string): string => (r === "length" ? "truncated (max tokens)" : r)
-
-// Per-turn provenance only (model lives in the status line, not repeated here).
-const fmtMeta = (m: TurnMeta): string => {
-  const parts: string[] = [`${(m.ms / 1000).toFixed(1)}s`]
-  if (typeof m.tokens === "number") parts.push(fmtTokens(m.tokens))
-  if (m.finishReason && m.finishReason !== "stop") parts.push(fmtReason(m.finishReason))
-  if (m.budget) parts.push("stopped: step budget — answer may be incomplete")
-  return parts.join(" · ")
 }
 
 // Whole-second elapsed since a wall-clock start (undefined start -> 0). Recomputed on
@@ -260,9 +249,7 @@ function TurnView({
   const failed = t.final !== null && t.final.startsWith("⚠")
   return (
     <box flexDirection="column" style={{ marginTop: first ? 0 : 1 }}>
-      <box border={["left"]} borderColor={theme.border} style={{ paddingLeft: 1, width: "100%" }}>
-        <text fg={theme.accent}>{t.user}</text>
-      </box>
+      <UserCard text={t.user} />
       {t.steps.length > 0 && (
         <box flexDirection="column" style={{ paddingLeft: INDENT }}>
           <text
@@ -299,42 +286,23 @@ function TurnView({
           )}
         </box>
       )}
-      <ThinkingView t={t} />
-      <ReplyView t={t} failed={failed} />
-    </box>
-  )
-}
-
-// THINKING (reasoning_content): the model's reasoning, rendered LIVE as it streams and KEPT
-// after the reply settles — dim + italic, no fold, no icon, no header (user-specified). Own
-// component so its branch stays outside TurnView's cyclomatic budget. Nothing when no reasoning.
-function ThinkingView({ t }: { t: Turn }) {
-  if (t.thinking === undefined || t.thinking.length === 0) return null
-  return (
-    <box flexDirection="column" style={{ marginTop: 1, paddingLeft: INDENT }}>
-      <text fg={theme.faint} attributes={TextAttributes.ITALIC}>{t.thinking}</text>
-    </box>
-  )
-}
-
-// REPLY: skip the ⏺ row while only thinking has streamed (no reply yet). While streaming,
-// render plain text + █ cursor (markdown mid-stream is janky); markdown once settled. Own
-// component to keep its branches out of TurnView's cyclomatic budget.
-function ReplyView({ t, failed }: { t: Turn; failed: boolean }) {
-  if (t.final === null || (t.final === "" && (t.streaming ?? false))) return null
-  return (
-    <box flexDirection="column" style={{ marginTop: 1 }}>
-      <box flexDirection="row" style={{ width: "100%" }}>
-        <text fg={failed ? theme.error : theme.ok}>{"⏺ "}</text>
-        <box style={{ flexGrow: 1, flexShrink: 1 }}>
-          {failed ? <text fg={theme.error}>{t.final}</text> : t.streaming ? <text fg={theme.text}>{`${t.final}█`}</text> : <markdown content={t.final} syntaxStyle={mdStyle} />}
-        </box>
-      </box>
-      {t.meta && (
-        <box style={{ paddingLeft: INDENT }}>
-          <text fg={t.meta.budget ? theme.busy : theme.muted}>{fmtMeta(t.meta)}</text>
-        </box>
-      )}
+      {/* ASSISTANT CARD (PART_MAPPING dispatch, opencode :1556-1637 ported): reasoning part →
+          ThinkingPart, then text part → AssistantReply (with the "▣ model · duration" footer)
+          OR, when the reply is an interrupted/errored "⚠ …", the red ErrorCard instead. */}
+      <ThinkingPart thinking={t.thinking} />
+      {t.final !== null && !(t.final === "" && (t.streaming ?? false)) ? (
+        failed ? (
+          <ErrorCard text={t.final} />
+        ) : (
+          <AssistantReply
+            text={t.final}
+            meta={t.meta}
+            streaming={t.streaming ?? false}
+            fmtTokens={fmtTokens}
+            renderBody={(content) => <markdown content={content} syntaxStyle={mdStyle} />}
+          />
+        )
+      ) : null}
     </box>
   )
 }

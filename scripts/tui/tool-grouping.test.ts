@@ -18,8 +18,14 @@ await report("tool-grouping.test", async (a) => {
 
     await d.type("orchestrate the scan")
     await d.key("Enter")
-    // Wait for the cluster to land (the ✗ error tool row is the last of the feed).
-    const frame = await d.waitFor((f) => /Bash\(missing-bin\)/.test(f) && /Read\(/.test(f), { label: "tool cluster", timeoutMs: 40000 })
+    // Wait for the cluster to land AND the errored row's summary to settle. The ✗ tool row
+    // appears a render before its `error` summary lands; gating on the marker alone caught a
+    // transitional frame (the error-summary assert below then flaked). Gate on the full
+    // settled error row so the captured frame always carries the summary.
+    const frame = await d.waitFor(
+      (f) => /✗ Bash\(missing-bin\)\s+error/.test(f) && /Read\(/.test(f),
+      { label: "tool cluster (settled error row)", timeoutMs: 40000 },
+    )
 
     // ── the read/glob/grep cluster renders as grouped tool rows (real toolui labels) ────
     a.has(frame, /Read\(src\/auth\.ts\)/, "read_file tool renders as a Read(...) row")
