@@ -21,6 +21,7 @@ import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import { estimatedCostOf, getTurnEmit, llm, makeOnEvent } from "./runtime.ts"
 import { choiceFromArgs } from "./models.ts"
 import { allocate, BudgetExhaustedError } from "./orch.ts"
+import { NodeTimeoutError, withTimeout } from "./orch-recipes.ts"
 import { getTurnContext, setNodeSpanTracer } from "./orch-spans.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 import { buildWorkflowPrims, type WorkflowPrims } from "./workflow-prims.ts"
@@ -31,7 +32,21 @@ import { buildWorkflowPrims, type WorkflowPrims } from "./workflow-prims.ts"
 const WF_TOKEN_BUDGET = Number(process.env.RLM_ORCH_TOKEN_BUDGET ?? 2_000_000)
 const WF_TOKEN_HARD = Number(process.env.RLM_ORCH_TOKEN_HARD ?? 20_000_000)
 
+// WALL-CLOCK ceiling for the whole script body (D2/D5). The token budget is BLIND to CPU
+// runaway — a pure-JS loop makes zero LLM calls, so the HARD token ceiling never trips
+// (D5); a wall-clock cap is the backstop a token ceiling cannot be. A real exploration
+// script runs minutes (each agent/rlm node can take ~1–2 min), so 5 min is a sane ceiling
+// that clears legitimate fan-outs and only catches a genuine hang. RLM_WORKFLOW_TIMEOUT_MS
+// overrides; a non-finite/<=0 env falls back to the default (never disables the guard).
+const WF_TIMEOUT_MS = (() => {
+  const v = Number(process.env.RLM_WORKFLOW_TIMEOUT_MS ?? 300_000)
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : 300_000
+})()
+
 const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
+// Human seconds for the timeout partial: whole seconds at >=10s (e.g. "300s"), one decimal
+// below (e.g. "0.3s") so a small env-tuned ceiling never prints a misleading "0s".
+const fmtSecs = (ms: number): string => (ms >= 10_000 ? `${Math.round(ms / 1000)}s` : `${(ms / 1000).toFixed(1)}s`)
 const fmtTok = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k tok` : `${n} tok`)
 const costFooter = (tokens: number): string => {
   const cost = estimatedCostOf(tokens)
@@ -106,17 +121,33 @@ const workflowTool: AxFunction = {
     try {
       // Run the ENTIRE body inside parentCtx so startNodeSpan's active-span fallback, the prims'
       // captured traceContext, AND the rlm() prim's own active() all resolve to chat.turn.
-      const result = await otelContext.with(parentCtx, () => {
-        onEvent({ type: "start", nodeId: rootId, phase: "workflow" })
-        const prims = buildWorkflowPrims(ai, rootId, budget, signal, choice, emit)
-        return runScript(script, prims)
-      })
+      // WALL-CLOCK CAP (D2/D5): race runScript against WF_TIMEOUT_MS. withTimeout forks a child
+      // signal off the turn's `signal` (so a real cancel AND the deadline both abort), and we
+      // build the prims with that FORKED signal so a timeout also aborts every in-flight node.
+      // On timeout the race rejects with NodeTimeoutError → caught below → a partial string, the
+      // turn never hangs.
+      // ponytail: this wall-clock race interrupts an `await`-yielding loop (the realistic model
+      // hang — a loop awaiting a prim/sleep), but a truly synchronous loop (`while(true){}`, no
+      // await) pins the event loop so the timer can never fire — only a separate worker can preempt
+      // that. The token HARD ceiling is likewise blind to pure-JS CPU (D5), so time is the backstop.
+      // Upgrade: run the script in an AxJSRuntime isolate (a worker the host can terminate), as the
+      // RLM executor already does (rlm-node.ts) — that makes the cap total + realizes D1's sandbox.
+      const result = await otelContext.with(parentCtx, () =>
+        withTimeout(rootId, WF_TIMEOUT_MS, signal, (wfSignal) => {
+          onEvent({ type: "start", nodeId: rootId, phase: "workflow" })
+          const prims = buildWorkflowPrims(ai, rootId, budget, wfSignal, choice, emit)
+          return runScript(script, prims)
+        }),
+      )
       const reply = typeof result === "string" ? result : result === undefined ? "(workflow returned no value)" : (() => { try { return JSON.stringify(result) } catch { return String(result) } })()
       const spent = await budget.spent()
       onEvent({ type: "done", nodeId: rootId, result: clip(reply, 256) })
       return clip(`${reply}\n\n${costFooter(spent)}`)
     } catch (e) {
       onEvent({ type: "error", nodeId: rootId, cause: e })
+      // WALL-CLOCK timeout (D2/D5): the script body ran past WF_TIMEOUT_MS — return a partial,
+      // never hang the turn. (The token budget is blind to CPU runaway, so this is the backstop.)
+      if (e instanceof NodeTimeoutError) return `workflow timed out after ${fmtSecs(WF_TIMEOUT_MS)} — partial (the script ran past its wall-clock ceiling and was stopped)`
       // BUDGET ceiling (advisory — never throws for the soft line): this only fires for a genuine
       // RUNAWAY (the HARD ceiling) or a script error. Return a string, never throw the turn.
       if (e instanceof BudgetExhaustedError) return `partial: the workflow hit its HARD runaway token ceiling (${e.spent}/${e.total}) and was stopped. ${e.reason}.`
