@@ -10,12 +10,13 @@
 import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/atom-react"
 import { createCliRenderer, decodePasteBytes } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
-import { memo, useEffect, useRef, useState } from "react"
+import { memo, useEffect, useMemo, useRef, useState } from "react"
 import { abortTurn } from "../app/default-agent.ts"
 import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, MODEL, newSessionAtom, sendAtom } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
-import { makeSyntaxStyle, theme, useTheme } from "./theme.ts"
+import { makeSyntaxStyle, theme } from "./theme.ts"
+import { ThemeProvider, useTheme, useThemeSwitcher } from "./theme-context.tsx"
 import { FocusGutter, ToolView } from "./tool-view.tsx"
 import { type Row as OrchRow } from "./orch-tree.ts"
 import { ActionBar, shortCwd } from "./shell.tsx"
@@ -34,11 +35,12 @@ import { turnPropsEqual } from "./turn-memo.ts"
 import { List, NewPill, SessionHeader } from "./header.tsx"
 import { fmtTokens, groupSummary, groupSteps, INDENT, navKeyName, oneLine, sessionTokens, SPIN_FRAMES, statusBar, toTurns, toolsUsed, type Turn } from "./chat-model.ts"
 
-// The shared syntax style for the reply <markdown> + the tool <diff>: a SyntaxStyle with every
-// tree-sitter / markup / diff scope registered onto the theme palette (theme.ts makeSyntaxStyle),
-// so fenced ```lang code, markdown headings/bold/inline-code, and diff +/- lines render in the
-// theme's colors instead of the bare SyntaxStyle.create() default (which registered no styles).
-const mdStyle = makeSyntaxStyle()
+// The shared syntax style for the reply <markdown> + the tool <diff> is built INSIDE App via
+// useMemo keyed on the active theme name (theme.ts makeSyntaxStyle over the LIVE palette), so a
+// theme switch rebuilds it (the SyntaxStyle captures hex at registerStyle time — it can't auto-
+// update on the in-place palette mutation). It's threaded into TurnView as a prop (and into NodeRow
+// via the renderNode closure), and is part of the memo comparator so a settled turn recolors on a
+// switch (a new style identity) but NOT on the busy tick (a stable identity across ticks).
 
 // Enter submits, Shift+Enter inserts a newline (override textarea defaults, which
 // are Enter=newline / Cmd+Enter=submit).
@@ -80,6 +82,7 @@ function TurnViewImpl({
   focusedKey,
   cols,
   frame,
+  syntaxStyle,
   onToggleTurn,
   onToggleTool,
   renderNode,
@@ -92,6 +95,9 @@ function TurnViewImpl({
   focusedKey: string | undefined
   cols: number
   frame: string
+  // The shared SyntaxStyle (App rebuilds it on a theme switch); threaded in so a settled turn
+  // recolors on a switch (a new identity flows through the memo comparator) but not on the busy tick.
+  syntaxStyle: unknown
   onToggleTurn: () => void
   onToggleTool: (id: string) => void
   // INLINE NODE-TREE: App injects the node-row renderer (NodeRow, which owns the per-node
@@ -133,7 +139,7 @@ function TurnViewImpl({
                       focused={focusedKey === `tool:${s.id}`}
                       cols={cols}
                       frame={frame}
-                      syntaxStyle={mdStyle}
+                      syntaxStyle={syntaxStyle}
                       onToggle={() => onToggleTool(s.id)}
                     />
                   )
@@ -157,7 +163,7 @@ function TurnViewImpl({
             meta={t.meta}
             streaming={t.streaming ?? false}
             fmtTokens={fmtTokens}
-            renderBody={(content, streaming) => <markdown content={content} syntaxStyle={mdStyle} streaming={streaming} internalBlockMode="top-level" />}
+            renderBody={(content, streaming) => <markdown content={content} syntaxStyle={syntaxStyle as any} streaming={streaming} internalBlockMode="top-level" />}
           />
         )
       ) : null}
@@ -207,6 +213,7 @@ type NodeRowProps = {
   focusedKey: string | undefined
   cols: number
   frame: string
+  syntaxStyle: unknown // the shared SyntaxStyle (rebuilt on a theme switch) for the node's owned-tool diffs
 }
 
 // One flattened node header line: connector prefix + glyph + label + summary + token
@@ -263,7 +270,7 @@ function NodeRow(p: NodeRowProps) {
               {/* align owned tools under their node: the 2-cell focus gutter + body stem + connector */}
               <text fg={theme.dim} selectable={false}>{`  ${row.bodyPrefix}   `}</text>
               <box style={{ flexGrow: 1, flexShrink: 1 }}>
-                <ToolView m={m} expanded={p.expTools.has(m.id)} focused={p.focusedKey === `tool:${m.id}`} cols={p.cols} frame={p.frame} syntaxStyle={mdStyle} onToggle={() => p.onToggleTool(m.id)} />
+                <ToolView m={m} expanded={p.expTools.has(m.id)} focused={p.focusedKey === `tool:${m.id}`} cols={p.cols} frame={p.frame} syntaxStyle={p.syntaxStyle} onToggle={() => p.onToggleTool(m.id)} />
               </box>
             </box>
           ))}
@@ -301,6 +308,13 @@ function App() {
   const [, send] = useAtom(sendAtom)
   const { width, height } = useTerminalDimensions()
   const t = useTheme() // termcast-style hook accessor onto the resolved palette (same tokens as the `theme` const)
+  // THEME SWITCH (the picker): the active name (also the mdStyle rebuild key), the ordered registry
+  // names, and the switch action (live mutate + state bump + persist — theme-context.tsx).
+  const themeCtl = useThemeSwitcher()
+  // The shared SyntaxStyle, rebuilt ONLY when the theme name changes (stable across busy ticks). A
+  // theme switch mutates the live palette in place, but a SyntaxStyle captures its hex at register
+  // time, so it must be rebuilt; keying the memo on the name does exactly that.
+  const mdStyle = useMemo(() => makeSyntaxStyle(), [themeCtl.name])
 
   const [text, setText] = useState("") // mirror of textarea content (for empty-detection)
   const taRef = useRef<any>(null)
@@ -348,14 +362,13 @@ function App() {
   // active session (mirrors the palette's old per-session "Switch:" rows); the model action sets the
   // composer-displayed model id. useDialogs owns BOTH controllers + the kind + the "dialog"-mode key
   // rows (spread into the registry below), so chat.tsx stays under the file ceiling.
-  const dialogs = useDialogs(
-    state.sessions,
-    state.activeId,
-    selectedModel,
-    mode,
-    (id) => setApp((st) => ({ ...st, view: "chat" as const, activeId: id })),
-    (name: ModelName) => setSelectedModel(MODELS[name].id),
-  )
+  const dialogs = useDialogs(state.sessions, state.activeId, selectedModel, mode, {
+    onSwitch: (id) => setApp((st) => ({ ...st, view: "chat" as const, activeId: id })),
+    onModel: (name: ModelName) => setSelectedModel(MODELS[name].id),
+    // THEME PICKER args: the active name (marks the "current" row), the ordered registry names, and
+    // the switch action (live mutate + state bump + persist) — all from useThemeSwitcher above.
+    theme: { name: themeCtl.name, names: themeCtl.names, onTheme: themeCtl.switch },
+  })
   // FOCUS CAPTURE (composer.tsx captureFocus model): true whenever an overlay mode (anything but
   // base) owns the keyboard, so the composer stops reclaiming and yields keystrokes to the
   // registry. This is the gate the captureFocus seam was wired + tested for — now driven off the
@@ -473,6 +486,7 @@ function App() {
       focusedKey={focusedKey}
       cols={width || 80}
       frame={work.frame}
+      syntaxStyle={mdStyle}
     />
   )
 
@@ -633,6 +647,10 @@ function App() {
       ? [{ title: "Switch session…", hint: "s", run: () => void (closePalette(), dialogs.openSession()) }]
       : []),
     { title: "Pick model…", hint: "m", run: () => void (closePalette(), dialogs.openModel()) },
+    // /theme — open the theme picker (the shared DialogSelect): close the palette FIRST, then open
+    // the dialog (same order the session/model pickers use so the overlays never stack). Selecting a
+    // theme switches the palette LIVE + persists the choice (dialogs.tsx → useThemeSwitcher().switch).
+    { title: "Pick theme…", hint: "t", run: () => void (closePalette(), dialogs.openTheme()) },
     { title: "Session list", hint: "esc", run: goToList },
     ...(active ? [{ title: `Close session: ${active.title}`, run: () => void deleteSession(active.id) }] : []),
     { title: "Scroll to bottom", hint: "End", run: () => scrollPage("bottom") },
@@ -889,6 +907,7 @@ function App() {
             focusedKey={focusedKey}
             cols={width || 80}
             frame={work.frame}
+            syntaxStyle={mdStyle}
             onToggleTurn={() => toggleTurn(t.idx)}
             onToggleTool={(id) => toggleTool(id)}
             renderNode={renderNode}
@@ -961,6 +980,10 @@ function App() {
 const renderer = await createCliRenderer({ exitOnCtrlC: true })
 createRoot(renderer).render(
   <RegistryProvider>
-    <App />
+    {/* THEME PROVIDER wraps the whole app so useTheme()/useThemeSwitcher() resolve everywhere and a
+        /theme switch re-renders the tree (the live palette mutate + the React state bump together). */}
+    <ThemeProvider>
+      <App />
+    </ThemeProvider>
   </RegistryProvider>,
 )

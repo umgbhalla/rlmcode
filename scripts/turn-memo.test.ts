@@ -46,11 +46,16 @@ const orch: OrchTree = {
 }
 const settledWf = { ...settled, idx: 2, workflow: orch }
 
+// A stable SyntaxStyle sentinel — App rebuilds the real one only on a theme switch (useMemo keyed on
+// the active theme name), so across busy ticks its IDENTITY is stable. Using one shared object as the
+// default makes `{ ...settled }` (a fresh-Turn re-render) carry the SAME style identity ⇒ the
+// comparator still SKIPS; a DIFFERENT object models a theme switch (must force a repaint).
+const STYLE = { style: "default" }
 // Build a MemoProps with the live interaction inputs (defaults: nothing expanded/focused, cols 80).
 const props = (
   t: MemoProps["t"],
   over: Partial<Omit<MemoProps, "t">> = {},
-): MemoProps => ({ t, first: false, expanded: false, expTools: EMPTY, expNodes: EMPTY, focusedKey: undefined, cols: 80, ...over })
+): MemoProps => ({ t, first: false, expanded: false, expTools: EMPTY, expNodes: EMPTY, focusedKey: undefined, cols: 80, syntaxStyle: STYLE, ...over })
 
 // A turn whose reply is settled but whose workflow still has a RUNNING node (its glyph animates
 // off `frame`) — the orch tree is attached to the last turn, which can settle its reply while a
@@ -93,6 +98,11 @@ ok(
 // content edit (defensive — settled history is immutable, but the key must still detect it)
 ok(!turnPropsEqual(props(settled), props({ ...settled, final: "different reply" })), "a different reply ⇒ re-render")
 ok(!turnPropsEqual(props(settled), props({ ...settled, steps: [tool("a1", "ok")] })), "a different step set ⇒ re-render")
+
+// THEME SWITCH: the SyntaxStyle identity changes (App rebuilds it on a switch) ⇒ a settled turn must
+// repaint so its diffs/markdown recolor in the new palette. A stable identity (the busy tick) ⇒ skip.
+ok(!turnPropsEqual(props(settled), props(settled, { syntaxStyle: { style: "other" } })), "a theme switch (new SyntaxStyle identity) ⇒ re-render (recolor)")
+ok(turnPropsEqual(props(settled), props(settled, { syntaxStyle: STYLE })), "same SyntaxStyle identity (busy tick) ⇒ SKIP re-render (no recolor churn)")
 
 // ── focus/expansion ELSEWHERE in the transcript does NOT repaint this settled turn ───────────
 // turn idx 0 owns keys turn:0 / tool:a1 / tool:a2 — a focus/expansion on UNRELATED keys is inert.

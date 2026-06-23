@@ -1,22 +1,22 @@
 // Theme tokens: the ONE place the TUI palette lives, so a color is named by ROLE
-// (text/muted/error/…) not repeated as a raw hex across chat.tsx. Catppuccin-Mocha.
+// (text/muted/error/…) not repeated as a raw hex across chat.tsx. Now a REGISTRY of curated
+// dark palettes (rlmcode-dark default + gruvbox/tokyonight/high-contrast), runtime-switchable.
 //
 // Shape ported from termcast's ResolvedTheme (../termcast/src/themes.ts) so the token
-// vocabulary matches the opencode/termcast-grade shell the rest of the TUI migrates toward
+// vocabulary matches the opencode/termcast-grade shell the rest of the TUI is built on
 // (text/textMuted/background/backgroundPanel/backgroundElement/primary/accent/border/
-// borderActive/success/warning/error/info + the markdown/diff tokens rlmcode actually renders).
-// Catppuccin-Mocha is the ONE default palette — chosen to MATCH the colors already shipped,
-// so this is a pure re-shape: every hex below is byte-identical to what chat.tsx rendered
-// before, just named by termcast role. The legacy rlmcode role names (subtext/dim/faint/ok/busy/
-// focus/white) are kept as ALIASES onto the same hexes so chat.tsx / orch-tree.ts need no
-// edit beyond the existing `import { theme }`.
+// borderActive/success/warning/error/info + the markdown/diff/syntax tokens rlmcode renders).
+// The legacy rlmcode role names (subtext/dim/faint/ok/busy/focus/white) are kept as ALIASES so
+// the pure helpers (toolui/orch-tree/messages) that read `theme.x` need no per-call edit.
 //
-// ponytail: single hard-coded palette (no runtime theme switch / no useStore like termcast).
-// Upgrade: when a theme picker lands, swap getTheme() to read a selected name from atoms and
-// resolve via a DEFAULT_THEMES map (termcast getResolvedTheme shape), keeping useTheme() stable.
+// REACTIVITY (the picker): `theme` is a LIVE object — setActiveTheme(name) Object.assign's the new
+// palette's keys ONTO it in place, so every `import { theme }` reader (the PURE helpers) sees the
+// new palette on the next render WITHOUT importing a hook. The React seam (a re-render so components
+// actually repaint, plus useTheme()) lives in theme-context.tsx; getTheme() is the non-component
+// accessor onto this same live object. (opencode resolves a selected NAME → Theme; same here.)
 import { SyntaxStyle } from "@opentui/core"
 
-// Catppuccin-Mocha source swatches (the named palette this theme is cut from).
+// ── Catppuccin-Mocha source swatches (the default palette is cut from these). ──
 const mocha = {
   rosewater: "#f5e0dc",
   text: "#cdd6f4",
@@ -96,9 +96,13 @@ export type ResolvedTheme = {
   readonly white: string
 }
 
-// The ONE default palette. Every value MATCHES the colors rlmcode already shipped (the render is
-// byte-identical); the new termcast-role names are added alongside the legacy aliases.
-const catppuccinMocha: ResolvedTheme = {
+// `Theme` = a registry entry: a display name + its resolved token object. The picker lists the
+// names; setActiveTheme resolves a name → its palette (the opencode resolver pattern).
+export type Theme = { readonly name: string; readonly label: string; readonly palette: ResolvedTheme }
+
+// ── THE DEFAULT PALETTE (rlmcode-dark) — every value MATCHES the colors rlmcode already shipped, so
+// the default render is byte-identical to before the registry. Catppuccin-Mocha, named by role. ──
+const rlmcodeDark: ResolvedTheme = {
   // Text
   text: mocha.text, // primary foreground (reply, focused input)
   textMuted: mocha.overlay1, // status / idle hints  (== legacy `muted`)
@@ -128,8 +132,7 @@ const catppuccinMocha: ResolvedTheme = {
   markdownCode: mocha.teal,
   markdownEmph: mocha.lavender,
   markdownStrong: mocha.peach, // **bold** in replies (distinct from emph's lavender)
-  // Syntax — Catppuccin-Mocha's conventional code highlighting roles (the standard Mocha mapping:
-  // keyword=mauve, string=green, function=blue, number=peach, type=yellow, comment=overlay).
+  // Syntax — Catppuccin-Mocha's conventional code highlighting roles.
   syntaxKeyword: mocha.mauve,
   syntaxString: mocha.green,
   syntaxFunction: mocha.blue,
@@ -151,38 +154,198 @@ const catppuccinMocha: ResolvedTheme = {
   white: mocha.white, // tool icon high-contrast
 }
 
-// DEFAULT_THEME: the named default (the one palette today). The seam a theme picker resolves a
-// SELECTED name against later (a DEFAULT_THEMES map, per the ponytail upgrade note above); for now
-// resolveTheme() always returns it. Named export so callers read intent, not the raw const.
-export const DEFAULT_THEME: ResolvedTheme = catppuccinMocha
+// ── GRUVBOX-ish (warm) — Gruvbox-dark's earthy bg + warm accents. A complete palette: every
+// ResolvedTheme key set (a missing key = a runtime crash). ──
+const gruvbox: ResolvedTheme = {
+  text: "#ebdbb2",
+  textMuted: "#a89984",
+  background: "#282828",
+  backgroundPanel: "#1d2021",
+  backgroundElement: "#3c3836",
+  primary: "#fabd2f", // warm yellow brand
+  accent: "#fe8019", // orange interactive accent
+  info: "#83a598",
+  success: "#b8bb26",
+  warning: "#fabd2f",
+  error: "#fb4934",
+  border: "#504945",
+  borderActive: "#fabd2f",
+  diffAdded: "#b8bb26",
+  diffRemoved: "#fb4934",
+  diffContext: "#665c54",
+  markdownText: "#ebdbb2",
+  markdownHeading: "#fabd2f",
+  markdownLink: "#83a598",
+  markdownCode: "#8ec07c",
+  markdownEmph: "#d3869b",
+  markdownStrong: "#fe8019",
+  syntaxKeyword: "#fb4934",
+  syntaxString: "#b8bb26",
+  syntaxFunction: "#fabd2f",
+  syntaxNumber: "#d3869b",
+  syntaxType: "#fabd2f",
+  syntaxComment: "#928374",
+  syntaxVariable: "#ebdbb2",
+  syntaxConstant: "#d3869b",
+  syntaxOperator: "#8ec07c",
+  syntaxPunctuation: "#a89984",
+  subtext: "#bdae93",
+  muted: "#a89984",
+  dim: "#665c54",
+  faint: "#504945",
+  ok: "#b8bb26",
+  busy: "#fe8019",
+  focus: "#fabd2f",
+  white: "#fbf1c7",
+}
 
-// resolveTheme(name?): the theme a given name resolves to. One palette today ⇒ always DEFAULT_THEME
-// (the `name` arg is the forward-compatible seam — termcast's getResolvedTheme(name) shape — so a
-// picker can pass a selection without changing call sites). Pure. getTheme()/the `theme` const both
-// flow through this, so it is the single resolution point a picker hooks (no dead seam).
-export const resolveTheme = (_name?: string): ResolvedTheme => DEFAULT_THEME
+// ── TOKYONIGHT-ish (cool) — Tokyo Night's deep blue bg + cyan/blue accents. Complete. ──
+const tokyonight: ResolvedTheme = {
+  text: "#c0caf5",
+  textMuted: "#565f89",
+  background: "#1a1b26",
+  backgroundPanel: "#16161e",
+  backgroundElement: "#24283b",
+  primary: "#7aa2f7",
+  accent: "#7dcfff",
+  info: "#7aa2f7",
+  success: "#9ece6a",
+  warning: "#e0af68",
+  error: "#f7768e",
+  border: "#3b4261",
+  borderActive: "#7aa2f7",
+  diffAdded: "#9ece6a",
+  diffRemoved: "#f7768e",
+  diffContext: "#414868",
+  markdownText: "#c0caf5",
+  markdownHeading: "#7aa2f7",
+  markdownLink: "#7dcfff",
+  markdownCode: "#73daca",
+  markdownEmph: "#bb9af7",
+  markdownStrong: "#ff9e64",
+  syntaxKeyword: "#bb9af7",
+  syntaxString: "#9ece6a",
+  syntaxFunction: "#7aa2f7",
+  syntaxNumber: "#ff9e64",
+  syntaxType: "#2ac3de",
+  syntaxComment: "#565f89",
+  syntaxVariable: "#c0caf5",
+  syntaxConstant: "#ff9e64",
+  syntaxOperator: "#89ddff",
+  syntaxPunctuation: "#9aa5ce",
+  subtext: "#9aa5ce",
+  muted: "#565f89",
+  dim: "#414868",
+  faint: "#3b4261",
+  ok: "#9ece6a",
+  busy: "#e0af68",
+  focus: "#7aa2f7",
+  white: "#ffffff",
+}
 
-// getTheme(): the module-const accessor (no useStore — rlmcode has one palette). Returns the
-// resolved token object via resolveTheme() — the single source of truth for every color in the TUI.
-export const getTheme = (): ResolvedTheme => resolveTheme()
+// ── HIGH-CONTRAST — a near-pure-black bg + bright, saturated accents for maximum legibility.
+// Complete; tuned so every role stays readable on #000. ──
+const highContrast: ResolvedTheme = {
+  text: "#ffffff",
+  textMuted: "#a0a0a0",
+  background: "#000000",
+  backgroundPanel: "#0a0a0a",
+  backgroundElement: "#1c1c1c",
+  primary: "#00d7ff",
+  accent: "#00ffd7",
+  info: "#5fafff",
+  success: "#5fff5f",
+  warning: "#ffd700",
+  error: "#ff5f5f",
+  border: "#5f5f5f",
+  borderActive: "#ffd700",
+  diffAdded: "#5fff5f",
+  diffRemoved: "#ff5f5f",
+  diffContext: "#767676",
+  markdownText: "#ffffff",
+  markdownHeading: "#00d7ff",
+  markdownLink: "#5fafff",
+  markdownCode: "#5fffd7",
+  markdownEmph: "#ff87ff",
+  markdownStrong: "#ffd700",
+  syntaxKeyword: "#ff87ff",
+  syntaxString: "#5fff5f",
+  syntaxFunction: "#00d7ff",
+  syntaxNumber: "#ffd700",
+  syntaxType: "#5fd7ff",
+  syntaxComment: "#8a8a8a",
+  syntaxVariable: "#ffffff",
+  syntaxConstant: "#ffd700",
+  syntaxOperator: "#5fffd7",
+  syntaxPunctuation: "#bcbcbc",
+  subtext: "#c6c6c6",
+  muted: "#a0a0a0",
+  dim: "#767676",
+  faint: "#5f5f5f",
+  ok: "#5fff5f",
+  busy: "#ffd700",
+  focus: "#ffd700",
+  white: "#ffffff",
+}
 
-// useTheme(): React-component accessor matching termcast's hook signature, so component code
-// reads `const t = useTheme()`. With one static palette it's a thin wrapper over getTheme();
-// it stays the seam a future theme picker swaps to a reactive atom read.
-export const useTheme = (): ResolvedTheme => getTheme()
+// THE REGISTRY: every theme keyed by its name, plus the ordered name list (the picker's row order).
+// rlmcode-dark FIRST (the default). Each palette is COMPLETE — same keys + syntax scopes — so a
+// switch can never read an undefined token (a missing key = a runtime crash).
+export const themes: Record<string, Theme> = {
+  "rlmcode-dark": { name: "rlmcode-dark", label: "rlmcode dark (catppuccin)", palette: rlmcodeDark },
+  gruvbox: { name: "gruvbox", label: "gruvbox (warm)", palette: gruvbox },
+  tokyonight: { name: "tokyonight", label: "tokyo night (cool)", palette: tokyonight },
+  "high-contrast": { name: "high-contrast", label: "high contrast", palette: highContrast },
+}
+export const THEME_NAMES: readonly string[] = ["rlmcode-dark", "gruvbox", "tokyonight", "high-contrast"]
 
-// `theme`: the resolved token object, exported for non-component modules (orch-tree.ts) and the
-// existing chat.tsx attrs (`fg={theme.text}` / `borderColor={theme.border}`). Unchanged name so
-// the sweep is a no-op diff at the call sites. Resolved through resolveTheme() (== DEFAULT_THEME).
-export const theme: ResolvedTheme = resolveTheme()
+// DEFAULT_THEME: the registry NAME of the default (a string, NOT the palette object — opencode's
+// resolver shape, and the contract the registry needs). resolveTheme(name) maps it back to a Theme.
+export const DEFAULT_THEME = "rlmcode-dark"
+
+// resolveTheme(name?): the Theme a given NAME resolves to. An unknown / undefined name falls back
+// to the default (so a stale persisted name or a typo can never crash). Pure.
+export const resolveTheme = (name?: string): Theme => themes[name ?? ""] ?? themes[DEFAULT_THEME]!
+
+// ── THE LIVE PALETTE (the reactivity seam) ──────────────────────────────────────────────────────
+// `theme` is a LIVE object every non-component module imports + reads (`theme.text`). setActiveTheme
+// Object.assign's a new palette's keys ONTO it in place, so those readers see the new colors on the
+// next render with NO hook — the cheap way to make the PURE helpers (toolui/orch-tree/messages/
+// header/workflow) reactive without threading a context through every signature. `active.name`
+// tracks which theme is live (the picker marks the current row). getTheme() returns this same object.
+// A mutable view of the SAME object for in-place writes — `theme` is exported readonly (so consumers
+// can't mutate the palette), but setActiveTheme reassigns its keys through this widened alias.
+type Mutable<T> = { -readonly [K in keyof T]: T[K] }
+export const theme: ResolvedTheme = { ...resolveTheme(DEFAULT_THEME).palette }
+const liveTheme = theme as Mutable<ResolvedTheme>
+// The active theme NAME lives on a single-element HOLDER object (a property mutation, like
+// Object.assign on `theme`), NOT a reassigned `let` — so the switch updates module-level live state
+// without a closure writing a top-level binding (the design-check "capture" smell). One holder.
+const active = { name: DEFAULT_THEME }
+
+// setActiveTheme(name): switch the LIVE palette in place + record the active name. Mutates `theme`
+// (so module-const readers repaint on the next render) and returns the resolved Theme (so the React
+// seam can also bump component state). An unknown name resolves to the default (never crashes).
+export const setActiveTheme = (name: string): Theme => {
+  const next = resolveTheme(name)
+  active.name = next.name
+  Object.assign(liveTheme, next.palette) // in-place: every `import { theme }` reader sees the new palette
+  return next
+}
+
+// getActiveThemeName(): the name of the live theme (the picker's "current" mark + the persist write).
+export const getActiveThemeName = (): string => active.name
+
+// getTheme(): the module accessor onto the LIVE palette — the single source of truth for every color
+// in the TUI. Pure non-component helpers call this (or read `theme` directly, same object); the
+// React useTheme() hook (theme-context.tsx) wraps it so components re-render on a switch.
+export const getTheme = (): ResolvedTheme => theme
 
 // SYNTAX SCOPE → TOKEN map: the tree-sitter / markup scope names opentui's <markdown> + <code> +
 // <diff> renderables emit (Markdown.ts createChunk groups: markup.heading/raw/strong/italic/link;
 // Code.ts tree-sitter groups: keyword/string/function/number/type/comment/…), each mapped to a
 // theme token. opentui's getStyle() falls back scope → first-segment → "default" (Markdown.ts:432-
-// 446), so registering these leaf scopes + a "default" covers the whole highlight surface. The bare
-// SyntaxStyle.create() rlmcode shipped registers NOTHING, so highlighted code rendered all one
-// color; this is the wiring that makes a fenced ```ts block + the native <diff> read in palette.
+// 446), so registering these leaf scopes + a "default" covers the whole highlight surface.
 const syntaxScopes = (t: ResolvedTheme): Record<string, { fg: string; bold?: boolean; italic?: boolean }> => ({
   // fallback for any unmapped scope (Markdown.ts createChunk uses getStyle("default") as the floor).
   default: { fg: t.markdownText },
@@ -213,12 +376,11 @@ const syntaxScopes = (t: ResolvedTheme): Record<string, { fg: string; bold?: boo
 })
 
 // makeSyntaxStyle(theme?): a REAL opentui SyntaxStyle with every scope above registered onto the
-// active palette — the single shared style chat.tsx feeds to <markdown syntaxStyle> and <diff
-// syntaxStyle>. Uses opentui's registerStyle (syntax-style.d.ts:48) per scope. REPLACES the bare
-// SyntaxStyle.create() (zero registered styles ⇒ code rendered flat); now keyword/string/comment/…
-// + markdown headings/code/bold + diff +/- all resolve to theme tokens. getStyle() round-trips the
-// registered fg, so theme.test asserts the wiring without a frame (a deterministic RGBA compare).
-export const makeSyntaxStyle = (t: ResolvedTheme = DEFAULT_THEME): SyntaxStyle => {
+// given palette — the single shared style chat.tsx feeds to <markdown syntaxStyle> and <diff
+// syntaxStyle>. Defaults to the LIVE `theme`, so a fresh call after a switch picks up the new palette
+// (chat.tsx rebuilds it on the active-theme change). getStyle() round-trips the registered fg, so
+// theme.test asserts the wiring without a frame (a deterministic RGBA compare).
+export const makeSyntaxStyle = (t: ResolvedTheme = theme): SyntaxStyle => {
   const style = SyntaxStyle.create()
   for (const [scope, def] of Object.entries(syntaxScopes(t))) style.registerStyle(scope, def)
   return style

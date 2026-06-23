@@ -17,7 +17,7 @@ import { useCallback, useMemo, useState } from "react"
 import { DialogSelect, type DialogSelectModel, type Option, useDialogSelect } from "./dialog-select.tsx"
 import { type Bind, type KeyEventLike, type ModeStack } from "./keys.ts"
 import { MODELS, type ModelName } from "../app/default-agent.ts"
-import { type ResolvedTheme } from "./theme.ts"
+import { type ResolvedTheme, themes } from "./theme.ts"
 
 // A session row the switcher lists — the subset of atoms.ts SessionView the picker needs (id +
 // title + message count). Structural (not an atoms import) so dialogs.tsx has no atoms coupling and
@@ -31,20 +31,24 @@ export const printableChar = (e: KeyEventLike): string =>
   typeof e.sequence === "string" && e.sequence.length === 1 && e.sequence >= " " && !e.ctrl && !e.meta ? e.sequence : ""
 
 // Which picker is mounted on the shared "dialog" mode. null ⇒ none (the mode isn't a dialog, or it
-// was popped). Kept distinct from the mode so chat.tsx can render the RIGHT overlay component.
-export type DialogKind = "session" | "model" | null
+// was popped). Kept distinct from the mode so chat.tsx can render the RIGHT overlay component. The
+// THEME picker is a third kind on the SAME primitive (DialogSelect + the "dialog" mode) — same reuse
+// the session/model pickers prove, so /theme costs no new mode + no new key routing.
+export type DialogKind = "session" | "model" | "theme" | null
 
 // The controller bundle chat.tsx consumes. `kind` says which overlay to mount; `sessionModel` /
-// `modelModel` are the two DialogSelect controllers; `binds` are the "dialog"-mode key rows chat.tsx
-// spreads into its registry; `feedChar` appends a printable to the OPEN picker's filter; open*/close
-// drive the mode + kind together.
+// `modelModel` / `themeModel` are the DialogSelect controllers; `binds` are the "dialog"-mode key
+// rows chat.tsx spreads into its registry; `feedChar` appends a printable to the OPEN picker's
+// filter; open*/close drive the mode + kind together.
 export type Dialogs = {
   readonly kind: DialogKind
   readonly sessionModel: DialogSelectModel<string>
   readonly modelModel: DialogSelectModel<ModelName>
+  readonly themeModel: DialogSelectModel<string>
   readonly binds: readonly Bind[]
   readonly openSession: () => void
   readonly openModel: () => void
+  readonly openTheme: () => void
   readonly close: () => void
   readonly feedChar: (ch: string) => void
 }
@@ -55,14 +59,24 @@ export type Dialogs = {
 //   - selectedModel marks the currently-selected model row; selecting one calls onModel(name).
 //   - mode is the keys.ts ModeStack: open* pushes "dialog", close pops it (idempotent on "dialog").
 // The selection submit closes the dialog (mirrors the palette: pick a row → run → close).
+// The picker ACTIONS chat.tsx wires in — bundled into one options object so useDialogs stays under
+// the param budget (and the call site reads as named intent, not positional callbacks). onSwitch =
+// set the active session; onModel = set the composer model; theme = the active name + ordered names
+// + the live switch (useThemeSwitcher) the theme picker drives.
+export type DialogActions = {
+  readonly onSwitch: (id: string) => void
+  readonly onModel: (name: ModelName) => void
+  readonly theme: { readonly name: string; readonly names: readonly string[]; readonly onTheme: (name: string) => void }
+}
+
 export const useDialogs = (
   sessions: readonly SessionLike[],
   activeId: string | null,
   selectedModel: string,
   mode: ModeStack,
-  onSwitch: (id: string) => void,
-  onModel: (name: ModelName) => void,
+  actions: DialogActions,
 ): Dialogs => {
+  const { onSwitch, onModel, theme } = actions
   const [kind, setKind] = useState<DialogKind>(null)
 
   // close() pops the "dialog" mode (idempotent — only pops if "dialog" is on top) AND clears the
@@ -112,9 +126,28 @@ export const useDialogs = (
     close()
   })
 
-  // openSession/openModel set the kind, reset that controller's filter to a clean slate (clears the
-  // query AND resets the highlight to the first row — the same contract the palette's setQuery("")
-  // gives), then push the shared "dialog" mode so its keys scope + the composer yields focus.
+  // THEME PICK options — every registry theme in its ordered list. value = the theme NAME; the
+  // currently-active theme is tagged "current"; the hint shows the theme's display label so the row
+  // reads clearly. submit switches LIVE + persists (onTheme) + closes. Rebuilt when the active name
+  // changes so the "current" mark follows the live switch.
+  const themeItems: Option<string>[] = useMemo(
+    () =>
+      theme.names.map((name) => ({
+        title: themes[name]?.label ?? name,
+        value: name,
+        ...(name === theme.name ? { description: "current" } : {}),
+        hint: name,
+      })),
+    [theme.names, theme.name],
+  )
+  const themeModel = useDialogSelect(themeItems, (name) => {
+    theme.onTheme(name)
+    close()
+  })
+
+  // openSession/openModel/openTheme set the kind, reset that controller's filter to a clean slate
+  // (clears the query AND resets the highlight to the first row — the same contract the palette's
+  // setQuery("") gives), then push the shared "dialog" mode so its keys scope + the composer yields.
   const openSession = useCallback(() => {
     setKind("session")
     sessionModel.setQuery("")
@@ -125,11 +158,16 @@ export const useDialogs = (
     modelModel.setQuery("")
     mode.push("dialog")
   }, [mode, modelModel])
+  const openTheme = useCallback(() => {
+    setKind("theme")
+    themeModel.setQuery("")
+    mode.push("dialog")
+  }, [mode, themeModel])
 
   // The ACTIVE controller (by kind) — the target of the shared dialog-mode key rows + feedChar. A
   // closed dialog (kind null) has no active controller, so the rows no-op (they only fire under the
   // "dialog" mode anyway, which is only on the stack while a picker is open).
-  const active = kind === "session" ? sessionModel : kind === "model" ? modelModel : undefined
+  const active = kind === "session" ? sessionModel : kind === "model" ? modelModel : kind === "theme" ? themeModel : undefined
   const feedChar = (ch: string) => {
     if (ch !== "") active?.appendQuery(ch)
   }
@@ -152,16 +190,17 @@ export const useDialogs = (
     [active, close],
   )
 
-  return { kind, sessionModel, modelModel, binds, openSession, openModel, close, feedChar }
+  return { kind, sessionModel, modelModel, themeModel, binds, openSession, openModel, openTheme, close, feedChar }
 }
 
-// DialogOverlays — mounts the ACTIVE picker overlay (session switcher or model pick) by kind, or
-// nothing. chat.tsx renders this in BOTH the list and chat views; folding the two kind-ternaries
+// DialogOverlays — mounts the ACTIVE picker overlay (session switcher / model pick / theme pick) by
+// kind, or nothing. chat.tsx renders this in BOTH the list and chat views; folding the kind-ternaries
 // into one component keeps App's branch count (cyclomatic budget) down and the two call sites
 // identical. The palette + which-key overlays stay in chat.tsx (they read chat-only state).
 export function DialogOverlays({ dialogs, theme }: { dialogs: Dialogs; theme: ResolvedTheme }) {
   if (dialogs.kind === "session") return <SessionSwitcher model={dialogs.sessionModel} theme={theme} />
   if (dialogs.kind === "model") return <ModelPick model={dialogs.modelModel} theme={theme} />
+  if (dialogs.kind === "theme") return <ThemePick model={dialogs.themeModel} theme={theme} />
   return null
 }
 
@@ -189,6 +228,21 @@ export function ModelPick({ model, theme }: { model: DialogSelectModel<ModelName
       model={model}
       placeholder="search models…"
       footer="↵ pick · ↑↓ select · esc close"
+      theme={theme}
+    />
+  )
+}
+
+// THEME PICK overlay — DialogSelect titled "Pick theme" listing the registry palettes (the current
+// one tagged). The third dialog on the shared primitive; chat.tsx mounts it when kind === "theme".
+// Selecting a row switches the palette LIVE + persists (the controller's onSelect = themeModel's).
+export function ThemePick({ model, theme }: { model: DialogSelectModel<string>; theme: ResolvedTheme }) {
+  return (
+    <DialogSelect
+      title="Pick theme"
+      model={model}
+      placeholder="search themes…"
+      footer="↵ apply · ↑↓ select · esc close"
       theme={theme}
     />
   )

@@ -114,6 +114,10 @@ export type MemoProps = {
   readonly expNodes: ReadonlySet<string>
   readonly focusedKey: string | undefined
   readonly cols: number
+  // The shared SyntaxStyle identity. App rebuilds it ONLY on a theme switch (useMemo keyed on the
+  // active theme name), so it is STABLE across the busy tick (no settled-turn repaint) but CHANGES
+  // on a switch — forcing every settled turn to recolor its diffs/markdown in the new palette.
+  readonly syntaxStyle: unknown
 }
 
 // THE COMPARATOR (React.memo areEqual): true ⇒ SKIP the re-render. Skip iff the turn is settled in
@@ -124,6 +128,9 @@ export const turnPropsEqual = (prev: MemoProps, next: MemoProps): boolean => {
   // An in-flight turn (either render) always re-renders — never memo a growing/animating turn.
   if (!isSettled(prev.t) || !isSettled(next.t)) return false
   if (prev.first !== next.first || prev.cols !== next.cols) return false
+  // A theme switch swaps the SyntaxStyle identity (stable across busy ticks) — repaint so the
+  // settled turn's diffs/markdown recolor in the new palette. Same identity ⇒ no tick repaint.
+  if (prev.syntaxStyle !== next.syntaxStyle) return false
   if (contentKey(prev.t) !== contentKey(next.t)) return false
   return (
     interactionSig(prev.t, prev.expanded, prev.expTools, prev.expNodes, prev.focusedKey) ===

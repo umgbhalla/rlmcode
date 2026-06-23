@@ -27,16 +27,25 @@
 //      the code body lands in the frame (the render path the bare style left colorless).
 //
 // Frame-stable waits only (driver.waitFor), never setTimeout-then-assert.
-import { readdirSync, readFileSync } from "node:fs"
+import { readdirSync, readFileSync, rmSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { rgbToHex } from "@opentui/core"
 import { launchDriver } from "./driver.ts"
 import { report } from "./assert.ts"
-import { DEFAULT_THEME, makeSyntaxStyle, theme } from "../../src/tui/theme.ts"
+import {
+  DEFAULT_THEME,
+  makeSyntaxStyle,
+  resolveTheme,
+  type ResolvedTheme,
+  theme,
+  themes,
+  THEME_NAMES,
+} from "../../src/tui/theme.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const TUI_DIR = join(HERE, "..", "..", "src", "tui")
+const REPO_ROOT = join(HERE, "..", "..")
+const TUI_DIR = join(REPO_ROOT, "src", "tui")
 const HEX = /#[0-9a-fA-F]{6}\b/
 
 // Recursively collect every .ts/.tsx under src/tui except theme.ts (the palette home).
@@ -55,32 +64,49 @@ await report("theme.test", async (a) => {
   const offenders = tuiSources(TUI_DIR).filter((f) => HEX.test(readFileSync(f, "utf8")))
   a.ok(offenders.length === 0, `inline hex must live only in theme.ts; offenders: ${offenders.join(", ") || "(none)"}`)
 
-  // ── (3) syntax-scope → theme-token round-trip (deterministic) ────────────────────────────
-  // makeSyntaxStyle() must register each scope onto its palette token. getStyle(scope).fg is an
-  // RGBA; rgbToHex it and compare to the theme hex. (DEFAULT_THEME === theme, the one palette.)
-  a.ok(DEFAULT_THEME === theme, "DEFAULT_THEME is the resolved default palette")
-  const style = makeSyntaxStyle()
-  const tokenOf = (scope: string): string | undefined => {
-    const fg = style.getStyle(scope)?.fg
-    return fg ? rgbToHex(fg) : undefined
+  // ── (1b) THE REGISTRY (deterministic) — DEFAULT_THEME is now a NAME string the resolver maps to
+  // a Theme; every palette is COMPLETE (same key set as the default) so a switch can't read an
+  // undefined token. The live `theme` boots as the default palette (byte-identical to before). ──
+  a.ok(DEFAULT_THEME === "rlmcode-dark", "DEFAULT_THEME is the registry NAME string (not the palette object)")
+  a.ok(resolveTheme(DEFAULT_THEME).palette.text === theme.text, "the live `theme` boots as the default palette")
+  a.ok(resolveTheme("nope-not-a-theme").name === DEFAULT_THEME, "an unknown name resolves to the default (no crash)")
+  a.ok(THEME_NAMES.length >= 3, `registry has >=3 themes (got ${THEME_NAMES.length})`)
+  a.ok(THEME_NAMES[0] === DEFAULT_THEME, "the default is first in the ordered name list")
+  // COMPLETENESS: every palette must carry the EXACT key set of the default — a missing key is a
+  // runtime crash (a reader gets undefined). Compare each theme's keys against rlmcode-dark's.
+  const refKeys = Object.keys(resolveTheme(DEFAULT_THEME).palette).sort().join(",")
+  for (const name of THEME_NAMES) {
+    const keys = Object.keys(themes[name]!.palette).sort().join(",")
+    a.ok(keys === refKeys, `theme "${name}" has the COMPLETE key set (no missing/extra token vs the default)`)
   }
-  // Each tree-sitter code scope resolves to its syntax token (the wiring the bare style lacked).
-  a.ok(tokenOf("keyword") === theme.syntaxKeyword, "scope keyword → theme.syntaxKeyword")
-  a.ok(tokenOf("string") === theme.syntaxString, "scope string → theme.syntaxString")
-  a.ok(tokenOf("function") === theme.syntaxFunction, "scope function → theme.syntaxFunction")
-  a.ok(tokenOf("number") === theme.syntaxNumber, "scope number → theme.syntaxNumber")
-  a.ok(tokenOf("type") === theme.syntaxType, "scope type → theme.syntaxType")
-  a.ok(tokenOf("comment") === theme.syntaxComment, "scope comment → theme.syntaxComment")
-  // Markdown markup scopes → markdown tokens (the reply <markdown> highlight surface).
-  a.ok(tokenOf("markup.heading") === theme.markdownHeading, "scope markup.heading → theme.markdownHeading")
-  a.ok(tokenOf("markup.raw") === theme.markdownCode, "scope markup.raw (inline code) → theme.markdownCode")
-  a.ok(tokenOf("markup.strong") === theme.markdownStrong, "scope markup.strong → theme.markdownStrong")
-  // Diff line scopes → diff tokens (native <diff> renderable).
-  a.ok(tokenOf("diff.plus") === theme.diffAdded, "scope diff.plus → theme.diffAdded")
-  a.ok(tokenOf("diff.minus") === theme.diffRemoved, "scope diff.minus → theme.diffRemoved")
+
+  // ── (3) syntax-scope → theme-token round-trip (deterministic) ────────────────────────────
+  // makeSyntaxStyle(palette) must register each scope onto that palette's token. syntaxTokenHex
+  // round-trips getStyle(scope).fg back to a hex; compare to the palette hex. Assert it for EVERY
+  // registry theme (so the switch genuinely re-skins the highlighter, not just the default).
+  for (const name of THEME_NAMES) {
+    const p: ResolvedTheme = themes[name]!.palette
+    const style = makeSyntaxStyle(p)
+    const tokenOf = (scope: string): string | undefined => {
+      const fg = style.getStyle(scope)?.fg
+      return fg ? rgbToHex(fg) : undefined
+    }
+    a.ok(tokenOf("keyword") === p.syntaxKeyword, `[${name}] scope keyword → syntaxKeyword`)
+    a.ok(tokenOf("string") === p.syntaxString, `[${name}] scope string → syntaxString`)
+    a.ok(tokenOf("function") === p.syntaxFunction, `[${name}] scope function → syntaxFunction`)
+    a.ok(tokenOf("comment") === p.syntaxComment, `[${name}] scope comment → syntaxComment`)
+    a.ok(tokenOf("markup.heading") === p.markdownHeading, `[${name}] scope markup.heading → markdownHeading`)
+    a.ok(tokenOf("markup.raw") === p.markdownCode, `[${name}] scope markup.raw → markdownCode`)
+    a.ok(tokenOf("markup.strong") === p.markdownStrong, `[${name}] scope markup.strong → markdownStrong`)
+    a.ok(tokenOf("diff.plus") === p.diffAdded, `[${name}] scope diff.plus → diffAdded`)
+    a.ok(tokenOf("diff.minus") === p.diffRemoved, `[${name}] scope diff.minus → diffRemoved`)
+  }
 
   // ── (1) the palette still drives a real, structured frame + (3b) code renders ────────────
-  const d = await launchDriver()
+  // RLM_THEME pins the BOOT theme to the default so a `.rlmcode.json` left by a prior run (the
+  // picker persists its pick) can't change which theme this run boots with — the picker assertions
+  // below depend on rlmcode-dark being the live theme at start (env wins over the persisted name).
+  const d = await launchDriver({ env: { RLM_THEME: "rlmcode-dark" } })
   try {
     await d.waitFor((f) => /no sessions/.test(f), { label: "list" })
     await d.type("n") // new session
@@ -112,7 +138,51 @@ await report("theme.test", async (a) => {
         .map((l) => `  │ ${l}`)
         .join("\n"),
     )
+
+    // ── (d) THE PICKER SWITCHES THE THEME LIVE (the new captured-frame assertion) ────────────────
+    // Open /theme via the command palette (Ctrl+K → filter "theme" → run), assert the picker LISTS
+    // >=2 theme names with the current one tagged, select a DIFFERENT theme, then RE-OPEN the picker
+    // and assert the "current" mark MOVED — a stable structural signal the switch took (and stuck in
+    // the active state), independent of the spinner glyph or raw RGB (a cell grid carries neither).
+    await d.ctrl("k")
+    await d.waitFor((f) => /Commands/.test(f), { label: "palette open" })
+    await d.type("theme")
+    await d.waitFor((f) => /Pick theme…/.test(f), { label: "palette filtered to /theme" })
+    await d.key("Enter")
+    // The theme dialog now lists the registry palettes; gate on the picker title + footer (fully drawn).
+    const picker = await d.waitFor((f) => /Pick theme/.test(f) && /↵ apply/.test(f), { label: "theme picker open" })
+    a.has(picker, /Pick theme/, "/theme opens the theme picker (title)")
+    a.has(picker, /rlmcode dark/, "the picker lists the default theme name")
+    a.has(picker, /gruvbox/, "the picker lists a second theme name (>=2 selectable themes)")
+    a.has(picker, /tokyo night/, "the picker lists a third theme name")
+    // The current theme (rlmcode-dark, the boot default) is marked "current" on its row.
+    a.has(picker, /rlmcode dark.*current/, "the picker marks the CURRENTLY-active theme (rlmcode dark · current)")
+    console.log("  ── captured theme picker (lists themes, current marked) ──")
+    console.log(picker.split("\n").map((l) => `  │ ${l}`).join("\n"))
+
+    // Move to a DIFFERENT theme (gruvbox is row 2) and apply it — the switch is LIVE + persisted.
+    await d.key("ArrowDown")
+    await d.key("Enter")
+    // The dialog closes back to the chat (composer visible) — the switch took effect.
+    await d.waitFor((f) => /message kimi/.test(f) && !/Pick theme/.test(f), { label: "picker closed after apply" })
+
+    // RE-OPEN the picker: the "current" tag must now sit on gruvbox, NOT rlmcode-dark — proof the
+    // active theme genuinely changed (the structural signal the frame can carry).
+    await d.ctrl("k")
+    await d.waitFor((f) => /Commands/.test(f), { label: "palette re-open" })
+    await d.type("theme")
+    await d.waitFor((f) => /Pick theme…/.test(f), { label: "palette re-filtered" })
+    await d.key("Enter")
+    const after = await d.waitFor((f) => /Pick theme/.test(f) && /↵ apply/.test(f), { label: "theme picker re-open" })
+    a.has(after, /gruvbox.*current/, "after selecting gruvbox the picker now marks gruvbox · current (the switch took)")
+    a.hasNot(after, /rlmcode dark.*current/, "the previously-current default is no longer marked current (the active theme changed)")
+    console.log("  ── captured theme picker after switch (current moved to gruvbox) ──")
+    console.log(after.split("\n").map((l) => `  │ ${l}`).join("\n"))
+    await d.key("Escape") // close the picker
   } finally {
     await d.stop()
+    // HERMETIC: the picker persisted its pick to .rlmcode.json (cwd) — remove it so the test leaves
+    // no side effect (no cross-test theme contamination; the file is gitignored regardless).
+    try { rmSync(join(REPO_ROOT, ".rlmcode.json")) } catch { /* never written / already gone */ }
   }
 })
