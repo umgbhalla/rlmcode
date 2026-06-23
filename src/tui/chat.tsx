@@ -11,15 +11,15 @@ import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/ato
 import { createCliRenderer, decodePasteBytes, RenderableEvents, SyntaxStyle, TextAttributes } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useRef, useState } from "react"
-import { abortTurn, projectDocLoaded } from "../app/default-agent.ts"
+import { abortTurn } from "../app/default-agent.ts"
 import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { theme, useTheme } from "./theme.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
 import { flatten, type Row as OrchRow } from "./orch-tree.ts"
+import { ActionBar, actionBarRight, shortCwd } from "./shell.tsx"
 
-const projectDoc = projectDocLoaded
 const mdStyle = SyntaxStyle.create()
 
 // Enter submits, Shift+Enter inserts a newline (override textarea defaults, which
@@ -39,6 +39,14 @@ const oneLine = (s: string, n = 90) => {
 
 // COST-METER token formatter: "318k tok" / "742 tok" (shared by turn meta + orch tree).
 const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k tok` : `${n} tok`)
+
+// Session token total for the footer cost-meter: sum every settled reply's meta.tokens across
+// the transcript, plus the orchestration run total. Pure — drives ActionBar's token/cost.
+const sessionTokens = (messages: readonly Msg[], orch: OrchTree | undefined): number => {
+  let n = orch?.totalTokens ?? 0
+  for (const m of messages) if (m.kind === "agent" && typeof m.meta?.tokens === "number") n += m.meta.tokens
+  return n
+}
 
 // Map a provider finishReason to something a human reads (raw "length" etc. is opaque).
 const fmtReason = (r: string): string => (r === "length" ? "truncated (max tokens)" : r)
@@ -546,6 +554,7 @@ function App() {
     setExpTools(new Set())
     setHistIdx(null)
     setFocus(0)
+    toBottom() // a freshly-switched/opened session lands pinned at its newest row
   }, [state.activeId])
 
   // focus-gated attention: bell on turn finishing while the terminal is blurred
@@ -675,6 +684,7 @@ function App() {
       if (t.length === 0) return
       history.push(t)
       send(t)
+      toBottom() // pin the transcript to the new turn (sticky-bottom on submit)
     }
     queueMicrotask(() => queueMicrotask(run))
   }
@@ -722,6 +732,16 @@ function App() {
         setInput(items[i]!)
       }
     }
+  }
+
+  // toBottom(): pin the transcript to its newest row. Called on submit + session switch so a
+// new turn / a freshly-opened session lands at the bottom (opencode index.tsx:1232-1250 sticky
+// toBottom). Deferred a tick so the scrollbox has measured the just-grown content first.
+  const toBottom = () => {
+    queueMicrotask(() => {
+      const sb = scrollRef.current
+      if (sb) try { sb.scrollTop = sb.scrollHeight } catch { /* ignore */ }
+    })
   }
 
   const scrollPage = (dir: -1 | 1 | "top" | "bottom") => {
@@ -814,11 +834,11 @@ function App() {
     )
   }
 
-  // ONE status line at the bottom: left = context (model · session), right =
-  // live state or key hints. No top bar, no scattered metadata.
-  // active.id is the session.id stamped on every OTel span/log for this session — surface it
-  // in the status bar so a trace in motel is one grep away (session.id="<this>").
-  const statusLeft = `kimi · ${active.title} · ${active.id}${projectDoc ? ` · ${projectDoc}` : ""}`
+  // FOOTER ACTION-BAR data: cwd (left) + token/cost · Cmd+K (right). cwd is shortened so the
+  // bar stays a single quiet line; the right cluster is the session cost-meter (tokens summed
+  // over settled replies + the orch run total) plus the command-palette affordance.
+  const footerCwd = shortCwd(process.cwd(), process.env.HOME ?? "")
+  const footerRight = actionBarRight(sessionTokens(active.messages, orch), fmtTokens)
   const status = statusBar(busy, armed, note, work)
 
   return (
@@ -895,10 +915,11 @@ function App() {
           />
         </box>
       </box>
-      <box flexDirection="row" justifyContent="space-between" style={{ paddingLeft: 1, paddingRight: 1, paddingBottom: 1, flexShrink: 0 }}>
-        <text fg={theme.muted}>{statusLeft}</text>
-        <text fg={status.tone}>{status.right}</text>
-      </box>
+      {/* FOOTER ACTION-BAR (SPEC): cwd left · token/cost + "Cmd+K commands" right. Pinned
+          flexShrink:0. Drops opencode's LSP/MCP/permission dots (ax2 has neither). The busy/
+          armed live state stays on the composer placeholder; the idle key-hint rides as a
+          quiet suffix on the cwd line so the keymap is still one glance away. */}
+      <ActionBar cwd={`${footerCwd}  ${status.right}`} right={footerRight} theme={t} />
     </box>
   )
 }

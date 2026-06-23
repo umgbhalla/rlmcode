@@ -56,7 +56,7 @@ await report("theme.test", async (a) => {
 
     const reply = await d.waitFor((f) => /Found 3 matches|Done\./.test(f), { label: "reply", timeoutMs: 40000 })
     a.has(reply, "⏺", "agent reply marker (theme.ok-styled) renders unchanged after the re-shape")
-    a.has(reply, /kimi · session/, "chat status line (theme.muted) still paints — palette backs every render site")
+    a.has(reply, /Cmd\+K commands/, "shell footer action-bar (theme.textMuted) still paints — palette backs every render site")
 
     console.log("  ── captured post-turn frame (theme re-shape, render unchanged) ──")
     console.log(
