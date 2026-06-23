@@ -5,10 +5,11 @@
 // as the AX2_MOCK seam-integration check (blocker #4): if the seam is broken, chat.tsx never
 // boots and waitFor times out here.
 //
-// CONTRACT (focus-sticky model, chat.tsx): the composer textarea is the DEFAULT + only
-// rightful focus owner — there is NO capture owner in this app, so it RECLAIMS focus the
-// instant anything (a row Tab toggle, an orch re-render, a click on a non-focusable row)
-// steals it. Tab is purely VISUAL: it moves the ❯ ring over expandable rows, but keystrokes
+// CONTRACT (captureFocus model, composer.tsx useComposerFocus): the composer textarea is the
+// DEFAULT focus owner — with no capture owner active (captureFocus=false today), it RECLAIMS
+// focus the instant anything (a row Tab toggle, an orch re-render, a click on a non-focusable
+// row) steals it. (A palette would set captureFocus=true and the composer would yield; see
+// composer.test.ts shouldReclaim.) Tab is purely VISUAL: it moves the ❯ ring over rows, but keystrokes
 // are intercepted at the renderer and still land in the input. After a send, the input is
 // reclaimed (empty placeholder back) — never stranded on a row.
 //

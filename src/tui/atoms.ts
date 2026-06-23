@@ -9,7 +9,10 @@ import { abortTurn, deleteSession, runTurn, sessionsRT } from "../app/default-ag
 import type { TurnEvent, TurnResult } from "../core/sdk.ts"
 import { appRuntime } from "../otel.ts"
 
-const MODEL = "@cf/moonshotai/kimi-k2.7-code"
+// The model id the session runs against — exported so the composer metadata row can name it
+// (opencode prompt/index.tsx:1513-1518 model meta). The mock AI swaps the SERVICE, not this id,
+// so the headless frame still shows the real model name.
+export const MODEL = "@cf/moonshotai/kimi-k2.7-code"
 
 // Provenance for a completed reply, rendered as one muted line under the turn.
 export type TurnMeta = { readonly model: string; readonly ms: number; readonly tokens?: number | undefined; readonly finishReason?: string | undefined; readonly budget: boolean }

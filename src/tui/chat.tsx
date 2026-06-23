@@ -8,17 +8,18 @@
 //               · PgUp/PgDn/Home/End scroll · click a ▸/▾ to expand
 //               · Esc back (idle) / Esc-twice interrupt (busy) · select to copy
 import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/atom-react"
-import { createCliRenderer, decodePasteBytes, RenderableEvents, SyntaxStyle } from "@opentui/core"
+import { createCliRenderer, decodePasteBytes, SyntaxStyle } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { abortTurn } from "../app/default-agent.ts"
-import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
+import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, MODEL, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { theme, useTheme } from "./theme.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
 import { flatten, type Row as OrchRow } from "./orch-tree.ts"
-import { ActionBar, actionBarRight, shortCwd } from "./shell.tsx"
+import { ActionBar, shortCwd } from "./shell.tsx"
+import { Composer, useComposerFocus } from "./composer.tsx"
 import { AssistantReply, ErrorCard, ThinkingPart, UserCard } from "./messages.tsx"
 
 const mdStyle = SyntaxStyle.create()
@@ -516,6 +517,10 @@ function App() {
   // list-view `d` arm-then-confirm: holds the session id awaiting a second `d` to close.
   const [armedDelete, setArmedDelete] = useState<string | null>(null)
   const focusedRef = useRef(true)
+  // FOCUS CAPTURE seam (composer.tsx captureFocus model): true when a dialog / command palette
+  // owns focus, so the composer YIELDS and stops reclaiming. The palette step flips this; today
+  // it stays false (the composer is the sole default owner), but the gate is wired + tested.
+  const [captureFocus] = useState(false)
 
   useEffect(() => {
     setExpTurns(new Set())
@@ -572,34 +577,13 @@ function App() {
   const orchRows = useMemo(() => (showOrch && orch ? flatten(orch, expNodes, ORCH_MAX_SHOWN) : []), [showOrch, orch, expNodes])
   const isExpanded = (t: Turn) => expTurns.has(t.idx) || t.final === null // in-progress auto-expands
 
-  // STICKY SELF-RESTORING FOCUS (focus-sticky): opentui focus is a SINGLE imperative
-  // focused-renderable. The composer textarea is the DEFAULT focus owner — but a click
-  // on a selectable=false transcript/orch row, a Tab/Enter row toggle, or an
-  // orchestration re-render routes focus through the renderer's focusRenderable(), which
-  // blur()s the textarea (it loses the highlight AND keystrokes). Renderable.focus()
-  // early-returns if already focused, and the static `focused` prop only fires once on
-  // mount, so a dep-keyed re-focus MISSES mouse-steal events. Instead we subscribe to the
-  // textarea's own BLURRED event and immediately re-claim focus: the composer always wins
-  // focus back the instant it's stolen. The Tab cycle is purely VISUAL (focusedKey drives
-  // a highlight; keystrokes are intercepted by useKeyboard at the renderer, not the
-  // textarea), so there is no "row focus mode" that should hold real focus — the composer
-  // is always the rightful owner here. Guarded to the chat view + a live, non-destroyed
-  // handle. focus() early-returns when we already hold it, so the initial focus + any
-  // re-render is a cheap no-op; only an actual steal triggers the re-claim.
-  useEffect(() => {
-    const ta = taRef.current
-    if (!ta || state.view !== "chat") return
-    ta.focus?.()
-    const reclaim = () => {
-      // Re-focus on the next tick: the steal (focusRenderable) is mid-flight when BLURRED
-      // fires, so deferring lets it settle, then we take focus back cleanly.
-      queueMicrotask(() => {
-        if (state.view === "chat") taRef.current?.focus?.()
-      })
-    }
-    ta.on?.(RenderableEvents.BLURRED, reclaim)
-    return () => ta.off?.(RenderableEvents.BLURRED, reclaim)
-  }, [state.view])
+  // FOCUS MODEL (captureFocus) — the composer is the DEFAULT focus owner and RECLAIMS focus the
+  // instant anything steals it (row click, Tab/Enter toggle, orch re-render) UNLESS a capture
+  // owner (dialog / command palette, captureFocus=true) holds it, in which case it YIELDS. This
+  // REPLACES the old unconditional BLURRED-reclaim hack: the Tab cycle stays purely VISUAL
+  // (focusedKey drives a highlight; keystrokes are intercepted at the renderer), but a palette
+  // can now genuinely own focus. The gate + subscription live in composer.tsx (useComposerFocus).
+  useComposerFocus(taRef, state.view === "chat", captureFocus)
 
   // Expandable rows in transcript order = Tab focus ring (turn-steps header, then
   // its tool rows when that turn is expanded). Enter toggles the focused one.
@@ -802,12 +786,18 @@ function App() {
     )
   }
 
-  // FOOTER ACTION-BAR data: cwd (left) + token/cost · Cmd+K (right). cwd is shortened so the
-  // bar stays a single quiet line; the right cluster is the session cost-meter (tokens summed
-  // over settled replies + the orch run total) plus the command-palette affordance.
+  // FOOTER + COMPOSER data. The composer status row carries the live left hint + the right
+  // token/cost · Cmd+K cluster (cost-meter = tokens summed over settled replies + the orch run
+  // total). The cwd rides the quiet ActionBar footer below it (left only). cwd is shortened so
+  // the bar stays a single line.
   const footerCwd = shortCwd(process.cwd(), process.env.HOME ?? "")
-  const footerRight = actionBarRight(sessionTokens(active.messages, orch), fmtTokens)
+  const sessTokens = sessionTokens(active.messages, orch)
   const status = statusBar(busy, armed, note, work)
+  const placeholder = armed
+    ? "⚠ esc again to interrupt"
+    : busy
+      ? `${work.frame} thinking… ${work.elapsed}s · esc to interrupt`
+      : "message kimi"
 
   return (
     <box flexDirection="column" style={{ height: "100%" }}>
@@ -856,38 +846,31 @@ function App() {
           </box>
         )}
       </scrollbox>
-      {/* COMPOSER + STATUS are flexShrink:0 — they ALWAYS reserve their height so the
-          scrollbox (flexGrow:1) absorbs the slack and CLIPS its transcript instead of
-          bleeding over the input. Without this the transcript text overlapped the input
-          box when the transcript filled or the textarea grew (maxHeight 8). */}
-      <box style={{ paddingLeft: 1, paddingRight: 1, paddingTop: 1, width: "100%", flexShrink: 0 }}>
-        <box
-          border={["left"]}
-          borderColor={armed ? theme.error : busy ? theme.busy : theme.accent}
-          style={{ paddingLeft: 1, flexShrink: 0, width: "100%" }}
-        >
-          <textarea
-            ref={taRef}
-            width="100%"
-            minHeight={1}
-            maxHeight={8}
-            keyBindings={inputKeys}
-            onContentChange={() => setText(taRef.current?.plainText ?? "")}
-            onSubmit={submit as any}
-            onPaste={onPaste as any}
-            focused
-            cursorColor={t.accent}
-            focusedTextColor={t.text}
-            placeholder={armed ? "⚠ esc again to interrupt" : busy ? `${work.frame} thinking… ${work.elapsed}s · esc to interrupt` : "message kimi"}
-            placeholderColor={armed ? theme.error : busy ? theme.busy : theme.muted}
-          />
-        </box>
-      </box>
-      {/* FOOTER ACTION-BAR (SPEC): cwd left · token/cost + "Cmd+K commands" right. Pinned
-          flexShrink:0. Drops opencode's LSP/MCP/permission dots (ax2 has neither). The busy/
-          armed live state stays on the composer placeholder; the idle key-hint rides as a
-          quiet suffix on the cwd line so the keymap is still one glance away. */}
-      <ActionBar cwd={`${footerCwd}  ${status.right}`} right={footerRight} theme={t} />
+      {/* COMPOSER (SPEC) — bordered textarea + metadata row (model) + status row (left
+          spinner/hint, right token·cost / Cmd+K). flexShrink:0 so it ALWAYS reserves its
+          height; the scrollbox (flexGrow:1) absorbs the slack and CLIPS the transcript
+          instead of bleeding over the input. Focus = the captureFocus model (useComposerFocus
+          above): default owner, reclaims on blur UNLESS a palette captures focus. */}
+      <Composer
+        taRef={taRef}
+        theme={t}
+        busy={busy}
+        armed={armed}
+        model={MODEL}
+        status={{ text: status.right, tone: status.tone }}
+        tokens={sessTokens}
+        fmtTokens={fmtTokens}
+        spinnerFrame={work.frame}
+        placeholder={placeholder}
+        keyBindings={inputKeys}
+        onContentChange={() => setText(taRef.current?.plainText ?? "")}
+        onSubmit={submit}
+        onPaste={onPaste}
+      />
+      {/* FOOTER ACTION-BAR — cwd (left only). Pinned flexShrink:0. The token/cost · Cmd+K
+          cluster now lives on the composer status row above; the footer keeps the cwd so the
+          working directory stays a glance away. Drops opencode's LSP/MCP/permission dots. */}
+      <ActionBar cwd={footerCwd} right="" theme={t} />
     </box>
   )
 }
