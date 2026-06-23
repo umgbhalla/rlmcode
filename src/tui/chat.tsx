@@ -10,17 +10,18 @@
 import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/atom-react"
 import { createCliRenderer, decodePasteBytes, SyntaxStyle } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { abortTurn } from "../app/default-agent.ts"
 import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, MODEL, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { theme, useTheme } from "./theme.ts"
 import { type PreviewLine, toolDiff, toolHasBody, toolIcon, toolLabel, toolPreview, toolSummary } from "./toolui.ts"
-import { flatten, type Row as OrchRow } from "./orch-tree.ts"
+import { type Row as OrchRow } from "./orch-tree.ts"
 import { ActionBar, shortCwd } from "./shell.tsx"
 import { Composer, useComposerFocus } from "./composer.tsx"
 import { AssistantReply, ErrorCard, ThinkingPart, UserCard } from "./messages.tsx"
+import { computeShowOrch, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
 
 const mdStyle = SyntaxStyle.create()
 
@@ -32,7 +33,11 @@ const inputKeys = [
 ] as any
 
 type ToolMsg = Extract<Msg, { kind: "tool" }>
-type Turn = { idx: number; user: string; steps: Msg[]; final: string | null; meta?: TurnMeta | undefined; thinking?: string | undefined; streaming?: boolean }
+// INLINE NODE-TREE (opencode-ux-blueprint Option B): a turn that produced an orchestration
+// fan-out carries its OrchTree as `workflow`, so TurnView renders the node-tree right after
+// that turn's reply (vs the old session-level block pinned below ALL turns). undefined on a
+// plain turn ⇒ no orchestration block. toTurns attaches it (computeShowOrch-gated).
+type Turn = { idx: number; user: string; steps: Msg[]; final: string | null; meta?: TurnMeta | undefined; thinking?: string | undefined; streaming?: boolean; workflow?: OrchTree | undefined }
 
 const oneLine = (s: string, n = 90) => {
   const t = s.replace(/\s+/g, " ").trim()
@@ -69,12 +74,17 @@ const statusBar = (busy: boolean, armed: boolean, note: string | null, work: Wor
   return { right: IDLE_HINT, tone: theme.muted }
 }
 
-function toTurns(messages: readonly Msg[]): Turn[] {
+function toTurns(messages: readonly Msg[], orch?: OrchTree): Turn[] {
   const turns: Turn[] = []
   for (const m of messages) {
     if (m.kind === "you") turns.push({ idx: turns.length, user: m.text, steps: [], final: null })
     else if (turns.length > 0) turns[turns.length - 1]!.steps.push(m)
   }
+  // INLINE NODE-TREE: the session holds ONE OrchTree (the live fan-out). Attach it to the turn
+  // that owns it — the LAST turn — but ONLY when it's a real fan-out worth showing
+  // (computeShowOrch). A non-workflow session/turn gets no `workflow`, so TurnView renders no
+  // orchestration block. The tree then hangs under THAT turn's reply, not in a session footer.
+  if (computeShowOrch(orch) && turns.length > 0) turns[turns.length - 1]!.workflow = orch
   for (const t of turns) {
     for (let i = t.steps.length - 1; i >= 0; i--) {
       const s = t.steps[i]!
@@ -227,21 +237,27 @@ function TurnView({
   first,
   expanded,
   expTools,
+  expNodes,
   focusedKey,
   cols,
   frame,
   onToggleTurn,
   onToggleTool,
+  renderNode,
 }: {
   t: Turn
   first: boolean
   expanded: boolean
   expTools: Set<string>
+  expNodes: ReadonlySet<string>
   focusedKey: string | undefined
   cols: number
   frame: string
   onToggleTurn: () => void
   onToggleTool: (id: string) => void
+  // INLINE NODE-TREE: App injects the node-row renderer (NodeRow, which owns the per-node
+  // ToolView + expansion/focus wiring) so WorkflowPart can hang the tree under this turn.
+  renderNode: (row: OrchRow) => React.ReactNode
 }) {
   const [hoverSteps, setHoverSteps] = useState(false)
   const stepsFocused = focusedKey === `turn:${t.idx}`
@@ -304,14 +320,21 @@ function TurnView({
           />
         )
       ) : null}
+      {/* INLINE NODE-TREE (opencode-ux-blueprint Option B): a workflow turn renders its
+          orchestration node-tree HERE, right after the reply — so the fan-out reads as part
+          of THIS turn's answer. A non-workflow turn carries no `workflow` ⇒ no block. */}
+      {t.workflow && (
+        <WorkflowPart
+          orch={t.workflow}
+          rows={workflowRows(t.workflow, expNodes)}
+          fmtTokens={fmtTokens}
+          indent={INDENT}
+          renderRow={renderNode}
+        />
+      )}
     </box>
   )
 }
-
-// VELOCITY CAP — max fan-out children shown per node at once (running + most-recent
-// settled); older ones collapse into one "… +N earlier" row. ~ORCH_CONCURRENCY worth, so
-// the tree shows roughly what's in flight + just-finished, not a 100-branch wall.
-const ORCH_MAX_SHOWN = Number(process.env.AX2_ORCH_MAX_SHOWN ?? 8)
 
 // Orchestration node tree (orch.emit) as a VELOCITY UNICODE TREE: pure flatten()
 // (src/tui/orch-tree.ts) walks roots→children and precomputes each node's ├─/└─/│
@@ -429,49 +452,10 @@ function List({ sessions, cursor, busySessions, frame, armedDelete }: { sessions
   )
 }
 
-// Orchestration rows that join the Tab focus ring, in render order. A collapsible node
-// (hasDetail) exposes a `node:<id>` key so it can be collapsed/expanded from the keyboard
-// (previously mouse-only); each EXPANDED node's owned tools then expose a `tool:<id>` key
-// (same key as transcript tools), so toggleFocused drives them unchanged. Collapsed nodes
-// are absent from `rows` (flatten omits their subtree) so their tools stay out of the ring.
-const orchFocusables = (rows: readonly OrchRow[]): string[] => {
-  const out: string[] = []
-  for (const r of rows) {
-    if (r.hasDetail) out.push(`node:${r.id}`)
-    if (r.expanded) for (const m of r.tools) out.push(`tool:${m.id}`)
-  }
-  return out
-}
-
-// Only worth showing the orchestration tree when there's real fan-out — more than one
-// node, or a node that owns tools. A plain turn emits a SINGLE childless, tool-less root
-// node that just mirrors the reply; rendering it repeats the thought and triples the token
-// count (turn meta + node badge + Σ) for nothing. (Trivial-orch redundancy.)
-const orchWorthShowing = (orch: OrchTree): boolean => {
-  const nodes = Object.values(orch.nodes)
-  return nodes.length > 1 || nodes.some((n) => (n.tools?.length ?? 0) > 0)
-}
-
-// Show the orch tree only on real fan-out (has roots + worth-showing). Narrows `orch`
-// so callers get a defined tree. Pulled out of App to keep its cyclomatic budget.
-const computeShowOrch = (orch: OrchTree | undefined): orch is OrchTree =>
-  orch !== undefined && orch.roots.length > 0 && orchWorthShowing(orch)
-
 // Wrap the focus cursor over the focusable-row ring (empty ring ⇒ none). Pure; extracted
 // from App so the cursor-wrap ternary doesn't count against App's complexity budget.
 const pickFocused = (keys: readonly string[], cursor: number): string | undefined =>
   keys.length ? keys[((cursor % keys.length) + keys.length) % keys.length] : undefined
-
-// Σ footer summary: the live run total — COST-METER tokens (preserved from orch.totalTokens)
-// · node count · error count. Computed over the whole node map (not just visible rows) so a
-// collapsed subtree still counts toward the totals.
-const orchSigma = (orch: OrchTree): string => {
-  const nodes = Object.values(orch.nodes)
-  const errors = nodes.filter((n) => n.status === "error").length
-  const parts = [`Σ ${fmtTokens(orch.totalTokens)}`, `${nodes.length} node${nodes.length === 1 ? "" : "s"}`]
-  if (errors > 0) parts.push(`${errors} error${errors === 1 ? "" : "s"}`)
-  return parts.join(" · ")
-}
 
 // Per-id expansion toggle set (orch nodes). Encapsulates the Set + reset-on-session.
 const useNodeExpansion = (resetKey: unknown) => {
@@ -562,19 +546,11 @@ function App() {
 
   const active = state.sessions.find((s) => s.id === state.activeId) ?? null
   const inChat = state.view === "chat" && active !== null
-  const turns = active ? toTurns(active.messages) : []
-  // Orchestration tree (only present once orch.emit has fired). flatten() walks the
-  // immutable tree into ordered, connector-prefixed Rows (one per visible node) — all
-  // tree geometry lives in the pure helper; the render is a flat list of <text> rows.
+  // INLINE NODE-TREE: the session's OrchTree (once orch.emit has fired) is attached by toTurns
+  // to the turn that produced it (computeShowOrch-gated), so the tree renders under THAT turn's
+  // reply — not in a session-level footer. A non-workflow session has no `workflow` on any turn.
   const orch = active?.orch
-  // Only surface the orch tree on real fan-out — a plain turn's single childless node is
-  // pure redundancy (repeats the reply + triples the token count). Gate BOTH the render and
-  // the focus ring on this so hidden node rows never join the Tab cycle.
-  const showOrch = computeShowOrch(orch)
-  // VELOCITY CAP: a fan-out can spawn up to 100 branches; show only the last ORCH_MAX_SHOWN
-  // runs-at-a-time per node (running + most-recent settled), the rest collapse into one
-  // "… +N earlier" row. ~ORCH_CONCURRENCY worth — what's actually in flight + just-finished.
-  const orchRows = useMemo(() => (showOrch && orch ? flatten(orch, expNodes, ORCH_MAX_SHOWN) : []), [showOrch, orch, expNodes])
+  const turns = active ? toTurns(active.messages, orch) : []
   const isExpanded = (t: Turn) => expTurns.has(t.idx) || t.final === null // in-progress auto-expands
 
   // FOCUS MODEL (captureFocus) — the composer is the DEFAULT focus owner and RECLAIMS focus the
@@ -585,16 +561,17 @@ function App() {
   // can now genuinely own focus. The gate + subscription live in composer.tsx (useComposerFocus).
   useComposerFocus(taRef, state.view === "chat", captureFocus)
 
-  // Expandable rows in transcript order = Tab focus ring (turn-steps header, then
-  // its tool rows when that turn is expanded). Enter toggles the focused one.
+  // Expandable rows in transcript order = Tab focus ring (turn-steps header, then its tool
+  // rows when that turn is expanded). A WORKFLOW turn additionally contributes its inline
+  // node-tree rows to the ring (node:<id> collapses a node; tool:<id> drives an owned tool) —
+  // ONLY when its WorkflowPart shows (t.workflow set). A non-workflow turn contributes none, so
+  // hidden node rows never join the Tab cycle. Enter toggles the focused one.
   const focusables: string[] = []
   for (const t of turns) {
     if (t.steps.length > 0) focusables.push(`turn:${t.idx}`)
     if (isExpanded(t)) for (const s of t.steps) if (s.kind === "tool") focusables.push(`tool:${s.id}`)
+    if (t.workflow) focusables.push(...orchFocusables(workflowRows(t.workflow, expNodes)))
   }
-  // Orchestration node + tool rows join the Tab ring too (derived from the same flattened
-  // rows). `node:<id>` collapses a node; `tool:<id>` (same key as transcript tools) drives a tool.
-  focusables.push(...orchFocusables(orchRows))
   const focusedKey = pickFocused(focusables, focus)
   const toggleFocused = () => {
     if (!focusedKey) return
@@ -620,6 +597,22 @@ function App() {
     taRef.current?.setText(v)
     setText(v)
   }
+
+  // INLINE NODE-TREE: render one flattened workflow row as a NodeRow (owns the per-node
+  // ToolView + the node/tool expansion + focus wiring). Injected into TurnView so the inline
+  // tree hangs under the turn that produced it, reusing the SAME NodeRow as the old footer.
+  const renderNode = (row: OrchRow) => (
+    <NodeRow
+      key={row.id}
+      row={row}
+      expTools={expTools}
+      onToggle={toggleNode}
+      onToggleTool={toggleTool}
+      focusedKey={focusedKey}
+      cols={width || 80}
+      frame={work.frame}
+    />
+  )
 
   const submit = () => {
     // IME DEFER (P0): under CJK composition the Enter that submits can fire BEFORE the textarea
@@ -815,36 +808,15 @@ function App() {
             first={i === 0}
             expanded={isExpanded(t)}
             expTools={expTools}
+            expNodes={expNodes}
             focusedKey={focusedKey}
             cols={width || 80}
             frame={work.frame}
             onToggleTurn={() => toggleTurn(t.idx)}
             onToggleTool={(id) => toggleTool(id)}
+            renderNode={renderNode}
           />
         ))}
-        {showOrch && orch && (
-          <box flexDirection="column" style={{ marginTop: 1, paddingLeft: 1 }}>
-            <text fg={theme.muted}>orchestration</text>
-            {/* VELOCITY UNICODE TREE: one flat <text> per flattened Row, connectors
-                precomputed by flatten() — no nested padding boxes. */}
-            <box flexDirection="column" style={{ paddingLeft: INDENT }}>
-              {orchRows.map((row) => (
-                <NodeRow
-                  key={row.id}
-                  row={row}
-                  expTools={expTools}
-                  onToggle={toggleNode}
-                  onToggleTool={toggleTool}
-                  focusedKey={focusedKey}
-                  cols={width || 80}
-                  frame={work.frame}
-                />
-              ))}
-              {/* Σ footer: live run total — tokens · nodes · errors (COST-METER total preserved). */}
-              <text fg={theme.dim}>{orchSigma(orch)}</text>
-            </box>
-          </box>
-        )}
       </scrollbox>
       {/* COMPOSER (SPEC) — bordered textarea + metadata row (model) + status row (left
           spinner/hint, right token·cost / Cmd+K). flexShrink:0 so it ALWAYS reserves its
