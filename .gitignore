@@ -12,3 +12,5 @@ artifacts
 # local agent config (machine-specific, not for distribution)
 .codex/
 .agents/
+.rlmcode_history.jsonl
+*.history.jsonl

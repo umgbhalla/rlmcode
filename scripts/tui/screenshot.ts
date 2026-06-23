@@ -18,7 +18,7 @@ const main = async (): Promise<void> => {
   const d = await launchDriver({ cols: COLS, rows: ROWS, env: { RLM_MOCK_STREAM: "1", RLM_ORCH_MAX_SHOWN: "999" } })
   try {
     await d.waitForFrame((f) => /press n|SESSIONS|no sessions/i.test(f), 8000)
-    await d.key("n") // new session
+    await d.type("n") // new session
     await d.waitForFrame((f) => /message|kimi/i.test(f), 8000)
     // A turn that triggers the mock orchestration tree (the rich UX).
     await d.type("orchestrate the auth refactor")
