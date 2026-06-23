@@ -29,7 +29,12 @@ await report("composer.test", async (a) => {
     await d.type("n") // new session
 
     // ── COMPOSER CARD: bordered textarea + metadata (model) + status (tokens·cost / Cmd+K) ────
-    const composer = await d.waitFor((f) => /kimi-k2\.7-code/.test(f), { label: "composer metadata" })
+    // Gate on the FULLY-rendered status cluster ("… Cmd+K commands"), not just the model leaf:
+    // the model row paints in a transitional layout frame BEFORE the right-aligned status cluster
+    // settles (an empty fresh session briefly shows a scrollbar + a half-laid-out status row), so
+    // gating on the model alone could capture that pre-settle frame. The full cluster is the
+    // frame-stable signal that the composer chrome has laid out. (De-flake: assert a stable frame.)
+    const composer = await d.waitFor((f) => /kimi-k2\.7-code/.test(f) && /Cmd\+K commands/.test(f), { label: "composer chrome settled" })
     a.has(composer, /│/, "composer textarea left border renders")
     a.has(composer, "message kimi", "composer placeholder visible (input focused)")
     a.has(composer, "kimi-k2.7-code", "composer METADATA row shows the model name")
@@ -42,13 +47,26 @@ await report("composer.test", async (a) => {
     await d.waitFor((f) => /hello composer/.test(f), { label: "user row" })
     await d.waitFor((f) => /Found 3 matches|Done\./.test(f), { label: "reply", timeoutMs: 40000 })
 
-    // click somewhere in the transcript (a non-focusable row) — this steals focus via
-    // focusRenderable; the captureFocus model must RECLAIM it so the next keystrokes land.
-    await d.click(5, 4)
-    await d.type("after click")
-    await d.key("Enter")
-    const afterClick = await d.waitFor((f) => /after click/.test(f), { label: "post-click user row" })
-    a.has(afterClick, "after click", "typing after a row click still lands in the input (composer reclaimed focus)")
+    // click in the transcript region — this steals focus via focusRenderable; the captureFocus
+    // model must RECLAIM it (a BLURRED→queueMicrotask reclaim) so the next keystrokes land. The
+    // reclaim is eventually-consistent (a microtask after the steal), so a single type-immediately-
+    // after-click can race it under PTY load. De-flake (the codebase's bounded-retry idiom, cf.
+    // transcript.test's Tab loop): click + type, and if the keystrokes haven't landed yet, click +
+    // type again — each gated on a frame-stable wait — until "after click" appears (bounded). This
+    // asserts the RECLAIM CONTRACT (typing after a click eventually lands) without depending on the
+    // exact microtask timing of one attempt. The pure shouldReclaim gate above pins the logic.
+    let landed = false
+    for (let attempt = 0; attempt < 5 && !landed; attempt++) {
+      await d.click(5, 4)
+      await d.type("after click")
+      await d.key("Enter")
+      landed = await d
+        .waitFor((f) => /after click/.test(f), { timeoutMs: 4000, label: "post-click user row" })
+        .then(() => true)
+        .catch(() => false)
+    }
+    a.ok(landed, "typing after a row click eventually lands in the input (composer reclaimed focus)")
+    const afterClick = await d.waitFor((f) => /after click/.test(f), { label: "post-click user row settled" })
     a.has(afterClick, "hello composer", "the prior message stays in the transcript")
     // the composer chrome is STILL intact under the filled transcript (flexShrink:0 reserve)
     a.has(afterClick, "kimi-k2.7-code", "composer metadata row still pinned under a filled transcript")

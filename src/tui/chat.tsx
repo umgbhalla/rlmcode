@@ -12,11 +12,10 @@ import { createCliRenderer, decodePasteBytes } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { memo, useEffect, useRef, useState } from "react"
 import { abortTurn } from "../app/default-agent.ts"
-import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, MODEL, type Msg, newSessionAtom, type OrchTree, sendAtom, type SessionView, type TurnMeta } from "./atoms.ts"
+import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, MODEL, newSessionAtom, sendAtom } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { makeSyntaxStyle, theme, useTheme } from "./theme.ts"
-import { toolLabel } from "./toolui.ts"
 import { FocusGutter, ToolView } from "./tool-view.tsx"
 import { type Row as OrchRow } from "./orch-tree.ts"
 import { ActionBar, shortCwd } from "./shell.tsx"
@@ -30,8 +29,10 @@ import { MODELS, type ModelName } from "../app/default-agent.ts"
 import { DialogOverlays, printableChar, useDialogs } from "./dialogs.tsx"
 import { WhichKey } from "./which-key.tsx"
 import { activeBindings, type Bind, dispatch, type KeyEventLike, matchesChord, useModeStack } from "./keys.ts"
-import { activeRetry, computeShowOrch, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
+import { activeRetry, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
 import { turnPropsEqual } from "./turn-memo.ts"
+import { List, NewPill, SessionHeader } from "./header.tsx"
+import { fmtTokens, groupSummary, groupSteps, INDENT, navKeyName, oneLine, sessionTokens, SPIN_FRAMES, statusBar, toTurns, toolsUsed, type Turn } from "./chat-model.ts"
 
 // The shared syntax style for the reply <markdown> + the tool <diff>: a SyntaxStyle with every
 // tree-sitter / markup / diff scope registered onto the theme palette (theme.ts makeSyntaxStyle),
@@ -45,132 +46,6 @@ const inputKeys = [
   { name: "return", action: "submit" },
   { name: "return", shift: true, action: "newline" },
 ] as any
-
-type ToolMsg = Extract<Msg, { kind: "tool" }>
-// INLINE NODE-TREE (opencode-ux-blueprint Option B): a turn that produced an orchestration
-// fan-out carries its OrchTree as `workflow`, so TurnView renders the node-tree right after
-// that turn's reply (vs the old session-level block pinned below ALL turns). undefined on a
-// plain turn ⇒ no orchestration block. toTurns attaches it (computeShowOrch-gated).
-type Turn = { idx: number; user: string; steps: Msg[]; final: string | null; meta?: TurnMeta | undefined; thinking?: string | undefined; streaming?: boolean; workflow?: OrchTree | undefined }
-
-const oneLine = (s: string, n = 90) => {
-  const t = s.replace(/\s+/g, " ").trim()
-  return t.length > n ? `${t.slice(0, n)}…` : t
-}
-
-// AUTOCOMPLETE nav-key map: an opentui key event → the controller's nav action, or null for any
-// other key (a printable, backspace, …) which is NOT consumed by the popup (it falls through to the
-// textarea so the query keeps narrowing). Pure; tab is treated like return (accept the selection).
-type AcNav = "up" | "down" | "return" | "escape" | "tab"
-const navKeyName = (k: { readonly name?: string | undefined }): AcNav | null => {
-  switch (k.name) {
-    case "up":
-    case "down":
-    case "return":
-    case "escape":
-    case "tab":
-      return k.name
-    default:
-      return null
-  }
-}
-
-// COST-METER token formatter: "318k tok" / "742 tok" (shared by turn meta + orch tree).
-const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k tok` : `${n} tok`)
-
-// Session token total for the footer cost-meter: sum every settled reply's meta.tokens across
-// the transcript, plus the orchestration run total. Pure — drives ActionBar's token/cost.
-const sessionTokens = (messages: readonly Msg[], orch: OrchTree | undefined): number => {
-  let n = orch?.totalTokens ?? 0
-  for (const m of messages) if (m.kind === "agent" && typeof m.meta?.tokens === "number") n += m.meta.tokens
-  return n
-}
-
-const INDENT = 2 // single source of truth for transcript nesting
-
-type Work = { frame: string; elapsed: number }
-// Right-side status for the composer's status row (busy/armed/transient note/idle). `live` =
-// "there is something to say" (mid-turn / armed / a transient note); when false the row stays
-// CLEAN (only the persistent token·Cmd+K cluster shows, right-aligned). The spinner is rendered
-// by the composer itself, so the busy text carries no frame glyph here. The keybind help that
-// used to fill the idle bar is gone — Cmd+K (the palette) is the discovery surface now.
-const statusBar = (busy: boolean, armed: boolean, note: string | null, work: Work, retry: string | null): { right: string; tone: string; live: boolean } => {
-  if (armed) return { right: "esc again to interrupt", tone: theme.error, live: true }
-  if (note) return { right: note, tone: theme.ok, live: true } // transient (copied / paste collapsed) wins so it's never swallowed mid-turn
-  // RATE-LIMIT VISIBILITY: a node backing off (a 429 retry) takes priority over the generic
-  // "thinking…" so the throttle is visible at the turn level — "⏳ rate-limited · retry 2/3 · 4s ·
-  // esc interrupt". In the warning tone (not the busy spinner tone) so it reads as throttled.
-  if (retry) return { right: `${retry} · esc interrupt`, tone: theme.warning, live: true }
-  if (busy) return { right: `thinking… ${work.elapsed}s · esc interrupt`, tone: theme.busy, live: true }
-  return { right: "", tone: theme.muted, live: false }
-}
-
-function toTurns(messages: readonly Msg[], orch?: OrchTree): Turn[] {
-  const turns: Turn[] = []
-  for (const m of messages) {
-    if (m.kind === "you") turns.push({ idx: turns.length, user: m.text, steps: [], final: null })
-    else if (turns.length > 0) turns[turns.length - 1]!.steps.push(m)
-  }
-  // INLINE NODE-TREE: the session holds ONE OrchTree (the live fan-out). Attach it to the turn
-  // that owns it — the LAST turn — but ONLY when it's a real fan-out worth showing
-  // (computeShowOrch). A non-workflow session/turn gets no `workflow`, so TurnView renders no
-  // orchestration block. The tree then hangs under THAT turn's reply, not in a session footer.
-  if (computeShowOrch(orch) && turns.length > 0) turns[turns.length - 1]!.workflow = orch
-  for (const t of turns) {
-    for (let i = t.steps.length - 1; i >= 0; i--) {
-      const s = t.steps[i]!
-      // SEQUENCE STABILITY: only the TRUE final reply (the one carrying meta, appended at
-      // turn end) is promoted out of the step stream. Streaming narration chunks are also
-      // kind:"agent" but carry NO meta — promoting the last of those mid-turn made the green
-      // "final" slot flicker and the rows reorder on every chunk. They stay as ordered steps.
-      // Promote the settled reply (carries meta) OR the in-flight STREAMING reply. The streaming
-      // reply is ONE message that grows in place (atoms grow()), so promoting it is stable — no
-      // per-chunk reorder flicker (the old hazard was many separate narration msgs). Carry its
-      // thinking + streaming flag up so the render shows the collapsible thinking + live cursor.
-      if (s.kind === "agent" && (s.meta || s.streaming === true)) {
-        t.final = s.text
-        t.meta = s.meta
-        t.streaming = s.streaming === true && s.meta === undefined
-        t.thinking = s.thinking
-        t.steps = [...t.steps.slice(0, i), ...t.steps.slice(i + 1)]
-        break
-      }
-    }
-  }
-  return turns
-}
-
-// TOOL GROUPING (P1): a run of consecutive read/glob/grep ("explore") tool steps collapses
-// into ONE "explored N" row instead of N near-identical lines (the flat-rendering fix). A lone
-// explore tool, an error, or any other tool renders normally. Presentational only — Msg is
-// unchanged; this groups at render time.
-const EXPLORE_TOOLS = new Set(["read_file", "glob", "grep"])
-type StepItem = { readonly kind: "one"; readonly m: Msg } | { readonly kind: "group"; readonly tools: ToolMsg[] }
-const groupSteps = (steps: Msg[]): StepItem[] => {
-  const out: StepItem[] = []
-  for (const s of steps) {
-    if (s.kind === "tool" && EXPLORE_TOOLS.has(s.name) && s.status !== "error") {
-      const last = out[out.length - 1]
-      if (last?.kind === "group") last.tools.push(s)
-      else out.push({ kind: "group", tools: [s] })
-    } else out.push({ kind: "one", m: s })
-  }
-  // a "group" of one isn't worth collapsing — unwrap so a single read still renders in full.
-  return out.map((it) => (it.kind === "group" && it.tools.length === 1 ? { kind: "one", m: it.tools[0]! } : it))
-}
-// One-line summary for a collapsed explore group: "explored 5 (3 read · 2 grep)".
-const groupSummary = (tools: readonly ToolMsg[]): string => {
-  const by: Record<string, number> = {}
-  for (const t of tools) by[t.name] = (by[t.name] ?? 0) + 1
-  const verb: Record<string, string> = { read_file: "read", glob: "glob", grep: "grep" }
-  const parts = Object.entries(by).map(([n, c]) => `${c} ${verb[n] ?? n}`)
-  return `explored ${tools.length} (${parts.join(" · ")})`
-}
-
-const toolsUsed = (steps: Msg[]) =>
-  [...new Set(steps.filter((s): s is ToolMsg => s.kind === "tool").map((s) => toolLabel(s.name, s.args).split("(")[0]!))].join(", ")
-
-const SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 // Animated working state for the input placeholder. Ticks only while busy; the
 // frame + elapsed seconds read as a little idle→working→done state machine right
@@ -393,33 +268,6 @@ function NodeRow(p: NodeRowProps) {
             </box>
           ))}
         </box>
-      )}
-    </box>
-  )
-}
-
-function List({ sessions, cursor, busySessions, frame, armedDelete }: { sessions: readonly SessionView[]; cursor: number; busySessions: ReadonlySet<string>; frame: string; armedDelete: string | null }) {
-  return (
-    <box flexDirection="column" padding={1}>
-      <text fg={theme.muted}>SESSIONS · n new · ↑↓ move · enter open · d close · q quit</text>
-      {sessions.length === 0 ? (
-        <text fg={theme.muted}>no sessions. press n to start.</text>
-      ) : (
-        sessions.map((s, i) => {
-          const working = busySessions.has(s.id)
-          const arming = armedDelete === s.id
-          return (
-            <text key={s.id} fg={i === cursor ? theme.busy : theme.text}>
-              {i === cursor ? "▸ " : "  "}
-              {/* per-session liveness: a live spinner if this session has a turn in flight */}
-              <span fg={working ? theme.busy : theme.faint}>{working ? `${frame} ` : "  "}</span>
-              {s.title}
-              {"  "}
-              <span fg={theme.muted}>{`${s.messages.length} msg`}</span>
-              {arming ? <span fg={theme.error}>{"  press d again to close"}</span> : null}
-            </text>
-          )
-        })
       )}
     </box>
   )
@@ -1018,6 +866,11 @@ function App() {
 
   return (
     <box flexDirection="column" style={{ height: "100%" }}>
+      {/* HEADER-ANCHORS: a ref-light sticky banner pinned at the TOP (flexShrink:0 so it never
+          scrolls away). Shows "rlmcode · session <id>" — the id is the SessionView.id, the SAME
+          value tagged on the motel chat.session span (session.id), so it doubles as the
+          trace-correlation handle. Re-renders only when the active session changes. */}
+      <SessionHeader id={active.id} />
       <scrollbox
         ref={scrollRef}
         style={{ flexGrow: 1, paddingLeft: 1, paddingRight: 1, paddingTop: 1 }}
@@ -1047,6 +900,12 @@ function App() {
             when queued===null), so App keeps no extra branch. UI-local (Msg/session unchanged). */}
         <QueuedCard text={queued} />
       </scrollbox>
+      {/* HEADER-ANCHORS "N new" pill — bottom-right jump-to-latest affordance, shown when the
+          transcript is scrolled UP and turns have arrived since you last sat at the bottom. REF-
+          DRIVEN (header.tsx NewPill reads scrollRef imperatively + a seen-count ref) — a scroll
+          alone never re-renders; it re-evaluates when a new turn lands (turns.length changes) or
+          on the busy tick. Anchored above the composer (bottom=6) so it floats over the transcript. */}
+      <NewPill scrollRef={scrollRef} turnCount={turns.length} bottom={6} />
       {/* AUTOCOMPLETE popup (wire-autocomplete) — the @-mention / slash menu, an absolute card
           bottom-anchored so it floats just ABOVE the composer (opencode docks it over the prompt).
           Driven by the controller built above; mounts only while a trigger is live (the component
