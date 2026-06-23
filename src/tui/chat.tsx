@@ -23,6 +23,8 @@ import { Composer, useComposerFocus } from "./composer.tsx"
 import { AssistantReply, ErrorCard, ThinkingPart, UserCard } from "./messages.tsx"
 import { type Option, useDialogSelect } from "./dialog-select.tsx"
 import { type Command, Palette } from "./palette.tsx"
+import { MODELS, type ModelName } from "../app/default-agent.ts"
+import { DialogOverlays, printableChar, useDialogs } from "./dialogs.tsx"
 import { WhichKey } from "./which-key.tsx"
 import { activeBindings, type Bind, dispatch, type KeyEventLike, matchesChord, useModeStack } from "./keys.ts"
 import { computeShowOrch, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
@@ -509,6 +511,10 @@ function App() {
   const [note, setNote] = useState<string | null>(null)
   // list-view `d` arm-then-confirm: holds the session id awaiting a second `d` to close.
   const [armedDelete, setArmedDelete] = useState<string | null>(null)
+  // SELECTED MODEL — the model the composer NAMES (the model pick sets it). Starts at the default
+  // session model id (Kimi); the model picker (useDialogs) swaps it to the other pool entry's id,
+  // which the Composer's metadata row renders. A real, visible action — the picked model is shown.
+  const [selectedModel, setSelectedModel] = useState<string>(MODEL)
   const focusedRef = useRef(true)
   // MODE STACK (keys.ts) — the single source of truth for which keyboard scope is active. "base"
   // is the composer + transcript-nav mode; opening the command palette / the which-key overlay
@@ -520,10 +526,25 @@ function App() {
   const mode = useModeStack()
   const palette = mode.is("palette")
   const whichKey = mode.is("whichkey")
+  // SESSION SWITCHER + MODEL PICK (dialogs.tsx) — the two extra pickers, each a thin wrapper over
+  // the SAME DialogSelect the palette uses (opencode reuse). Both run on the generic "dialog" mode;
+  // `dialogs.kind` ("session" | "model" | null) says which is mounted. The switch action sets the
+  // active session (mirrors the palette's old per-session "Switch:" rows); the model action sets the
+  // composer-displayed model id. useDialogs owns BOTH controllers + the kind + the "dialog"-mode key
+  // rows (spread into the registry below), so chat.tsx stays under the file ceiling.
+  const dialogs = useDialogs(
+    state.sessions,
+    state.activeId,
+    selectedModel,
+    mode,
+    (id) => setApp((st) => ({ ...st, view: "chat" as const, activeId: id })),
+    (name: ModelName) => setSelectedModel(MODELS[name].id),
+  )
   // FOCUS CAPTURE (composer.tsx captureFocus model): true whenever an overlay mode (anything but
   // base) owns the keyboard, so the composer stops reclaiming and yields keystrokes to the
   // registry. This is the gate the captureFocus seam was wired + tested for — now driven off the
-  // mode stack (active ≠ base) instead of the OR of the removed booleans.
+  // mode stack (active ≠ base) instead of the OR of the removed booleans. The "dialog" mode (a
+  // session/model picker) is ≠ base, so it captures focus exactly like the palette.
   const captureFocus = mode.active !== "base"
 
   useEffect(() => {
@@ -779,9 +800,15 @@ function App() {
   // must work) — no dead entries. Filtered by the live query (substring, case-insensitive).
   const commands: Command[] = [
     { title: "New session", hint: "n", run: () => void newSession() },
-    ...state.sessions
-      .filter((s) => s.id !== state.activeId)
-      .map((s) => ({ title: `Switch: ${s.title}`, run: () => setApp((st) => ({ ...st, view: "chat" as const, activeId: s.id })) })),
+    // SESSION SWITCHER + MODEL PICK via the command palette (opencode reuse): a command OPENS the
+    // shared DialogSelect picker rather than the palette inlining one "Switch: <session>" row per
+    // session. The run closes the palette FIRST (pop "palette") then opens the dialog (push "dialog")
+    // so the two overlays never stack — order matters: opening the dialog before the pop would strand
+    // "palette" under "dialog". Switch is listed only with >1 session (nothing to switch to otherwise).
+    ...(state.sessions.length > 1
+      ? [{ title: "Switch session…", hint: "s", run: () => void (closePalette(), dialogs.openSession()) }]
+      : []),
+    { title: "Pick model…", hint: "m", run: () => void (closePalette(), dialogs.openModel()) },
     { title: "Session list", hint: "esc", run: goToList },
     ...(active ? [{ title: `Close session: ${active.title}`, run: () => void deleteSession(active.id) }] : []),
     { title: "Scroll to bottom", hint: "End", run: () => scrollPage("bottom") },
@@ -888,6 +915,10 @@ function App() {
     { mode: "whichkey", chord: "escape", keys: "esc", desc: "close", group: "Help", run: closeWhichKey },
     { mode: "whichkey", chord: "return", keys: "↵", desc: "close", group: "Help", hidden: true, run: closeWhichKey },
     { mode: "whichkey", chord: "?", keys: "?", desc: "close", group: "Help", hidden: true, run: closeWhichKey },
+    // ── DIALOG MODE (session switcher / model pick) — the shared "dialog"-mode key rows live in
+    // dialogs.tsx (routed to whichever picker kind is open) and are SPREAD in here so dispatch routes
+    // esc/↵/↑↓/home/end/⌫ while a picker is up. They scope the keyboard exactly like the palette rows.
+    ...dialogs.binds,
   ]
 
   useKeyboard((k) => {
@@ -903,6 +934,11 @@ function App() {
     if (mode.is("palette")) {
       const ch = printable(k)
       if (ch !== "") palModel.appendQuery(ch)
+    } else if (mode.is("dialog")) {
+      // A dialog's bindings are all named keys (esc/↵/↑↓/home/end/⌫), so a visible char never matches
+      // one and falls through to here, feeding the OPEN picker's filter (same path as the palette above).
+      const ch = printableChar(k)
+      if (ch !== "") dialogs.feedChar(ch)
     }
   })
 
@@ -911,6 +947,9 @@ function App() {
       <box flexDirection="column" style={{ height: "100%" }}>
         <List sessions={state.sessions} cursor={state.cursor} busySessions={busySessions} frame={work.frame} armedDelete={armedDelete} />
         {palette ? <Palette model={palModel} theme={t} /> : null}
+        {/* SESSION SWITCHER / MODEL PICK overlays — the same shared DialogSelect, switched by
+            dialogs.kind. Reachable from the list view too (⌘K → "Switch session…" / "Pick model…"). */}
+        <DialogOverlays dialogs={dialogs} theme={t} />
       </box>
     )
   }
@@ -963,7 +1002,7 @@ function App() {
         theme={t}
         busy={busy}
         armed={armed}
-        model={MODEL}
+        model={selectedModel}
         status={{ text: status.right, tone: status.tone, live: status.live }}
         tokens={sessTokens}
         fmtTokens={fmtTokens}
@@ -982,6 +1021,10 @@ function App() {
       {/* ⌘K command palette — absolute overlay on top of the transcript (termcast DialogOverlay).
           Rendered last so it floats over everything; chat.tsx owns its state + key routing. */}
       {palette ? <Palette model={palModel} theme={t} /> : null}
+      {/* SESSION SWITCHER / MODEL PICK — the same shared DialogSelect (dialogs.tsx), switched by
+          dialogs.kind. Absolute overlays like the palette; chat.tsx owns the open/close via the
+          "dialog" mode + routes keys to the active controller. Opened from ⌘K. */}
+      <DialogOverlays dialogs={dialogs} theme={t} />
       {/* WHICH-KEY overlay (`?`) — contextual keybind hints, now read straight from the REGISTRY:
           activeBindings("base", binds) projects the base-mode rows whose `when` currently holds to
           the which-key display shape. With inChat true that's exactly the chat-view bindings (the
