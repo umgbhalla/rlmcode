@@ -1,0 +1,140 @@
+#!/usr/bin/env bun
+// Advisory debt audit (proposal d). The DETERMINISTIC churn-ranking half of the
+// /ponytail-audit pass: a CLI can't call an LLM, so this script does what a CLI
+// CAN — compute a churn-ranked candidate list and refresh the docs/DEBT-AUDIT.md
+// scaffolding. The actual SEMANTIC over-engineering scan is an agent process step
+// (the `ponytail:ponytail-audit` skill) documented in AGENTS.md; it fills in the
+// findings under each candidate the agent chooses to inspect.
+//
+// ADVISORY by construction: this is NEVER wired into the blocking `bun run lint`
+// gate and NEVER exits non-zero on findings (only on its own internal failure).
+// The blocking marker gate stays scripts/ponytail-debt.ts (unchanged).
+//
+// Priority model (proposal d, brief #12): rank a hot, big-or-branchy file to the
+// top — a refactor there pays off. priority = weight × churn[file], where weight
+// is a rough size/complexity proxy (lines + branch-node count) so old debt in a
+// file nobody touches sinks and debt in agent.ts / mock-ai.ts surfaces.
+//
+// `auditCandidates` is exported so scripts/debt-audit.test.ts can assert the
+// ranking on fixtures — ponytail: non-trivial ranking leaves a runnable check.
+// Upgrade: run the /ponytail-audit agent step (AGENTS.md) to fill the findings
+// column; promote a finding to the blocking debt gate only per the escalation
+// rule (age > 2mo AND churn ≥ median) once the false-positive rate is known.
+import { Analyzer } from "yuku-analyzer"
+
+// Per-file commit count over the last 90 days, from ONE `git log` invocation (the same
+// churn-map approach design-check uses for its hotspot squeeze). `--name-only
+// --pretty=format:` prints, per commit, the touched paths; counting path occurrences
+// gives churn. A churn-less environment (no git / shallow clone) returns an empty map →
+// no candidates, and the audit stays advisory (deterministic fallback). Self-contained
+// here so the advisory step never depends on design-check's internals or merge order.
+const churnMap = (since = "90 days ago"): Map<string, number> => {
+  const r = Bun.spawnSync(["git", "log", `--since=${since}`, "--name-only", "--pretty=format:"])
+  const counts = new Map<string, number>()
+  if (!r.success) return counts
+  for (const raw of r.stdout.toString().split("\n")) {
+    const p = raw.trim()
+    if (p) counts.set(p, (counts.get(p) ?? 0) + 1)
+  }
+  return counts
+}
+
+// Branch-node kinds — a rough cyclomatic proxy (same set design-check counts for CC),
+// summed over the whole file rather than per-function. A blunt complexity signal, which
+// is all the ranking needs.
+const BRANCH = new Set([
+  "IfStatement",
+  "ForStatement",
+  "ForInStatement",
+  "ForOfStatement",
+  "WhileStatement",
+  "DoWhileStatement",
+  "ConditionalExpression",
+  "LogicalExpression",
+  "SwitchCase",
+  "CatchClause",
+])
+
+const ROLE_OF = (path: string): string =>
+  path.startsWith("src/core/") ? "core"
+  : path.startsWith("src/app/") ? "app"
+  : path.startsWith("src/tui/") ? "tui"
+  : "script"
+
+export type Candidate = { path: string; lines: number; branches: number; churn: number; weight: number; priority: number; role: string }
+
+// Rough size/complexity weight: a file's lines plus its branch density (×8 to put a
+// branch on the order of several source lines). Tunable — it only orders the list.
+const BRANCH_WEIGHT = 8
+const weightOf = (lines: number, branches: number): number => lines + branches * BRANCH_WEIGHT
+
+// Build the churn-ranked candidate list. Files with churn 0 (untouched in the window)
+// are dropped — a debt audit prioritizes by where change actually lands. Sorted by
+// priority (weight × churn) descending; ties broken by path for determinism.
+export const auditCandidates = (
+  files: Array<{ path: string; source: string }>,
+  churn: Map<string, number>,
+): Array<Candidate> => {
+  const a = new Analyzer()
+  for (const f of files) a.addFile(f.path, f.source)
+  const out: Array<Candidate> = []
+  for (const f of files) {
+    const c = churn.get(f.path) ?? 0
+    if (c === 0) continue
+    const m = a.modules.get(f.path)
+    let branches = 0
+    if (m) m.walk({ enter: (n: any) => { if (BRANCH.has(n.type)) branches++ } })
+    const lines = f.source.split(/\r?\n/).length
+    const weight = weightOf(lines, branches)
+    out.push({ path: f.path, lines, branches, churn: c, weight, priority: weight * c, role: ROLE_OF(f.path) })
+  }
+  return out.toSorted((x, y) => y.priority - x.priority || x.path.localeCompare(y.path))
+}
+
+const ts = (): string => new Date().toISOString().slice(0, 10)
+
+export const renderReport = (cands: Array<Candidate>): string => {
+  const top = cands.slice(0, 30)
+  const rows = top
+    .map((c, i) => `| ${i + 1} | \`${c.path}\` | ${c.role} | ${c.lines} | ${c.branches} | ${c.churn} | ${c.priority} | _(agent: fill on inspect)_ |`)
+    .join("\n")
+  return `# DEBT-AUDIT — churn-ranked over-engineering candidates (advisory)
+
+> SCAFFOLDING — regenerated by \`bun run debt:audit\` (${ts()}). ADVISORY only: this
+> file is never enforced by the blocking \`bun run lint\` gate and \`debt:audit\` never
+> exits non-zero on findings. The blocking marker gate is \`scripts/ponytail-debt.ts\`.
+
+## How this is filled
+
+The table below is the DETERMINISTIC half: a CLI cannot call an LLM, so it computes
+the churn-ranked candidate list only. \`priority = weight × churn\` where
+\`weight = lines + branches × ${BRANCH_WEIGHT}\` (a rough size/complexity proxy) and
+\`churn\` = commits touching the file in the last 90 days. A hot, big-or-branchy file
+ranks to the top — that is where a simplification refactor pays off.
+
+The **Findings** column is filled by the SEMANTIC \`/ponytail-audit\` agent pass
+(see AGENTS.md): the agent walks this list top-down, runs the over-engineering scan
+on each candidate it inspects, and records what to delete / simplify / replace with a
+stdlib or native equivalent. Files with churn 0 (untouched in the window) are omitted.
+
+## Candidates (top ${top.length} by priority)
+
+| # | file | role | lines | branches | churn(90d) | priority | findings |
+|---|------|------|-------|----------|------------|----------|----------|
+${rows}
+
+_${cands.length} candidate file(s) with churn > 0 in the last 90 days; showing the top ${top.length}._
+`
+}
+
+if (import.meta.main) {
+  const files: Array<{ path: string; source: string }> = []
+  for (const glob of ["src/**/*.{ts,tsx}", "scripts/**/*.{ts,tsx}"])
+    for await (const p of new Bun.Glob(glob).scan(".")) if (!p.endsWith(".test.ts")) files.push({ path: p, source: await Bun.file(p).text() })
+  const churn = churnMap()
+  const cands = auditCandidates(files, churn)
+  const report = renderReport(cands)
+  await Bun.write("docs/DEBT-AUDIT.md", report)
+  console.log(`debt:audit: ${cands.length} candidate(s), top priority ${cands[0]?.path ?? "(none)"}. Wrote docs/DEBT-AUDIT.md. (advisory — never blocks)`)
+  process.exit(0) // ADVISORY: never non-zero on findings.
+}
