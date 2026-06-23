@@ -19,7 +19,7 @@
 //   4. abortSignal: threaded into every node forward via NodeOpts.
 import { ax, AxMemory, type AxAIService, type AxGen } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { BASE_PROMPT, limits, makeOnEvent, readUsageOf } from "./runtime.ts"
+import { BASE_PROMPT, limits, makeOnEvent, nodeRateLimiter, readUsageOf } from "./runtime.ts"
 import { type NodeModelChoice, nodeForwardOpts } from "./models.ts"
 import { finalizeOnMaxSteps, judge as judgeRecipe, parallelLimit, runNode } from "./orch-recipes.ts"
 import { type ActivitySink, pipeline as pipelineCore, type Budget, type NodeOpts } from "./orch.ts"
@@ -108,6 +108,10 @@ export const buildWorkflowPrims = (
     stream: false,
     abortSignal: signal,
     emit,
+    // BACKGROUND lane (FIX B / contention): throttle this node on nodeRateLimiter's OWN clock
+    // (a per-forward rateLimiter overrides the service-level chat lane) so a background fan-out
+    // can never push the interactive chat turn's next forward behind N node reservations.
+    rateLimiter: nodeRateLimiter,
     ...nodeForwardOpts(c ?? choice),
   })
 

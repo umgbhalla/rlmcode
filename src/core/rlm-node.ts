@@ -40,7 +40,7 @@ import {
   AxMemory,
 } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { limits } from "./runtime.ts"
+import { limits, nodeRateLimiter } from "./runtime.ts"
 import { allocate } from "./orch.ts"
 import { type EmitSink, withTimeout } from "./orch-recipes.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
@@ -229,7 +229,10 @@ export const runRlm = async (
       rlm.forward(
         ai,
         { context, query },
-        { abortSignal: rlmSignal, mem: new AxMemory(), tracer, traceContext } as Parameters<typeof rlm.forward>[2],
+        // BACKGROUND lane (FIX B / contention): an RLM run is a background node too — throttle it
+        // on nodeRateLimiter's clock (a per-forward rateLimiter overrides the chat-lane service one)
+        // so it can't push the interactive chat turn's next forward behind it.
+        { abortSignal: rlmSignal, mem: new AxMemory(), tracer, traceContext, rateLimiter: nodeRateLimiter } as Parameters<typeof rlm.forward>[2],
       ),
     )) as { answer?: unknown; evidence?: unknown }
 

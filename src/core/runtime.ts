@@ -26,23 +26,42 @@ const MAX_RPS = (() => {
   const v = Number(process.env.RLM_MAX_RPS ?? 12)
   return Number.isFinite(v) && v > 0 ? Math.max(0.1, v) : 12
 })()
-// CONTENTION (FIX B / STUCK-ANALYSIS R2+R5): chat turns AND background workflow nodes share this
-// ONE limiter (nodes reuse the same `llm` service — workflow.ts `extra.ai ?? llm`), so a single
+// CONTENTION (FIX B / STUCK-ANALYSIS R2+R5): chat turns AND background workflow nodes USED to share
+// this ONE limiter (nodes reuse the same `llm` service — workflow.ts `extra.ai ?? llm`), a single
 // global `nextAllowed` clock. The defect: `nextAllowed` grew UNBOUNDED — a `parallel` burst of N
 // node starts pushes the clock to now+N*interval, so the INTERACTIVE chat turn's NEXT forward
 // reserves BEHIND all N and waits ~N*interval. With N up to parallelLimit's cap that starves a
-// user's turn behind a background fan-out (the "crawl" amplifier). FIX: CAP the reservation
-// backlog — `nextAllowed` may run at most RLM_MAX_BACKLOG intervals ahead of `now`, so ANY single
-// caller (notably the chat turn's next step) waits AT MOST backlog*interval no matter how large the
-// concurrent burst. Steady-state RPS is unchanged (still one start per interval); only the WORST-
-// CASE wait behind a flood is bounded — anti-thundering-herd staggering kept, unbounded starvation
-// removed. A burst beyond the backlog simply starts together at the cap rather than queuing forever.
-// ponytail: ONE shared lane (chat + nodes), bounded but not isolated. Upgrade: a dedicated higher-
-// priority chat lane (a second AxRateLimiterFunction passed in the node forward opts so background
-// nodes throttle on a SEPARATE clock) once the node call sites thread a per-lane limiter.
+// user's turn behind a background fan-out (the "crawl" amplifier). Two guards, COMPOSED:
+//   (1) BACKLOG CAP (within a lane): `nextAllowed` may run at most RLM_MAX_BACKLOG intervals ahead of
+//       `now`, so ANY single caller waits AT MOST backlog*interval no matter how large the burst.
+//       Steady-state RPS is unchanged (one start per interval); only the WORST-CASE wait behind a
+//       flood is bounded — anti-thundering-herd staggering kept, unbounded starvation removed.
+//   (2) SEPARATE LANES (chat priority): the chat turn keeps the fast `rateLimiter` (bound on the
+//       shared service via agent.ts setOptions); every background workflow NODE forward instead
+//       carries `nodeRateLimiter` on its forward opts (workflow-prims optsFor) — its OWN clock, at
+//       RLM_NODE_MAX_RPS (default = half MAX_RPS, a courteous background lane). ax lets a forward's
+//       rateLimiter override the service one (same as logger/debug/fetch). So a background `parallel`
+//       burst reserves slots on the NODE clock — it can NEVER push the chat clock's `nextAllowed`
+//       forward — and the interactive turn's next step is throttled ONLY by its own (private) lane +
+//       the backlog cap, not by N*interval of the fan-out. The per-call latency the chat turn sees
+//       under concurrent background load is now bounded by its own lane alone.
+// This realizes the upgrade the old ponytail named (a second AxRateLimiterFunction on the node
+// forward opts so background nodes throttle on a SEPARATE clock); the node call site now threads it.
+// ponytail: the chat lane is the SERVICE-level limiter (every non-node forward on the shared service
+// shares it); a node is distinguished structurally (it carries `nodeRateLimiter` on its forward opts,
+// the chat turn does not). Upgrade: a first-class per-forward `priority` field if ax ever surfaces
+// caller identity in the limiter `info` arg, so lanes need no out-of-band opts wiring.
 const MAX_BACKLOG = (() => {
   const v = Number(process.env.RLM_MAX_BACKLOG ?? 8)
   return Number.isFinite(v) && v > 0 ? Math.max(1, Math.floor(v)) : 8
+})()
+// BACKGROUND-NODE lane RPS: background workflow nodes throttle on their OWN clock (nodeRateLimiter
+// below) at this rate, separate from the chat turn's MAX_RPS lane — so a node fan-out can't starve a
+// user's interactive turn. Default = half MAX_RPS (the background lane yields to the interactive one);
+// RLM_NODE_MAX_RPS overrides. Same clamp as MAX_RPS (>= 0.1 so a bad env never divides by zero).
+const NODE_MAX_RPS = (() => {
+  const v = Number(process.env.RLM_NODE_MAX_RPS ?? MAX_RPS / 2)
+  return Number.isFinite(v) && v > 0 ? Math.max(0.1, v) : MAX_RPS / 2
 })()
 const minIntervalRateLimiter = (rps: number, maxBacklog: number): AxRateLimiterFunction => {
   const interval = 1000 / rps
@@ -61,10 +80,17 @@ const minIntervalRateLimiter = (rps: number, maxBacklog: number): AxRateLimiterF
     return reqFunc()
   }
 }
-// The shared limiter instance — attached in agent.ts's setOptions (the ONE setOptions call,
+// The CHAT-lane limiter instance — attached in agent.ts's setOptions (the ONE setOptions call,
 // since setOptions reassigns every field). Exported so the live harness's standalone service
 // can attach the SAME throttle and the bounded-fan-out gate exercises the real limited path.
 export const rateLimiter: AxRateLimiterFunction = minIntervalRateLimiter(MAX_RPS, MAX_BACKLOG)
+
+// The BACKGROUND-NODE lane limiter — a SEPARATE clock (its own `nextAllowed`) from the chat lane,
+// so a background workflow fan-out reserves slots here and can never push the chat lane forward.
+// Threaded onto every node forward's opts at the single chokepoint (workflow-prims optsFor); a
+// per-forward rateLimiter overrides the service-level one (FIX B / STUCK-ANALYSIS R2). Same backlog
+// cap so a within-lane burst is also bounded. Exported for the wiring + the contention measure.
+export const nodeRateLimiter: AxRateLimiterFunction = minIntervalRateLimiter(NODE_MAX_RPS, MAX_BACKLOG)
 
 // The capable base system prompt shared by the MAIN agent (agent.ts re-exports it)
 // and every orchestration NODE (rlm-workflow.ts nodeGen). Lives HERE — the neutral

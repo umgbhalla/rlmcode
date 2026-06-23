@@ -8,7 +8,7 @@
 // calls ax.forward() is `node` (below); the lifecycle-bracketed runner is runNode()
 // (orch-recipes.ts). leaf/agent/worker/task/job/unit/runner are FORBIDDEN as names for
 // the unit — they are all the SAME thing = a node. NodeEvent/NodeView already use it.
-import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxLoggerFunction, type AxModelConfig, type AxProgramForwardOptions, type AxMemory, type AxStepHooks } from "@ax-llm/ax"
+import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxLoggerFunction, type AxModelConfig, type AxProgramForwardOptions, type AxMemory, type AxRateLimiterFunction, type AxStepHooks } from "@ax-llm/ax"
 import { type Context as OtelContext, type Tracer, trace as otelTrace } from "@opentelemetry/api"
 import * as Effect from "effect/Effect"
 import type { Activity } from "./activity.ts"
@@ -73,6 +73,13 @@ export type NodeOpts = {
   // service, so the finish-reason latch is per-turn (concurrency-safe), not a module
   // global. Omitted ⇒ the service's own fetch (UNCHANGED for nodes that don't set it).
   fetch?: typeof fetch | undefined
+  // PER-CALL rate-limiter override (FIX B / contention): the BACKGROUND-NODE throttle lane.
+  // AxProgramForwardOptions extends AxAIServiceOptions, which declares `rateLimiter?`; a per-
+  // forward limiter overrides the service-level one. workflow-prims optsFor sets this to
+  // runtime.nodeRateLimiter so every background node throttles on its OWN clock, separate from
+  // the chat turn's service-level lane — a node fan-out can't starve the interactive turn.
+  // Omitted ⇒ the service's own rateLimiter (the chat lane) — UNCHANGED for the main turn.
+  rateLimiter?: AxRateLimiterFunction | undefined
 }
 
 // A node lifecycle event over the EXISTING activity bus + OTel span annotation —
