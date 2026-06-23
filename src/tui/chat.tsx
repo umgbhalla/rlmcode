@@ -22,6 +22,7 @@ import { ActionBar, shortCwd } from "./shell.tsx"
 import { Composer, useComposerFocus } from "./composer.tsx"
 import { AssistantReply, ErrorCard, ThinkingPart, UserCard } from "./messages.tsx"
 import { type Command, Palette } from "./palette.tsx"
+import { type Binding, isWhichKeyToggle, WhichKey } from "./which-key.tsx"
 import { computeShowOrch, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
 
 const mdStyle = SyntaxStyle.create()
@@ -75,6 +76,30 @@ const statusBar = (busy: boolean, armed: boolean, note: string | null, work: Wor
   if (busy) return { right: `thinking… ${work.elapsed}s · esc interrupt`, tone: theme.busy, live: true }
   return { right: "", tone: theme.muted, live: false }
 }
+
+// CHAT-NODE BINDINGS — the active-mode keybind table the which-key overlay reads, grouped by
+// category. This is the REGISTRY SEAM: it mirrors the live useKeyboard handlers (the global
+// Ctrl+K/Ctrl+C + onChatKey's nav/scroll/history/focus keys) as a {keys,desc,group} list, so the
+// overlay is "presentational over the registry" today and the SAME shape a real keys.ts will feed.
+// ponytail: hand-rolled table duplicating the if-chain in onChatKey (no keybind registry exists —
+// only @opentui/core + react are deps). Upgrade: when keys.ts (a {keys,desc,group,when}[] registry
+// + mode stack) lands, replace this with registry.active("chat") — the row shape is already Binding.
+const chatBindings = (): readonly Binding[] => [
+  { keys: "↵", desc: "send message", group: "Compose" },
+  { keys: "⇧↵", desc: "newline", group: "Compose" },
+  { keys: "↑↓", desc: "prompt history", group: "Compose" },
+  { keys: "esc", desc: "back / interrupt", group: "Navigate" },
+  { keys: "←", desc: "session list", group: "Navigate" },
+  { keys: "tab", desc: "cycle focus", group: "Navigate" },
+  { keys: "↵", desc: "toggle focused row", group: "Navigate" },
+  { keys: "pgup", desc: "scroll up", group: "Scroll" },
+  { keys: "pgdn", desc: "scroll down", group: "Scroll" },
+  { keys: "home", desc: "scroll to top", group: "Scroll" },
+  { keys: "end", desc: "scroll to bottom", group: "Scroll" },
+  { keys: "ctrl+k", desc: "command palette", group: "Global" },
+  { keys: "?", desc: "toggle this help", group: "Global" },
+  { keys: "ctrl+c", desc: "quit", group: "Global" },
+]
 
 function toTurns(messages: readonly Msg[], orch?: OrchTree): Turn[] {
   const turns: Turn[] = []
@@ -510,10 +535,14 @@ function App() {
   const [palette, setPalette] = useState(false)
   const [pq, setPq] = useState("")
   const [pSel, setPSel] = useState(0)
-  // FOCUS CAPTURE (composer.tsx captureFocus model): true when the palette owns focus, so the
-  // composer stops reclaiming and yields keystrokes to the palette. This is the gate the
+  // WHICH-KEY overlay (`?` in chat): a contextual keybind-hint panel reading the active node's
+  // bindings. Like the palette it's a capture-focus overlay (composer yields) routed by the
+  // global handler while open, so `?` / esc close it deterministically (no textarea focus war).
+  const [whichKey, setWhichKey] = useState(false)
+  // FOCUS CAPTURE (composer.tsx captureFocus model): true when an overlay (palette OR which-key)
+  // owns focus, so the composer stops reclaiming and yields keystrokes to it. This is the gate the
   // captureFocus seam was wired + tested for.
-  const captureFocus = palette
+  const captureFocus = palette || whichKey
 
   useEffect(() => {
     setExpTurns(new Set())
@@ -795,6 +824,20 @@ function App() {
     setPq("")
     setPSel(0)
   }
+  // Open the which-key overlay AND swallow the `?` that triggered it: opentui's focused textarea
+  // also receives the printable `?` keystroke (the global useKeyboard doesn't stop the textarea from
+  // inserting it), so without this the composer would hold a stray "?" after the overlay opens. The
+  // toggle only fires on an EMPTY composer, so clearing it is lossless; deferred a tick (like submit)
+  // so it runs AFTER the textarea has inserted the char. captureFocus then yields focus to the overlay.
+  const openWhichKey = () => {
+    setWhichKey(true)
+    queueMicrotask(() => setInput(""))
+  }
+  // Which-key key routing (active only while open): it's a read-only hint panel, so esc / Enter /
+  // `?` all dismiss it (no selection model). Routed by the global handler while whichKey is set.
+  const onWhichKeyKey = (k: any) => {
+    if (k.name === "escape" || k.name === "return" || isWhichKeyToggle(k)) setWhichKey(false)
+  }
   // Palette key routing (active only while open): esc closes, ↵ runs the highlighted command,
   // ↑↓ move, backspace edits, a printable char appends to the filter (and resets the highlight).
   const onPaletteKey = (k: any) => {
@@ -818,7 +861,15 @@ function App() {
       setPSel(0)
       return setPalette((p) => !p)
     }
+    if (whichKey) return onWhichKeyKey(k)
     if (palette) return onPaletteKey(k)
+    // `?` (chat view, composer EMPTY) raises the which-key keybind-hint overlay. Routed here in the
+    // global handler (alongside Ctrl+K) — NOT in onChatKey — so onChatKey stays under its complexity
+    // budget; while open, keys route to onWhichKeyKey above. Emptiness is read from the textarea's
+    // LIVE plainText (not the `text` state, which lags a tick behind fast typing — gating on it let
+    // a "?" ending a sentence like "…in src?" fire the toggle mid-type and wipe the draft). So a
+    // literal "?" appended to any draft types normally; only a `?` on a truly empty composer toggles.
+    if (inChat && (taRef.current?.plainText ?? "").trim() === "" && isWhichKeyToggle(k)) return openWhichKey()
     return state.view === "list" ? onListKey(k) : onChatKey(k)
   })
 
@@ -898,6 +949,9 @@ function App() {
       {/* ⌘K command palette — absolute overlay on top of the transcript (termcast DialogOverlay).
           Rendered last so it floats over everything; chat.tsx owns its state + key routing. */}
       {palette ? <Palette query={pq} sel={pSel} commands={palFiltered} theme={t} /> : null}
+      {/* WHICH-KEY overlay (`?`) — contextual keybind hints for the chat node, read from the
+          chatBindings() registry seam. Absolute overlay like the palette; presentational only. */}
+      {whichKey ? <WhichKey bindings={chatBindings()} cols={width || 80} theme={t} /> : null}
     </box>
   )
 }
