@@ -72,13 +72,17 @@ export function AssistantReply({
   fmtTokens: (n: number) => string
   // Markdown renderer injected by chat.tsx (carries its shared SyntaxStyle), so this file
   // stays free of the renderer's <markdown> + style wiring.
-  renderBody: (content: string) => React.ReactNode
+  renderBody: (content: string, streaming: boolean) => React.ReactNode
 }) {
   // No leading marker — the reply body renders straight at paddingLeft=3 (aligned with the
   // thinking + footer), not pushed in behind a ⏺/▣ badge. Cleaner, opencode-plain.
+  // LIVE markdown: render the body through the streaming markdown renderer the WHOLE time —
+  // opentui's <markdown streaming> (wired in renderBody) re-parses incrementally as the text
+  // grows and tolerates incomplete markdown (open code fences / half tables), so the reply
+  // renders as MARKDOWN live, not plain-text-then-reflow. (opencode session/index.tsx:1761.)
   return (
     <box flexDirection="column" style={{ marginTop: 1, paddingLeft: 3 }}>
-      {streaming ? <text fg={theme.text}>{`${text}█`}</text> : renderBody(text)}
+      {renderBody(text, streaming)}
       {meta && (
         <box style={{ marginTop: 1 }}>
           <text fg={meta.budget ? theme.busy : theme.muted}>{assistantFooter(meta, fmtTokens)}</text>

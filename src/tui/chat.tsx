@@ -318,7 +318,7 @@ function TurnView({
             meta={t.meta}
             streaming={t.streaming ?? false}
             fmtTokens={fmtTokens}
-            renderBody={(content) => <markdown content={content} syntaxStyle={mdStyle} />}
+            renderBody={(content, streaming) => <markdown content={content} syntaxStyle={mdStyle} streaming={streaming} internalBlockMode="top-level" />}
           />
         )
       ) : null}
