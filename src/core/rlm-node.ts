@@ -212,30 +212,47 @@ export const runRlm = async (
   // not declare — cast through, like node() does in orch.ts (sound, not an `any`: a known
   // structural superset).
   //
-  // RLM TIMEOUT: race the whole forward against RLM_TIMEOUT_MS (a generous long-horizon ceiling
-  // — NOT the per-node 120s). withTimeout forks a child signal off the turn's `signal`, so a
-  // real cancel (signal abort) AND the timeout both abort the in-flight forward; we hand that
-  // forked signal to forward() as its abortSignal so ax actually stops the request.
-  const out = (await withTimeout(rootId, RLM_TIMEOUT_MS, signal, (rlmSignal) =>
-    rlm.forward(
-      ai,
-      { context, query },
-      { abortSignal: rlmSignal, mem: new AxMemory(), tracer, traceContext } as Parameters<typeof rlm.forward>[2],
-    ),
-  )) as { answer?: unknown; evidence?: unknown }
+  // CONTRACT (D4): runRlm's answer is ALWAYS returned — direct callers (the rlm() prim's outer
+  // catch is a backstop, but scripts/telemetry-live.test.ts calls runRlm bare) rely on it never
+  // throwing. The withTimeout race rejects with NodeTimeoutError on a hung run (per the contract a
+  // TIMEOUT is a partial, NOT a throw), the forward can reject (a provider/network fault), and the
+  // tail budget.charge can throw BudgetExhaustedError on a HARD runaway breach — wrap ALL of it so
+  // any of those returns a PARTIAL ({ answer: "", evidence: [] } + the turns/callbacks counted so
+  // far) instead of escaping. The per-turn callback's advisory charge above never throws for the
+  // soft line; only this tail reconcile (HARD ceiling) can, so it lives inside the same guard.
+  try {
+    // RLM TIMEOUT: race the whole forward against RLM_TIMEOUT_MS (a generous long-horizon ceiling
+    // — NOT the per-node 120s). withTimeout forks a child signal off the turn's `signal`, so a
+    // real cancel (signal abort) AND the timeout both abort the in-flight forward; we hand that
+    // forked signal to forward() as its abortSignal so ax actually stops the request.
+    const out = (await withTimeout(rootId, RLM_TIMEOUT_MS, signal, (rlmSignal) =>
+      rlm.forward(
+        ai,
+        { context, query },
+        { abortSignal: rlmSignal, mem: new AxMemory(), tracer, traceContext } as Parameters<typeof rlm.forward>[2],
+      ),
+    )) as { answer?: unknown; evidence?: unknown }
 
-  // Reconcile any tail usage not seen by the per-turn callback (e.g. the responder stage),
-  // charging only the remaining DELTA so the soft tally is complete. Still advisory — this
-  // never throws for the soft line; only the hard runaway ceiling does.
-  const finalSeen = tokensFromGetUsage(rlm.getUsage())
-  if (finalSeen > chargedTokens) {
-    budget.charge({ totalTokens: finalSeen - chargedTokens })
-    chargedTokens = finalSeen
+    // Reconcile any tail usage not seen by the per-turn callback (e.g. the responder stage),
+    // charging only the remaining DELTA so the soft tally is complete. Still advisory — this
+    // never throws for the soft line; only the hard runaway ceiling does.
+    const finalSeen = tokensFromGetUsage(rlm.getUsage())
+    if (finalSeen > chargedTokens) {
+      budget.charge({ totalTokens: finalSeen - chargedTokens })
+      chargedTokens = finalSeen
+    }
+
+    const answer = String(out.answer ?? "")
+    const evidence = Array.isArray(out.evidence) ? out.evidence.map((x) => String(x)) : []
+    // The responder is the final stage — emit a done so the tree shows it completed.
+    onEvent({ type: "done", nodeId: `${rootId}/responder`, result: clip(answer, 256) })
+    return { answer, evidence, turns, callbacks }
+  } catch (cause) {
+    // D4: timeout / forward reject / HARD-ceiling breach — return a PARTIAL, never throw. Emit an
+    // error on the root node so the live tree + trace show the RLM stopped (the telemetry/workflow
+    // harnesses + the prim's outer catch all still get a clean `{ answer: "" }`). turns/callbacks
+    // carry whatever the executor loop counted before the fault (the telemetry test reads them).
+    onEvent({ type: "error", nodeId: rootId, cause })
+    return { answer: "", evidence: [], turns, callbacks }
   }
-
-  const answer = String(out.answer ?? "")
-  const evidence = Array.isArray(out.evidence) ? out.evidence.map((x) => String(x)) : []
-  // The responder is the final stage — emit a done so the tree shows it completed.
-  onEvent({ type: "done", nodeId: `${rootId}/responder`, result: clip(answer, 256) })
-  return { answer, evidence, turns, callbacks }
 }
