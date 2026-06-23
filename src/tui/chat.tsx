@@ -62,16 +62,17 @@ const elapsedSec = (startedAt: number | undefined): number =>
 
 const INDENT = 2 // single source of truth for transcript nesting
 
-const IDLE_HINT = "↑↓ history · tab focus · enter expand · PgUp/PgDn/Home/End scroll · esc back"
 type Work = { frame: string; elapsed: number }
-// Right-side status text + tone for the bottom bar (busy/armed/transient note/idle). The
-// busy branch carries the LIVE spinner + elapsed so liveness survives even while typing a
-// follow-up (the composer placeholder is replaced by the draft the moment you type).
-const statusBar = (busy: boolean, armed: boolean, note: string | null, work: Work): { right: string; tone: string } => {
-  if (armed) return { right: "esc again to interrupt", tone: theme.error }
-  if (note) return { right: note, tone: theme.ok } // transient (copied / paste collapsed) wins so it's never swallowed mid-turn
-  if (busy) return { right: `${work.frame} thinking… ${work.elapsed}s · esc interrupt`, tone: theme.busy }
-  return { right: IDLE_HINT, tone: theme.muted }
+// Right-side status for the composer's status row (busy/armed/transient note/idle). `live` =
+// "there is something to say" (mid-turn / armed / a transient note); when false the row stays
+// CLEAN (only the persistent token·Cmd+K cluster shows, right-aligned). The spinner is rendered
+// by the composer itself, so the busy text carries no frame glyph here. The keybind help that
+// used to fill the idle bar is gone — Cmd+K (the palette) is the discovery surface now.
+const statusBar = (busy: boolean, armed: boolean, note: string | null, work: Work): { right: string; tone: string; live: boolean } => {
+  if (armed) return { right: "esc again to interrupt", tone: theme.error, live: true }
+  if (note) return { right: note, tone: theme.ok, live: true } // transient (copied / paste collapsed) wins so it's never swallowed mid-turn
+  if (busy) return { right: `thinking… ${work.elapsed}s · esc interrupt`, tone: theme.busy, live: true }
+  return { right: "", tone: theme.muted, live: false }
 }
 
 function toTurns(messages: readonly Msg[], orch?: OrchTree): Turn[] {
@@ -786,11 +787,10 @@ function App() {
   const footerCwd = shortCwd(process.cwd(), process.env.HOME ?? "")
   const sessTokens = sessionTokens(active.messages, orch)
   const status = statusBar(busy, armed, note, work)
-  const placeholder = armed
-    ? "⚠ esc again to interrupt"
-    : busy
-      ? `${work.frame} thinking… ${work.elapsed}s · esc to interrupt`
-      : "message kimi"
+  // Placeholder stays CLEAN — never the thinking/esc line (that was the duplicate the user hit:
+  // it rendered inside the input area on the LEFT while the status row showed it again on the
+  // right). The live status now lives ONLY on the right-aligned status row.
+  const placeholder = "message kimi"
 
   return (
     <box flexDirection="column" style={{ height: "100%" }}>
@@ -829,7 +829,7 @@ function App() {
         busy={busy}
         armed={armed}
         model={MODEL}
-        status={{ text: status.right, tone: status.tone }}
+        status={{ text: status.right, tone: status.tone, live: status.live }}
         tokens={sessTokens}
         fmtTokens={fmtTokens}
         spinnerFrame={work.frame}

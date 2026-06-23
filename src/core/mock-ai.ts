@@ -146,17 +146,26 @@ const REPLY_PIECES = ["Found **3 ", "matches** in ", "`src/`. Done."] as const
 // thinkingDelta/replyDelta → the live thinking block + streamed reply cursor in chat.tsx.
 // NOT a fake: it is ax's documented streaming surface (chatResponse may return a
 // ReadableStream), exercising the SAME render path the real CF-Kimi stream drives.
+// AX2_MOCK_DELAY_MS (default 0) paces the stream: a pause after the thought chunk and between
+// reply pieces, so the busy/thinking state is HOLDABLE for a screenshot/recording and the demo
+// looks like a real turn (not a sub-second flash). Default 0 keeps the frame tests fast +
+// deterministic (they assert the settled frame, not timing). ponytail: a fixed sleep, not a
+// token-rate model. Upgrade: pace by real CF inter-chunk latency if a recording needs it.
+const MOCK_DELAY_MS = Number(process.env.AX2_MOCK_DELAY_MS ?? 0)
+const sleep = (ms: number): Promise<void> => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve())
 const streamReply = (): ReadableStream<AxChatResponse> => {
   const usage = { ai: "mock", model: MOCK_MODEL, tokens: MOCK_TOKENS }
   return new ReadableStream<AxChatResponse>({
-    start(c) {
+    async start(c) {
       // 1) reasoning_content first (cumulative thought, no content yet → thinking block).
       c.enqueue({ remoteId: "mock-resp-1", results: [{ index: 0, content: "", thought: MOCK_THOUGHT }], modelUsage: usage })
+      await sleep(MOCK_DELAY_MS) // hold the thinking state (capture/demo); no-op when unset
       // 2) the reply, piece by piece (each chunk is the incremental delta ax appends).
-      REPLY_PIECES.forEach((piece, i) => {
+      for (let i = 0; i < REPLY_PIECES.length; i++) {
         const last = i === REPLY_PIECES.length - 1
-        c.enqueue({ remoteId: "mock-resp-1", results: [{ index: 0, content: piece, ...(last ? { finishReason: "stop" as const } : {}) }], modelUsage: usage })
-      })
+        c.enqueue({ remoteId: "mock-resp-1", results: [{ index: 0, content: REPLY_PIECES[i]!, ...(last ? { finishReason: "stop" as const } : {}) }], modelUsage: usage })
+        if (!last) await sleep(Math.round(MOCK_DELAY_MS / 3))
+      }
       c.close()
     },
   })

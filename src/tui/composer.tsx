@@ -65,7 +65,7 @@ export const useComposerFocus = (
 
 // Composer status row text + tone (busy/armed/note/idle), pure so the frame gate reads it
 // identically. Mirrors chat.tsx's statusBar but lives with the composer it drives.
-export type ComposerStatus = { readonly text: string; readonly tone: string }
+export type ComposerStatus = { readonly text: string; readonly tone: string; readonly live: boolean }
 
 export function Composer({
   taRef,
@@ -118,19 +118,19 @@ export function Composer({
           cursorColor={theme.accent}
           focusedTextColor={theme.text}
           placeholder={placeholder}
-          placeholderColor={armed ? theme.error : busy ? theme.busy : theme.muted}
+          placeholderColor={theme.muted}
         />
       </box>
       {/* 2. metadata row — model name (LSP/MCP dropped: ax2 has neither) */}
       <box flexDirection="row" gap={1} style={{ paddingLeft: 2, flexShrink: 0 }}>
         <text fg={theme.textMuted}>{modelLabel(model)}</text>
       </box>
-      {/* 3. status row — left spinner + live hint, right tokens·cost / Cmd+K (space-between) */}
-      <box flexDirection="row" justifyContent="space-between" gap={1} style={{ paddingLeft: 2, paddingRight: 1, flexShrink: 0 }}>
-        <box flexDirection="row" gap={1} flexShrink={1}>
-          <text fg={busy ? theme.busy : theme.textMuted}>{busy ? `${spinnerFrame} ` : "  "}</text>
-          <text fg={status.tone}>{status.text}</text>
-        </box>
+      {/* 3. status row — RIGHT-ALIGNED, left stays CLEAN. The live status (spinner + thinking/esc)
+          shows ONLY mid-turn (status.live), prepended to the persistent token·Cmd+K cluster — so
+          "thinking…" lives on the RIGHT, never in the input area (it used to double as the textarea
+          placeholder AND here). justifyContent:flex-end keeps the whole row hard-right. */}
+      <box flexDirection="row" justifyContent="flex-end" gap={1} style={{ paddingLeft: 2, paddingRight: 1, flexShrink: 0 }}>
+        {status.live ? <text fg={status.tone} flexShrink={1}>{busy ? `${spinnerFrame} ` : ""}{status.text}</text> : null}
         <text fg={theme.textMuted} flexShrink={0}>{right}</text>
       </box>
     </box>
