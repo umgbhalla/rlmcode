@@ -23,7 +23,7 @@ import { initialThemeName, persistThemeName } from "./theme-config.ts"
 export type ThemeContextValue = {
   readonly palette: ResolvedTheme
   readonly name: string
-  readonly names: readonly string[]
+  readonly names: ReadonlyArray<string>
   readonly switch: (name: string) => void
 }
 
@@ -78,7 +78,7 @@ export const useTheme = (): ResolvedTheme => useContext(ThemeContext).palette
 // list (with each theme's display label for the picker rows). One call gives the picker everything.
 export const useThemeSwitcher = (): {
   readonly name: string
-  readonly names: readonly string[]
+  readonly names: ReadonlyArray<string>
   readonly switch: (name: string) => void
 } => {
   const { name, names, switch: sw } = useContext(ThemeContext)

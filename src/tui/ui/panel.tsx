@@ -36,7 +36,7 @@ export type PanelProps = {
   /** Background fill — only meaningful for the "card" overlay (a panel-bg float). */
   readonly backgroundColor?: string | undefined
   /** Which sides the "accent" variant borders (default ["left"] — the only current use). */
-  readonly sides?: readonly Side[] | undefined
+  readonly sides?: ReadonlyArray<Side> | undefined
   /** Left padding inside the card (default 2 — the transcript INDENT). */
   readonly paddingLeft?: number | undefined
   /** Top margin above the card (the per-card spacing the cards set individually). */
@@ -58,7 +58,7 @@ export function Panel(props: PanelProps): ReactNode {
     return (
       <box
         flexDirection="column"
-        border={(sides ?? ["left"]) as Side[]}
+        border={(sides ?? ["left"]) as Array<Side>}
         borderColor={borderColor}
         style={{
           paddingLeft: paddingLeft ?? 2,

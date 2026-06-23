@@ -18,7 +18,7 @@
 // subscription; `shouldReclaim` is the pure gate (unit-testable, the palette-doesn't-steal proof).
 import { RenderableEvents } from "@opentui/core"
 import { useEffect } from "react"
-import { type ResolvedTheme } from "./theme.ts"
+import type { ResolvedTheme } from "./theme.ts"
 import { actionBarRight } from "./shell.tsx"
 
 // The model id → a clean leaf label for the metadata row: "@cf/moonshotai/kimi-k2.7-code"

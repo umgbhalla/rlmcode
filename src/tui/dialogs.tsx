@@ -15,14 +15,14 @@
 // kind, and the close() that pops the mode AND clears the kind (so the overlay actually unmounts).
 import { useCallback, useMemo, useState } from "react"
 import { DialogSelect, type DialogSelectModel, type Option, useDialogSelect } from "./dialog-select.tsx"
-import { type Bind, type KeyEventLike, type ModeStack } from "./keys.ts"
+import type { Bind, KeyEventLike, ModeStack } from "./keys.ts"
 import { MODELS, type ModelName } from "../app/default-agent.ts"
 import { type ResolvedTheme, themes } from "./theme.ts"
 
 // A session row the switcher lists — the subset of atoms.ts SessionView the picker needs (id +
 // title + message count). Structural (not an atoms import) so dialogs.tsx has no atoms coupling and
 // a unit/fixture can hand it a plain array.
-export type SessionLike = { readonly id: string; readonly title: string; readonly messages: readonly unknown[] }
+export type SessionLike = { readonly id: string; readonly title: string; readonly messages: ReadonlyArray<unknown> }
 
 // printableChar(e): a single visible char with no ctrl/meta — the dialog filter's keystroke source.
 // Identical rule to chat.tsx's palette `printable` (a printable that isn't a control chord), exported
@@ -45,7 +45,7 @@ export type Dialogs = {
   readonly sessionModel: DialogSelectModel<string>
   readonly modelModel: DialogSelectModel<ModelName>
   readonly themeModel: DialogSelectModel<string>
-  readonly binds: readonly Bind[]
+  readonly binds: ReadonlyArray<Bind>
   readonly openSession: () => void
   readonly openModel: () => void
   readonly openTheme: () => void
@@ -66,11 +66,11 @@ export type Dialogs = {
 export type DialogActions = {
   readonly onSwitch: (id: string) => void
   readonly onModel: (name: ModelName) => void
-  readonly theme: { readonly name: string; readonly names: readonly string[]; readonly onTheme: (name: string) => void }
+  readonly theme: { readonly name: string; readonly names: ReadonlyArray<string>; readonly onTheme: (name: string) => void }
 }
 
 export const useDialogs = (
-  sessions: readonly SessionLike[],
+  sessions: ReadonlyArray<SessionLike>,
   activeId: string | null,
   selectedModel: string,
   mode: ModeStack,
@@ -90,7 +90,7 @@ export const useDialogs = (
   // SESSION SWITCHER options — every session, the active one tagged "current" (a dimmed description)
   // so the list shows context without a separate header. value = the session id; submit switches +
   // closes. Rebuilt when the session set or the active id changes so titles/the tag stay live.
-  const sessionItems: Option<string>[] = useMemo(
+  const sessionItems: Array<Option<string>> = useMemo(
     () =>
       sessions.map((s) => ({
         title: s.title,
@@ -108,9 +108,9 @@ export const useDialogs = (
   // MODEL PICK options — the fixed two-model pool (kimi default + glm alternate). value = the short
   // ModelName; the currently-selected model is tagged "selected"; the hint shows the CF id so the
   // pick is unambiguous. submit sets the model + closes.
-  const modelItems: Option<ModelName>[] = useMemo(
+  const modelItems: Array<Option<ModelName>> = useMemo(
     () =>
-      (Object.keys(MODELS) as ModelName[]).map((name) => {
+      (Object.keys(MODELS) as Array<ModelName>).map((name) => {
         const m = MODELS[name]
         return {
           title: m.label,
@@ -130,7 +130,7 @@ export const useDialogs = (
   // currently-active theme is tagged "current"; the hint shows the theme's display label so the row
   // reads clearly. submit switches LIVE + persists (onTheme) + closes. Rebuilt when the active name
   // changes so the "current" mark follows the live switch.
-  const themeItems: Option<string>[] = useMemo(
+  const themeItems: Array<Option<string>> = useMemo(
     () =>
       theme.names.map((name) => ({
         title: themes[name]?.label ?? name,
@@ -177,7 +177,7 @@ export const useDialogs = (
   // kind. esc closes (pops the mode + clears kind); ↵ submits the highlighted row (switch / pick);
   // ↑↓ move; home/end jump; ⌫ edits the filter. The duplicate ↓ row is hidden from which-key. They
   // run ONLY in the "dialog" mode, so a base nav key can't fire while a picker is open.
-  const binds: Bind[] = useMemo(
+  const binds: Array<Bind> = useMemo(
     () => [
       { mode: "dialog", chord: "escape", keys: "esc", desc: "close", group: "Dialog", run: close },
       { mode: "dialog", chord: "return", keys: "↵", desc: "select", group: "Dialog", run: () => active?.submit() },

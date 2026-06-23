@@ -104,8 +104,8 @@ function ToolBody({ m, isError, expanded, cols, syntaxStyle }: { m: ToolMsg; isE
   const preview = toolPreview(m.name, m.args, m.result, isError, Math.max(20, cols - 10), max)
   return (
     <box flexDirection="column" style={{ paddingLeft: INDENT }}>
-      {preview.map((p, i) => (
-        <text key={i} fg={previewColor(p.tone)}>{`${previewSign(p.tone)} ${p.text}`}</text>
+      {preview.map((p) => (
+        <text key={`${p.tone}:${p.text}`} fg={previewColor(p.tone)}>{`${previewSign(p.tone)} ${p.text}`}</text>
       ))}
     </box>
   )

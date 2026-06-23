@@ -4,7 +4,7 @@
 // token/cost formatters, the status-row text, and a couple of small pure utilities. No JSX lives
 // here — chat.tsx imports these and feeds them into the components. Total functions over the
 // immutable Msg/OrchTree shapes, so they're trivially testable and free of UI concerns.
-import { type Msg, type OrchTree, type TurnMeta } from "./atoms.ts"
+import type { Msg, OrchTree, TurnMeta } from "./atoms.ts"
 import { theme } from "./theme.ts"
 import { toolLabel } from "./toolui.ts"
 import { computeShowOrch } from "./workflow.tsx"
@@ -18,7 +18,7 @@ type ToolMsg = Extract<Msg, { kind: "tool" }>
 // fan-out carries its OrchTree as `workflow`, so TurnView renders the node-tree right after
 // that turn's reply (vs the old session-level block pinned below ALL turns). undefined on a
 // plain turn ⇒ no orchestration block. toTurns attaches it (computeShowOrch-gated).
-export type Turn = { idx: number; user: string; steps: Msg[]; final: string | null; meta?: TurnMeta | undefined; thinking?: string | undefined; streaming?: boolean; workflow?: OrchTree | undefined }
+export type Turn = { idx: number; user: string; steps: Array<Msg>; final: string | null; meta?: TurnMeta | undefined; thinking?: string | undefined; streaming?: boolean; workflow?: OrchTree | undefined }
 
 export const oneLine = (s: string, n = 90): string => {
   const t = s.replace(/\s+/g, " ").trim()
@@ -47,7 +47,7 @@ export const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFix
 
 // Session token total for the footer cost-meter: sum every settled reply's meta.tokens across
 // the transcript, plus the orchestration run total. Pure — drives ActionBar's token/cost.
-export const sessionTokens = (messages: readonly Msg[], orch: OrchTree | undefined): number => {
+export const sessionTokens = (messages: ReadonlyArray<Msg>, orch: OrchTree | undefined): number => {
   let n = orch?.totalTokens ?? 0
   for (const m of messages) if (m.kind === "agent" && typeof m.meta?.tokens === "number") n += m.meta.tokens
   return n
@@ -70,8 +70,8 @@ export const statusBar = (busy: boolean, armed: boolean, note: string | null, wo
   return { right: "", tone: theme.muted, live: false }
 }
 
-export function toTurns(messages: readonly Msg[], orch?: OrchTree): Turn[] {
-  const turns: Turn[] = []
+export function toTurns(messages: ReadonlyArray<Msg>, orch?: OrchTree): Array<Turn> {
+  const turns: Array<Turn> = []
   for (const m of messages) {
     if (m.kind === "you") turns.push({ idx: turns.length, user: m.text, steps: [], final: null })
     else if (turns.length > 0) turns[turns.length - 1]!.steps.push(m)
@@ -110,9 +110,9 @@ export function toTurns(messages: readonly Msg[], orch?: OrchTree): Turn[] {
 // explore tool, an error, or any other tool renders normally. Presentational only — Msg is
 // unchanged; this groups at render time.
 const EXPLORE_TOOLS = new Set(["read_file", "glob", "grep"])
-export type StepItem = { readonly kind: "one"; readonly m: Msg } | { readonly kind: "group"; readonly tools: ToolMsg[] }
-export const groupSteps = (steps: Msg[]): StepItem[] => {
-  const out: StepItem[] = []
+export type StepItem = { readonly kind: "one"; readonly m: Msg } | { readonly kind: "group"; readonly tools: Array<ToolMsg> }
+export const groupSteps = (steps: Array<Msg>): Array<StepItem> => {
+  const out: Array<StepItem> = []
   for (const s of steps) {
     if (s.kind === "tool" && EXPLORE_TOOLS.has(s.name) && s.status !== "error") {
       const last = out[out.length - 1]
@@ -124,7 +124,7 @@ export const groupSteps = (steps: Msg[]): StepItem[] => {
   return out.map((it) => (it.kind === "group" && it.tools.length === 1 ? { kind: "one", m: it.tools[0]! } : it))
 }
 // One-line summary for a collapsed explore group: "explored 5 (3 read · 2 grep)".
-export const groupSummary = (tools: readonly ToolMsg[]): string => {
+export const groupSummary = (tools: ReadonlyArray<ToolMsg>): string => {
   const by: Record<string, number> = {}
   for (const t of tools) by[t.name] = (by[t.name] ?? 0) + 1
   const verb: Record<string, string> = { read_file: "read", glob: "glob", grep: "grep" }
@@ -132,5 +132,5 @@ export const groupSummary = (tools: readonly ToolMsg[]): string => {
   return `explored ${tools.length} (${parts.join(" · ")})`
 }
 
-export const toolsUsed = (steps: Msg[]): string =>
+export const toolsUsed = (steps: Array<Msg>): string =>
   [...new Set(steps.filter((s): s is ToolMsg => s.kind === "tool").map((s) => toolLabel(s.name, s.args).split("(")[0]!))].join(", ")

@@ -19,6 +19,12 @@
 // Core logic is exported (buildAnalyzer/analyze/unusedDeps) so scripts/
 // design-check.test.ts can assert it on fixtures — ponytail: non-trivial
 // logic leaves a runnable check.
+//
+// COORDINATION (oxlint): yuku owns semantic/architecture smells on src/ ONLY
+// (crosscore, reachability, CC/nest/params, mutate/capture write-flow). oxlint
+// (scripts/oxlint-check.ts) owns syntax/correctness/perf on src + scripts +
+// examples. Overlap on unused imports is aligned; neither gate prescribes fixes
+// the other rejects — see scripts/lint-coordination.test.ts.
 import { Analyzer, SymbolFlags } from "yuku-analyzer"
 
 export type Finding = { tag: "broken" | "crosscore" | "delete" | "native" | "cycle" | "shrink" | "yagni" | "mutate" | "capture"; msg: string }
@@ -111,7 +117,7 @@ export const pkgRoot = (spec: string): string | null => {
   return spec.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!
 }
 
-export const buildAnalyzer = (files: { path: string; source: string }[]): Analyzer => {
+export const buildAnalyzer = (files: Array<{ path: string; source: string }>): Analyzer => {
   const a = new Analyzer()
   for (const f of files) a.addFile(f.path, f.source)
   a.link()
@@ -161,11 +167,11 @@ export type AnalyzeOptions = {
   coreBarrel?: string
 }
 
-export const analyze = (a: Analyzer, opts: AnalyzeOptions = {}): Finding[] => {
+export const analyze = (a: Analyzer, opts: AnalyzeOptions = {}): Array<Finding> => {
   const roots = opts.roots ?? new Set<string>()
   const isLinted = opts.isLinted ?? (() => true)
   const coreBarrel = opts.coreBarrel ?? DEFAULT_CORE_BARREL
-  const out: Finding[] = []
+  const out: Array<Finding> = []
   for (const m of a.modules.values()) {
     if (!isLinted(m.path)) continue // consumers (tests/examples) inform the graph but are not linted
     // file-size budget: CONDITIONED on role — 300 for a public-index/barrel, 500 for an
@@ -205,7 +211,7 @@ export const analyze = (a: Analyzer, opts: AnalyzeOptions = {}): Finding[] => {
       if (imp.local.references.length === 0) out.push({ tag: "delete", msg: `${m.path}: unused import "${imp.local.name}". Remove it.` })
     }
     // per-function complexity, nesting, param count (AST walk + function stack).
-    const stack: { name: string; line: number; cc: number; params: number; startDepth: number; maxDepth: number }[] = []
+    const stack: Array<{ name: string; line: number; cc: number; params: number; startDepth: number; maxDepth: number }> = []
     let depth = 0
     const fnHooks = {
       enter: (n: any) => stack.push({ name: n.id?.name ?? "(anonymous)", line: lineOf(m, n), cc: 1, params: n.params?.length ?? 0, startDepth: depth, maxDepth: 0 }),
@@ -234,16 +240,30 @@ export const analyze = (a: Analyzer, opts: AnalyzeOptions = {}): Finding[] => {
 
     // write-flow smells (Reference.isWrite — tsc can't see these). A binding
     // written but never read is a dead write; an exported `let`/`var` that is
-    // reassigned is shared mutable module state.
+    // reassigned is shared mutable module state; and in src/core/ ANY reassigned
+    // module-scope `let`/`var` (exported or not) is the mutable-state anti-pattern
+    // (the engine is Effect DI + immutable data — use Ref/SubscriptionRef for genuine
+    // reactivity, or `const`). Loop-local `let` inside a function body is exempt
+    // (its scope is `function`/`block`, not `module`), and never an exported-export
+    // false positive (an exported binding may be read in another module).
+    const inCore = m.path.startsWith(CORE_DIR)
     for (const s of m.symbols) {
       if (s.has(SymbolFlags.Import) || s.has(SymbolFlags.Function) || s.has(SymbolFlags.Class)) continue
       let reads = 0
       let writes = 0
-      for (const r of s.references) r.isWrite ? writes++ : reads++
+      for (const r of s.references) if (r.isWrite) writes++
+      else reads++
       const line = s.declarations[0] ? lineOf(m, s.declarations[0]) : 0
-      const mutableExport = s.has(SymbolFlags.Exported) && s.has(SymbolFlags.BlockScopedVariable) && !s.has(SymbolFlags.Const)
+      const mutableBinding = s.has(SymbolFlags.BlockScopedVariable) && !s.has(SymbolFlags.Const)
+      const mutableExport = s.has(SymbolFlags.Exported) && mutableBinding
+      // src/core/ module-scope mutable binding (any, not only exported). `scope.kind === "module"`
+      // excludes loop-local / function-body `let`. Exported ones ARE hidden (importers can't see
+      // the mutation); even local ones should use Ref for reactivity or be `const`.
+      const coreModuleMutable = inCore && !s.has(SymbolFlags.Exported) && mutableBinding && s.scope.kind === "module"
       if (mutableExport && writes >= 1)
         out.push({ tag: "mutate", msg: `${m.path}:${line} "${s.name}": exported mutable binding is reassigned. Export a const, or a getter — importers can't see the mutation.` })
+      else if (coreModuleMutable && writes >= 1)
+        out.push({ tag: "mutate", msg: `${m.path}:${line} "${s.name}": module-scope mutable binding in core is reassigned. Core is immutable-data + Effect DI — use Ref/SubscriptionRef for reactivity, or make it const.` })
       // dead write: only local (non-exported) variables — an exported binding may be read in another module.
       else if (!s.has(SymbolFlags.Exported) && s.has(SymbolFlags.Variable) && writes > 0 && reads === 0)
         out.push({ tag: "mutate", msg: `${m.path}:${line} "${s.name}": written but never read. Dead write — drop the assignment.` })
@@ -270,7 +290,7 @@ export const analyze = (a: Analyzer, opts: AnalyzeOptions = {}): Finding[] => {
   }
 
   // resolved import edges among LINTED modules (drives both reachability and cycles).
-  const edges = new Map<string, string[]>()
+  const edges = new Map<string, Array<string>>()
   for (const m of a.modules.values()) {
     if (!isLinted(m.path)) continue
     edges.set(m.path, m.imports.map((i) => i.resolvedModule?.path).filter((p): p is string => Boolean(p) && isLinted(p!)))
@@ -303,7 +323,7 @@ export const analyze = (a: Analyzer, opts: AnalyzeOptions = {}): Finding[] => {
 
   // circular dependencies (DFS over the resolved import graph).
   const seen = new Set<string>()
-  const path: string[] = []
+  const path: Array<string> = []
   const onPath = new Set<string>()
   const reported = new Set<string>()
   const dfs = (node: string) => {
@@ -313,7 +333,7 @@ export const analyze = (a: Analyzer, opts: AnalyzeOptions = {}): Finding[] => {
     for (const next of edges.get(node) ?? []) {
       if (onPath.has(next)) {
         const cycle = [...path.slice(path.indexOf(next)), next]
-        const key = [...cycle].sort().join("|")
+        const key = [...cycle].toSorted().join("|")
         if (!reported.has(key)) {
           reported.add(key)
           out.push({ tag: "cycle", msg: `circular import: ${cycle.join(" → ")}. Break the cycle.` })
@@ -335,7 +355,7 @@ export const analyze = (a: Analyzer, opts: AnalyzeOptions = {}): Finding[] => {
 // side effect). Without this allow-list they'd false-positive as unused.
 const RUNTIME_ONLY = new Set(["@opentelemetry/sdk-trace-node", "@opentelemetry/resources"])
 
-export const unusedDeps = (imported: Set<string>, deps: string[], allow = RUNTIME_ONLY): Finding[] =>
+export const unusedDeps = (imported: Set<string>, deps: Array<string>, allow = RUNTIME_ONLY): Array<Finding> =>
   deps
     .filter((d) => !imported.has(d) && !allow.has(d))
     .map((d) => ({ tag: "delete" as const, msg: `package.json: dependency "${d}" is never imported. Remove it.` }))
@@ -343,7 +363,7 @@ export const unusedDeps = (imported: Set<string>, deps: string[], allow = RUNTIM
 // Files a finding refers to (multiple for cycles). Cross-file analysis needs the
 // WHOLE tree, but as a pre-commit gate we only BLOCK on findings in files the
 // committer actually staged — so one agent's WIP can't fail another's commit.
-export const findingFiles = (msg: string): string[] => msg.match(/(?:src|scripts)\/[^\s:→]+|package\.json/g) ?? []
+export const findingFiles = (msg: string): Array<string> => msg.match(/(?:src|scripts)\/[^\s:→]+|package\.json/g) ?? []
 
 // The library public barrel, read from package.json "exports" "." (falls back to the default).
 // Keeps the cross-core seam from drifting away from what the package actually publishes.
@@ -353,6 +373,8 @@ export const coreBarrelFromPkg = (pkg: any): string => {
   return target ? target.replace(/^\.\//, "") : DEFAULT_CORE_BARREL
 }
 
+const isLintedPath = (p: string): boolean => p.startsWith("src/")
+
 const stagedSet = (): Set<string> => {
   const r = Bun.spawnSync(["git", "diff", "--cached", "--name-only"])
   if (!r.success) return new Set()
@@ -361,10 +383,10 @@ const stagedSet = (): Set<string> => {
 
 if (import.meta.main) {
   const staged = process.argv.includes("--staged")
-  const isLinted = (p: string) => p.startsWith("src/")
+  const isLinted = isLintedPath
   // src/ is LINTED; scripts/ + examples/ are CONSUMERS — they join the reference + import graph so
   // a seam used only by a test/example reads as live, but they are not themselves linted.
-  const files: { path: string; source: string }[] = []
+  const files: Array<{ path: string; source: string }> = []
   for (const glob of ["src/**/*.{ts,tsx}", "scripts/**/*.{ts,tsx}", "examples/**/*.{ts,tsx}"])
     for await (const p of new Bun.Glob(glob).scan(".")) files.push({ path: p, source: await Bun.file(p).text() })
   const a = buildAnalyzer(files)
@@ -387,7 +409,7 @@ if (import.meta.main) {
   }
   const order = { broken: 0, crosscore: 1, delete: 2, native: 3, cycle: 4, shrink: 5, yagni: 6, mutate: 7, capture: 8 }
   const blocking = out.filter(blocks)
-  for (const f of out.sort((x, y) => order[x.tag] - order[y.tag])) {
+  for (const f of out.toSorted((x, y) => order[x.tag] - order[y.tag])) {
     const tag = stage && !blocks(f) ? `${f.tag}*` : f.tag // * = other file, not blocking this commit
     console.error(`  ${tag}: ${f.msg}`)
   }

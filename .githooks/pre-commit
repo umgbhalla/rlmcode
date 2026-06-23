@@ -5,6 +5,7 @@
 # concurrent agent's WIP can't fail an unrelated commit. `bun run lint` stays
 # whole-tree for CI / manual full sweeps.
 bun run check || exit 1
+bun scripts/oxlint-check.ts --staged || exit 1
 bun run test || exit 1
 bun scripts/design-check.ts --staged || exit 1
 bun scripts/ponytail-debt.ts --staged || exit 1

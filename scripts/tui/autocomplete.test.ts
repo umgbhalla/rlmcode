@@ -31,7 +31,7 @@ await report("autocomplete.test", async (a) => {
   a.ok(detectTrigger("hi there", 8) === null, "no trigger ⇒ null (plain text)")
   a.ok(detectTrigger("a@b", 3) === null, "an @ mid-word (email) does NOT trigger a mention")
   a.ok(detectTrigger("see @", 5)?.mode === "@", "an @ after a space DOES trigger a mention")
-  const files: AcItem[] = [
+  const files: Array<AcItem> = [
     { value: "src/tui/atoms.ts", kind: "file" },
     { value: "src/tui/composer.tsx", kind: "file" },
   ]

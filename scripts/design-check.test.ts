@@ -11,8 +11,9 @@ const assert = (cond: boolean, msg: string) => {
     failed++
   }
 }
-const has = (f: Finding[], tag: Finding["tag"], sub: string) => f.some((x) => x.tag === tag && x.msg.includes(sub))
-const an = (files: { path: string; source: string }[]) => analyze(buildAnalyzer(files))
+const has = (f: Array<Finding>, tag: Finding["tag"], sub: string) => f.some((x) => x.tag === tag && x.msg.includes(sub))
+const hasNot = (f: Array<Finding>, tag: Finding["tag"], sub: string) => !has(f, tag, sub)
+const an = (files: Array<{ path: string; source: string }>) => analyze(buildAnalyzer(files))
 
 // dead export
 assert(has(an([{ path: "src/x.ts", source: "export const dead = 1" }]), "delete", "dead export"), "dead export not flagged")
@@ -50,6 +51,23 @@ assert(
 assert(
   has(an([{ path: "src/x.ts", source: "export let counter = 0\nexport function bump() { counter++ }" }]), "mutate", "exported mutable"),
   "mutable export not flagged",
+)
+
+// mutate (core-only): ANY module-scope let/var reassigned in src/core/ is flagged, not just
+// exported ones — core is immutable-data + Effect DI (use Ref/SubscriptionRef or const).
+assert(
+  has(an([{ path: "src/core/x.ts", source: "let n = 0\nexport const bump = () => { n++; return n }" }]), "mutate", "module-scope mutable binding in core"),
+  "core module-scope mutable (non-exported) not flagged",
+)
+// …but a loop-local / function-body `let` inside core is exempt (its scope is not module-scope).
+assert(
+  hasNot(an([{ path: "src/core/x.ts", source: "export const f = () => { let i = 0\nfor (i = 0; i < 3; i++) {}\nreturn i }" }]), "mutate", "module-scope mutable binding in core"),
+  "core loop-local let wrongly flagged as module-scope mutable",
+)
+// …and the core-only rule does NOT fire outside src/core/ (edge layers may keep module-scope let).
+assert(
+  hasNot(an([{ path: "src/tui/x.ts", source: "let n = 0\nexport const bump = () => { n++; return n }" }]), "mutate", "module-scope mutable binding in core"),
+  "non-core module-scope mutable wrongly flagged by core rule",
 )
 
 // capture: closure writes a shared module-level binding.

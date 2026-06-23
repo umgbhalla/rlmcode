@@ -123,9 +123,9 @@ export const nodeForwardOpts = (
 // { model?, effort? }). Validates effort against the Effort union; resolves the model name
 // to its CF id (resolveModel normalises unknown/absent → kimi). Returns undefined when
 // NEITHER is given, so an unrouted orchestrate run stays on the default session model.
-const EFFORTS: readonly Effort[] = ["low", "medium", "high", "xhigh", "max"]
+const EFFORT_SET = new Set<Effort>(["low", "medium", "high", "xhigh", "max"])
 export const choiceFromArgs = (args: { model?: string | undefined; effort?: string | undefined }): NodeModelChoice | undefined => {
-  const effort = EFFORTS.includes(args?.effort as Effort) ? (args!.effort as Effort) : undefined
+  const effort = args?.effort !== undefined && EFFORT_SET.has(args.effort as Effort) ? (args.effort as Effort) : undefined
   if (args?.model === undefined && effort === undefined) return undefined
   return { model: resolveModel(args?.model).id, effort }
 }

@@ -14,7 +14,7 @@
 import type { Node } from "@yuku-toolchain/types"
 import { Analyzer, type Module } from "yuku-analyzer"
 
-export type DebtResult = { markers: string[]; noTrigger: number; orphan: number; loc: number }
+export type DebtResult = { markers: Array<string>; noTrigger: number; orphan: number; loc: number }
 
 // Anchored at the comment start (after optional ws / block-comment `*`), so a
 // prose mention mid-comment ("…— ponytail: non-trivial logic leaves a check")
@@ -30,8 +30,8 @@ const PLACEHOLDER = /<ceiling>|<upgrade/
 // (m.comments is source order, the walk is pre-order: same order, so the Nth
 // duplicate lines up). A marker whose host is the Program root guards no code —
 // it's an orphan.
-const hostsByComment = (m: Module): Map<string, Node[]> => {
-  const map = new Map<string, Node[]>()
+const hostsByComment = (m: Module): Map<string, Array<Node>> => {
+  const map = new Map<string, Array<Node>>()
   m.walk({
     enter: (node) => {
       for (const c of node.comments ?? []) {
@@ -50,7 +50,7 @@ export const harvest = (path: string, text: string): DebtResult => {
   const hosts = hostsByComment(m)
   const comments = m.comments
 
-  const markers: string[] = []
+  const markers: Array<string> = []
   let noTrigger = 0
   let orphan = 0
   // per-text cursor: the Nth comment of a given text matches the Nth host.
@@ -99,7 +99,7 @@ if (import.meta.main) {
   const BUDGET = Number(process.env.LOC_BUDGET ?? 0)
   const staged = process.argv.includes("--staged")
   const SCAN_DIRS = ["src", "scripts"]
-  const SCAN_FILES: string[] = []
+  const SCAN_FILES: Array<string> = []
 
   // As a pre-commit gate, only block on markers in STAGED files, so one agent's
   // WIP marker can't fail another's commit. Whole-tree otherwise.
@@ -109,12 +109,12 @@ if (import.meta.main) {
     stage = new Set(r.success ? r.stdout.toString().split("\n").map((s) => s.trim()).filter(Boolean) : [])
   }
 
-  const files: string[] = [...SCAN_FILES]
+  const files: Array<string> = [...SCAN_FILES]
   // skip *.test.ts — their fixtures contain deliberate marker strings.
   for (const dir of SCAN_DIRS)
     for await (const p of new Bun.Glob("**/*.{ts,tsx}").scan(dir)) if (!p.endsWith(".test.ts")) files.push(`${dir}/${p}`)
 
-  const markers: string[] = []
+  const markers: Array<string> = []
   let noTrigger = 0
   let orphan = 0
   let stagedBlocking = 0

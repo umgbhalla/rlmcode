@@ -10,6 +10,13 @@ import type { AxAIService, AxGen } from "@ax-llm/ax"
 import { adversarialVerify, type EmitSink, MAX_CONCURRENCY, parallelLimit, runNode } from "../src/core/orch-recipes.ts"
 import { allocate, BudgetExhaustedError, type NodeOpts, type NodeEvent, parallel, pipeline } from "../src/core/orch.ts"
 
+const makeFakeSkeptic =
+  (vote: boolean | "throw") =>
+  async (_answer: string): Promise<boolean> => {
+    if (vote === "throw") throw new Error("skeptic crashed")
+    return vote
+  }
+
 let failed = 0
 const assert = (cond: boolean, msg: string) => {
   if (!cond) {
@@ -41,7 +48,7 @@ const opts = {} as NodeOpts
 
 // A recording sink: captures every NodeEvent so we can assert the lifecycle order.
 const recorder = () => {
-  const events: NodeEvent[] = []
+  const events: Array<NodeEvent> = []
   const sink: EmitSink = (e) => events.push(e)
   return { events, sink }
 }
@@ -284,7 +291,7 @@ await (async () => {
 
   // 6) pipeline(): each item flows stage→stage independently (no barrier), values map.
   {
-    const out: number[] = []
+    const out: Array<number> = []
     for await (const v of pipeline([1, 2, 3], async (x: number) => x * 2, async (x: number) => x + 1)) {
       out.push(v as number)
     }
@@ -294,15 +301,9 @@ await (async () => {
   // 7) adversarialVerify(): produce once, skeptics vote in parallel; majority accepts.
   // A failing skeptic drops out (parallel→null), so 2-of-2 'accept' over 3 still wins.
   {
-    const fakeSkeptic =
-      (vote: boolean | "throw") =>
-      async (_answer: string): Promise<boolean> => {
-        if (vote === "throw") throw new Error("skeptic crashed")
-        return vote
-      }
     const verdict = await adversarialVerify<string>(
       async () => "the answer",
-      [fakeSkeptic(true), fakeSkeptic("throw"), fakeSkeptic(true)],
+      [makeFakeSkeptic(true), makeFakeSkeptic("throw"), makeFakeSkeptic(true)],
     )
     assert(verdict.value === "the answer", "adversarialVerify returns the produced value")
     assert(verdict.votes.length === 2, `crashed skeptic dropped, got ${verdict.votes.length} votes`)

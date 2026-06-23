@@ -13,18 +13,19 @@ export type Asserter = {
   done(): number
 }
 
+const frameMatches = (frame: string, needle: string | RegExp): boolean =>
+  typeof needle === "string" ? frame.includes(needle) : needle.test(frame)
+
 export const makeAsserter = (suite: string): Asserter => {
   let failed = 0
   const fail = (msg: string, extra?: string) => {
     console.error(`  FAIL [${suite}]: ${msg}${extra ? `\n${extra}` : ""}`)
     failed++
   }
-  const test = (frame: string, needle: string | RegExp) =>
-    typeof needle === "string" ? frame.includes(needle) : needle.test(frame)
   return {
     ok: (cond, msg) => void (cond || fail(msg)),
-    has: (frame, needle, msg) => void (test(frame, needle) || fail(msg, indent(frame))),
-    hasNot: (frame, needle, msg) => void (!test(frame, needle) || fail(msg, indent(frame))),
+    has: (frame, needle, msg) => void (frameMatches(frame, needle) || fail(msg, indent(frame))),
+    hasNot: (frame, needle, msg) => void (!frameMatches(frame, needle) || fail(msg, indent(frame))),
     done: () => failed,
   }
 }

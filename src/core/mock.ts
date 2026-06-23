@@ -23,7 +23,7 @@ const sleep = (ms: number): Promise<void> => (ms > 0 ? new Promise((r) => setTim
 // `orchestrate` are LEFT RUNNING (no done event) so a live-tree snapshot keeps their
 // nested subtrees expanded (a settled+collapsed parent hides them — that path is covered
 // by orch-tree-render.test).
-export const MOCK_NODES: readonly NodeEvent[] = [
+export const MOCK_NODES: ReadonlyArray<NodeEvent> = [
   { type: "start", nodeId: "orchestrate", phase: "fan-out" },
   { type: "start", nodeId: "plan", parentId: "orchestrate", phase: "decompose" },
   { type: "done", nodeId: "plan", result: "3 subtasks", tokens: 1200 },

@@ -7,7 +7,7 @@
 //   - <ActionBar>: the footer action-bar — cwd (left) · token/cost + "Cmd+K commands" (right),
 //     justifyContent:space-between, flexShrink:0 (opencode footer.tsx:52-91 layout). DELIBERATELY
 //     DROPS opencode's LSP/MCP/permission dots — rlmcode has neither subsystem (SPEC).
-import { type ResolvedTheme } from "./theme.ts"
+import type { ResolvedTheme } from "./theme.ts"
 
 // cwd shortened to "~/…/leaf" style so the action-bar stays a single quiet line. The home
 // prefix collapses to "~"; an absolute path keeps its leaf + one parent for context.

@@ -6,7 +6,6 @@
 // NodeEvent feed renders through the REAL velocity-tree renderer (flatten) into a stable
 // unicode frame. Plain asserts, no framework — rlmcode fixture style (see orch-cost.test).
 import { ax } from "@ax-llm/ax"
-import { AxMemory } from "@ax-llm/ax"
 import { makeMockAI, MOCK_FIXTURE, MOCK_MODEL } from "../../src/core/mock-ai.ts"
 import { MOCK_NODES } from "../../src/core/mock.ts"
 import { BASE_TOOLS } from "../../src/core/tools.ts"
@@ -52,12 +51,12 @@ await (async () => {
     const ai = makeMockAI()
     const sys = { role: "system" as const, content: "x" }
     const user = { role: "user" as const, content: "hi" }
-    const step1 = (await ai.chat({ chatPrompt: [sys, user], model: MOCK_MODEL })) as { results: readonly { functionCalls?: unknown[]; thought?: string; content?: string }[] }
+    const step1 = (await ai.chat({ chatPrompt: [sys, user], model: MOCK_MODEL })) as { results: ReadonlyArray<{ functionCalls?: Array<unknown>; thought?: string; content?: string }> }
     assert((step1.results[0]?.functionCalls?.length ?? 0) === 1, "step 1 returns one canned tool call")
     eq(step1.results[0]?.thought, MOCK_FIXTURE.thought, "step 1 carries reasoning_content (thought)")
 
     const toolMsg = { role: "function" as const, functionId: "call_mock_1", result: "mock" }
-    const step2 = (await ai.chat({ chatPrompt: [sys, user, toolMsg], model: MOCK_MODEL })) as { results: readonly { content?: string; functionCalls?: unknown[] }[] }
+    const step2 = (await ai.chat({ chatPrompt: [sys, user, toolMsg], model: MOCK_MODEL })) as { results: ReadonlyArray<{ content?: string; functionCalls?: Array<unknown> }> }
     eq(step2.results[0]?.content, MOCK_FIXTURE.reply, "step 2 (tool result present) returns the final reply")
     assert((step2.results[0]?.functionCalls?.length ?? 0) === 0, "final reply has no further tool calls")
   }
@@ -94,9 +93,9 @@ console.log("mock.test: all pass ✓")
 // The OrchTree fold the atoms sink applies, reproduced here as test fixture assembly: a
 // start adds the node (root iff no parentId), done/error settles it + folds tokens. The
 // RENDER (flatten) is the real renderer — only the tree assembly is local.
-function foldNodes(events: readonly NodeEvent[]): OrchTree {
+function foldNodes(events: ReadonlyArray<NodeEvent>): OrchTree {
   const nodes: Record<string, OrchNode> = {}
-  const roots: string[] = []
+  const roots: Array<string> = []
   for (const e of events) {
     if (e.type === "start") {
       const node: OrchNode = {

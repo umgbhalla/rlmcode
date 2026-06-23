@@ -18,11 +18,9 @@ process.env.RLM_MOCK = "1"
 import { context as otelContext } from "@opentelemetry/api"
 import { makeMockAI, MOCK_MODEL } from "../src/core/mock-ai.ts"
 import { BASE_TOOLS } from "../src/core/tools.ts"
-import { createAgent } from "../src/core/agent.ts"
-import { clearTurnAborter } from "../src/core/agent.ts"
-import { clearTurnContext } from "../src/core/orch-spans.ts"
+import { clearTurnAborter, createAgent } from "../src/core/agent.ts"
+import { clearTurnContext, setTurnContext } from "../src/core/orch-spans.ts"
 import { clearTurnEmit, setTurnEmit } from "../src/core/runtime.ts"
-import { setTurnContext } from "../src/core/orch-spans.ts"
 import { deleteSession, ensureSession, sessionsRT } from "../src/core/sessions.ts"
 import { makeRunTurn } from "../src/core/run.ts"
 
@@ -108,3 +106,7 @@ if (failures > 0) {
   process.exit(1)
 }
 console.log("\nsession-leak.test: all pass ✓")
+// otel SDK (eager appRuntime boot via sessions.ts) holds live exporters/timers that keep the
+// event loop alive forever → a plain fall-off-the-end never exits and stalls the `&&` test chain.
+// Every other test either exits naturally or process.exit(1) on failure; mirror that on success.
+process.exit(0)

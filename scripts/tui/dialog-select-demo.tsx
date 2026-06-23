@@ -18,7 +18,7 @@ import { theme } from "../../src/tui/theme.ts"
 
 // 12 fruit across 2 categories — enough to show grouping + scroll, with distinct prefixes so a
 // substring filter ("ber") narrows to a known subset the test can assert.
-const ITEMS: Option<string>[] = [
+const ITEMS: Array<Option<string>> = [
   { title: "apple", value: "apple", category: "Common", hint: "a" },
   { title: "banana", value: "banana", category: "Common", hint: "b" },
   { title: "cherry", value: "cherry", category: "Common" },

@@ -21,8 +21,7 @@
 // .env / RLM_LIVE — but we still gate it behind a flag so `bun run lint` stays
 // fast and deterministic. Run: RLM_FOCUS_LIVE=1 bun scripts/focus-live.test.ts
 import { testRender } from "@opentui/react/test-utils"
-import { act, useEffect, useRef, useState } from "react"
-import { createElement as h } from "react"
+import { act, createElement as h, useEffect, useRef, useState } from "react"
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {

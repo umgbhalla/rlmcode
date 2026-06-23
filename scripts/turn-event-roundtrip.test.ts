@@ -32,7 +32,7 @@ const deepEq = (a: unknown, b: unknown): boolean => JSON.stringify(norm(a)) === 
 
 // EVERY variant of the union — the test fails to compile if a variant is added/renamed and not
 // listed here (each entry is typed `TurnEvent`), so the matrix can't silently fall behind.
-const samples: TurnEvent[] = [
+const samples: Array<TurnEvent> = [
   { type: "reply_delta", text: "tok" },
   { type: "thinking_delta", text: "hmm" },
   { type: "message", text: "step narration" },

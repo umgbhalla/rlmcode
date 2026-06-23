@@ -48,8 +48,12 @@ export const LEAF_TIMEOUT_MS = (() => {
 // progress; re-running the same hang wastes the same wall-clock).
 export class NodeTimeoutError extends Error {
   readonly _tag = "NodeTimeoutError"
-  constructor(readonly nodeId: string, readonly timeoutMs: number) {
+  readonly nodeId: string
+  readonly timeoutMs: number
+  constructor(nodeId: string, timeoutMs: number) {
     super(`node ${nodeId} timed out after ${timeoutMs}ms`)
+    this.nodeId = nodeId
+    this.timeoutMs = timeoutMs
     this.name = "NodeTimeoutError"
   }
 }

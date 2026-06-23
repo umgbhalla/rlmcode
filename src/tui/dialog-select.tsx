@@ -26,7 +26,7 @@
 // dialog-select.tsx:236-271) once a long picker (model list) needs centering.
 import { TextAttributes } from "@opentui/core"
 import { useMemo, useState } from "react"
-import { type ResolvedTheme } from "./theme.ts"
+import type { ResolvedTheme } from "./theme.ts"
 import { Panel, Separator } from "./ui/panel.tsx"
 
 // One selectable node. `value` is the payload handed to onSelect; `title` is the visible label;
@@ -41,7 +41,7 @@ export type Option<T> = {
 }
 
 // A category header + its options, in first-seen order. The render unit for grouped lists.
-export type Group<T> = { readonly category: string; readonly options: readonly Option<T>[] }
+export type Group<T> = { readonly category: string; readonly options: ReadonlyArray<Option<T>> }
 
 // Case-insensitive substring match over title (+ category). The dep-free stand-in for opencode's
 // fuzzysort (keys: title, category; title weighted 2×). Empty needle ⇒ everything (no filter).
@@ -53,9 +53,9 @@ const matches = <T,>(opt: Option<T>, needle: string): boolean => {
 
 // Group filtered options by category in first-seen order (uncategorised → one leading "" group).
 // Pure; the basis for both the flat selection ring and the grouped render.
-const group = <T,>(options: readonly Option<T>[]): Group<T>[] => {
-  const order: string[] = []
-  const by = new Map<string, Option<T>[]>()
+const group = <T,>(options: ReadonlyArray<Option<T>>): Array<Group<T>> => {
+  const order: Array<string> = []
+  const by = new Map<string, Array<Option<T>>>()
   for (const o of options) {
     const c = o.category ?? ""
     if (!by.has(c)) {
@@ -78,8 +78,8 @@ export type DialogSelectModel<T> = {
   // — the exact hazard the palette's `setPq((q)=>q+ch)` avoids; value-based setQuery would drop chars.
   readonly appendQuery: (ch: string) => void
   readonly backspaceQuery: () => void
-  readonly groups: readonly Group<T>[]
-  readonly flat: readonly Option<T>[]
+  readonly groups: ReadonlyArray<Group<T>>
+  readonly flat: ReadonlyArray<Option<T>>
   readonly selected: number
   readonly active: Option<T> | undefined
   readonly move: (delta: number) => void
@@ -94,7 +94,7 @@ export type DialogSelectModel<T> = {
 // resets selection to the top (opencode resets on filter change). submit() invokes onSelect with
 // the active option. PRESENTATIONAL state (open / key routing) stays in chat.tsx.
 export const useDialogSelect = <T,>(
-  items: readonly Option<T>[],
+  items: ReadonlyArray<Option<T>>,
   onSelect: (value: T) => void,
 ): DialogSelectModel<T> => {
   const [query, setQueryRaw] = useState("")
@@ -207,8 +207,8 @@ export function DialogSelect<T>({
                 {g.category ? (
                   <text fg={theme.primary} attributes={TextAttributes.BOLD}>{g.category}</text>
                 ) : null}
-                {g.options.map((o, oi) => (
-                  <OptionRow key={`${g.category}:${oi}:${o.title}`} option={o} active={o.value === activeValue} theme={theme} />
+                {g.options.map((o) => (
+                  <OptionRow key={`${g.category}:${o.title}:${String(o.value)}`} option={o} active={o.value === activeValue} theme={theme} />
                 ))}
               </box>
             ))}

@@ -35,7 +35,7 @@ export interface AgentOptions {
   readonly model: string
   readonly maxSteps?: number
   readonly tokenBudget?: number
-  readonly tools?: "default" | "base" | readonly AxFunction[]
+  readonly tools?: "default" | "base" | ReadonlyArray<AxFunction>
   readonly systemPromptAppend?: string
   readonly loadProjectDoc?: boolean
   // Telemetry is ALWAYS ON: the engine runs on the shared coreRuntime (TracingLive), which
@@ -51,7 +51,7 @@ export interface AgentInfo {
   readonly model: string
   readonly maxSteps: number
   readonly tokenBudget: number
-  readonly toolNames: readonly string[]
+  readonly toolNames: ReadonlyArray<string>
   readonly systemPromptChars: number
   readonly version: string
   readonly axVersion: string
@@ -73,7 +73,7 @@ const RLM_VERSION = "0.0.1"
 const AX_VERSION = "22.0.5"
 
 // Resolve the tools option to a concrete AxFunction[] (the internal createAgent's input).
-const resolveTools = (tools: AgentOptions["tools"]): AxFunction[] | undefined =>
+const resolveTools = (tools: AgentOptions["tools"]): Array<AxFunction> | undefined =>
   tools === undefined || tools === "default" ? undefined : tools === "base" ? [...BASE_TOOLS] : [...tools]
 
 /**

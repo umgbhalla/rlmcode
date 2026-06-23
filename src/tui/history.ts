@@ -7,11 +7,11 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs"
 const FILE = ".rlmcode_history.jsonl"
 const CAP = 50
 
-const load = (): string[] => {
+const load = (): Array<string> => {
   try {
     if (!existsSync(FILE)) return []
     const lines = readFileSync(FILE, "utf8").split("\n").filter((l) => l.trim().length > 0)
-    const out: string[] = []
+    const out: Array<string> = []
     for (const l of lines) {
       try {
         const v = JSON.parse(l)
@@ -27,10 +27,10 @@ const load = (): string[] => {
 }
 
 // Oldest -> newest. Up walks toward index 0 (oldest), down toward the live draft.
-const items: string[] = load()
+const items: Array<string> = load()
 
 export const history = {
-  all: (): readonly string[] => items,
+  all: (): ReadonlyArray<string> => items,
   /** Append a submitted prompt (skips blanks + consecutive dupes), persist. */
   push(entry: string): void {
     const e = entry.trim()

@@ -32,7 +32,7 @@ export const parallelLimit = async <T>(
   n = 8,
 ): Promise<Array<T | null>> => {
   const limit = Number.isFinite(n) ? Math.min(MAX_CONCURRENCY, Math.max(1, Math.floor(n))) : 8
-  const results = new Array<T | null>(thunks.length).fill(null)
+  const results = Array.from({ length: thunks.length }, (): T | null => null)
   // Shared cursor: each pump claims the next unclaimed index and advances it. A holder
   // object (not a bare `let next`) so the analyzer reads cursor.i on both the claim AND
   // the advance — a bare post-increment `next++` reads as a dead final write to it.

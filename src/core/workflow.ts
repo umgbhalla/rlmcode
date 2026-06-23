@@ -24,7 +24,7 @@
 // parallelLimit, ONE LEVEL (prim nodes carry BASE_TOOLS only — a script cannot spawn a script).
 // CONTEXT/TRACE: the handler runs Promise-native INSIDE forward() inside otelContext.with(
 // traceContext), so node emits nest under the live chat.turn span in the SAME OrchTree.
-import { type AxAIService, type AxFunction } from "@ax-llm/ax"
+import type { AxAIService, AxFunction } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import { estimatedCostOf, getTurnEmit, llm, makeOnEvent } from "./runtime.ts"
 import { choiceFromArgs } from "./models.ts"
@@ -86,7 +86,7 @@ const runScript = async (script: string, prims: WorkflowPrims): Promise<unknown>
     "budget",
     "args",
     `return (async () => { ${script}\n })()`,
-  ) as (...a: unknown[]) => Promise<unknown>
+  ) as (...a: Array<unknown>) => Promise<unknown>
   return fn(phase, log, agent, parallel, pipeline, judge, rlm, budget, args)
 }
 
@@ -168,4 +168,4 @@ const workflowTool: AxFunction = {
 
 // The agent-callable workflow tool — added to the MAIN chat gen ONLY (agent.ts), never to a node
 // gen (nodes carry BASE_TOOLS), so the one-level recursion guard holds.
-export const WORKFLOW_TOOLS: AxFunction[] = [workflowTool]
+export const WORKFLOW_TOOLS: Array<AxFunction> = [workflowTool]

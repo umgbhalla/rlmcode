@@ -1,28 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/Effect-TS/language-service/refs/heads/main/schema.json",
+  "extends": "./tsconfig.json",
   "compilerOptions": {
-    "target": "ESNext",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "lib": ["ESNext", "DOM"],
-    "jsx": "react-jsx",
-    "jsxImportSource": "@opentui/react",
-    "allowImportingTsExtensions": true,
-    "verbatimModuleSyntax": true,
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "exactOptionalPropertyTypes": true,
-    "noUncheckedIndexedAccess": true,
-    "noUncheckedSideEffectImports": true,
-    "erasableSyntaxOnly": true,
-    "isolatedModules": true,
-    "noImplicitOverride": true,
-    "noFallthroughCasesInSwitch": true,
-    "moduleDetection": "force",
-    "skipLibCheck": true,
-    "noEmit": true,
-    "types": ["bun", "react"],
     "plugins": [
       {
         "name": "@effect/language-service",
@@ -57,21 +36,21 @@
           "strictBooleanExpressions": "warning",
           "preferSchemaOverJson": "warning",
 
-          "asyncFunction": "off",
-          "globalDate": "off",
-          "globalDateInEffect": "off",
-          "globalRandom": "off",
-          "globalRandomInEffect": "off",
-          "globalTimersInEffect": "off",
-          "processEnvInEffect": "off",
-          "newPromise": "off",
-          "cryptoRandomUUIDInEffect": "off",
-          "extendsNativeError": "off",
-          "schemaSyncInEffect": "off",
-          "lazyPromiseInEffectSync": "off"
+          "asyncFunction": "error",
+          "globalDate": "error",
+          "globalDateInEffect": "error",
+          "globalRandom": "error",
+          "globalRandomInEffect": "error",
+          "globalTimersInEffect": "error",
+          "processEnvInEffect": "error",
+          "newPromise": "error",
+          "cryptoRandomUUIDInEffect": "error",
+          "extendsNativeError": "error",
+          "schemaSyncInEffect": "error",
+          "lazyPromiseInEffectSync": "error"
         }
       }
     ]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx"]
+  "include": ["src/core/**/*.ts"]
 }

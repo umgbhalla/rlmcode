@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "import", "promise", "node", "react"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error"
+  },
+  "rules": {
+    "eslint/no-var": "error",
+    "no-param-reassign": "error",
+    "typescript/consistent-type-imports": ["error", { "fixStyle": "inline-type-imports" }],
+    "typescript/no-import-type-side-effects": "error",
+    "import/no-duplicates": "error",
+    "import/no-cycle": "error",
+    "typescript/array-type": ["error", { "default": "generic", "readonly": "generic" }],
+    "no-console": "warn",
+    "unicorn/no-array-for-each": "warn",
+    "no-await-in-loop": "off",
+    "no-implied-eval": "off",
+    "react/react-in-jsx-scope": "off",
+    "no-underscore-dangle": ["error", { "allow": ["_tag"] }],
+    "no-unused-expressions": ["error", { "allowShortCircuit": true, "allowTernary": true }]
+  },
+  "overrides": [
+    {
+      "files": ["scripts/**/*.test.ts"],
+      "rules": {
+        "no-await-in-loop": "off"
+      }
+    },
+    {
+      "files": ["src/core/workflow.ts"],
+      "rules": {
+        "no-implied-eval": "off"
+      }
+    }
+  ],
+  "ignorePatterns": ["node_modules", ".research", "worker"]
+}

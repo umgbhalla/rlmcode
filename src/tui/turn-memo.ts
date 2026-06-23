@@ -32,7 +32,7 @@ import { flatten } from "./orch-tree.ts"
 export type MemoTurn = {
   readonly idx: number
   readonly user: string
-  readonly steps: readonly Msg[]
+  readonly steps: ReadonlyArray<Msg>
   readonly final: string | null
   readonly meta?: { readonly model: string; readonly ms: number; readonly tokens?: number | undefined; readonly finishReason?: string | undefined; readonly budget: boolean } | undefined
   readonly thinking?: string | undefined
@@ -71,8 +71,8 @@ export const contentKey = (t: MemoTurn): string => {
 // and — when it carries a workflow — each flattened node + that node's owned tools. Mirrors the
 // focusables chat.tsx builds, scoped to one turn. `expNodes` gates which workflow rows exist
 // (a collapsed node hides its subtree), so the key set tracks the live tree exactly.
-export const turnRowKeys = (t: MemoTurn, expNodes: ReadonlySet<string>): string[] => {
-  const keys: string[] = [`turn:${t.idx}`]
+export const turnRowKeys = (t: MemoTurn, expNodes: ReadonlySet<string>): Array<string> => {
+  const keys: Array<string> = [`turn:${t.idx}`]
   for (const s of t.steps) if (s.kind === "tool") keys.push(`tool:${s.id}`)
   if (t.workflow) {
     for (const row of flatten(t.workflow, expNodes)) {
@@ -97,8 +97,8 @@ export const interactionSig = (
 ): string => {
   const keys = turnRowKeys(t, expNodes)
   const keySet = new Set(keys)
-  const openTools = keys.filter((k) => k.startsWith("tool:") && expTools.has(k.slice(5))).sort()
-  const openNodes = keys.filter((k) => k.startsWith("node:") && expNodes.has(k.slice(5))).sort()
+  const openTools = keys.filter((k) => k.startsWith("tool:") && expTools.has(k.slice(5))).toSorted()
+  const openNodes = keys.filter((k) => k.startsWith("node:") && expNodes.has(k.slice(5))).toSorted()
   // Focus only matters if it lands on one of THIS turn's rows; otherwise it's "" for every such turn.
   const focus = focusedKey !== undefined && keySet.has(focusedKey) ? focusedKey : ""
   return `${expanded ? 1 : 0}|${openTools.join(",")}|${openNodes.join(",")}|${focus}`

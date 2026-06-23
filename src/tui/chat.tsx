@@ -11,14 +11,14 @@ import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/ato
 import { createCliRenderer, decodePasteBytes } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
 import { memo, useEffect, useMemo, useRef, useState } from "react"
-import { abortTurn } from "../app/default-agent.ts"
+import { abortTurn, MODELS, type ModelName } from "../app/default-agent.ts"
 import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, MODEL, newSessionAtom, sendAtom } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
-import { makeSyntaxStyle, theme } from "./theme.ts"
+import { makeSyntaxStyle, resolveTheme, theme } from "./theme.ts"
 import { ThemeProvider, useTheme, useThemeSwitcher } from "./theme-context.tsx"
 import { FocusGutter, ToolView } from "./tool-view.tsx"
-import { type Row as OrchRow } from "./orch-tree.ts"
+import type { Row as OrchRow } from "./orch-tree.ts"
 import { ActionBar, shortCwd } from "./shell.tsx"
 import { Composer, useComposerFocus } from "./composer.tsx"
 import { AssistantReply, ErrorCard, QueuedCard, ThinkingPart, UserCard } from "./messages.tsx"
@@ -26,7 +26,6 @@ import { useMessageQueue } from "./queue.ts"
 import { type Option, useDialogSelect } from "./dialog-select.tsx"
 import { type AcItem, Autocomplete, useAutocomplete } from "./autocomplete.tsx"
 import { type Command, Palette } from "./palette.tsx"
-import { MODELS, type ModelName } from "../app/default-agent.ts"
 import { DialogOverlays, printableChar, useDialogs } from "./dialogs.tsx"
 import { WhichKey } from "./which-key.tsx"
 import { activeBindings, type Bind, dispatch, type KeyEventLike, matchesChord, useModeStack } from "./keys.ts"
@@ -41,6 +40,10 @@ import { fmtTokens, groupSummary, groupSteps, INDENT, navKeyName, oneLine, sessi
 // update on the in-place palette mutation). It's threaded into TurnView as a prop (and into NodeRow
 // via the renderNode closure), and is part of the memo comparator so a settled turn recolors on a
 // switch (a new style identity) but NOT on the busy tick (a stable identity across ticks).
+
+// Printable-char guard for the palette filter: a single visible char with no ctrl/meta.
+const palettePrintable = (e: KeyEventLike): string =>
+  typeof e.sequence === "string" && e.sequence.length === 1 && e.sequence >= " " && !e.ctrl && !e.meta ? e.sequence : ""
 
 // Enter submits, Shift+Enter inserts a newline (override textarea defaults, which
 // are Enter=newline / Cmd+Enter=submit).
@@ -127,8 +130,8 @@ function TurnViewImpl({
           </text>
           {expanded && (
             <box flexDirection="column" style={{ paddingLeft: INDENT }}>
-              {groupSteps(t.steps).map((it, i) => {
-                if (it.kind === "group") return <text key={`g${i}`} fg={theme.dim}>{`⊙ ${groupSummary(it.tools)}`}</text>
+              {groupSteps(t.steps).map((it) => {
+                if (it.kind === "group") return <text key={`g:${groupSummary(it.tools)}`} fg={theme.dim}>{`⊙ ${groupSummary(it.tools)}`}</text>
                 const s = it.m
                 if (s.kind === "tool")
                   return (
@@ -143,7 +146,7 @@ function TurnViewImpl({
                       onToggle={() => onToggleTool(s.id)}
                     />
                   )
-                return <text key={i} fg={theme.subtext}>{`· ${oneLine(s.text)}`}</text>
+                return <text key={`narr:${oneLine(s.text)}`} fg={theme.subtext}>{`· ${oneLine(s.text)}`}</text>
               })}
             </box>
           )}
@@ -282,7 +285,7 @@ function NodeRow(p: NodeRowProps) {
 
 // Wrap the focus cursor over the focusable-row ring (empty ring ⇒ none). Pure; extracted
 // from App so the cursor-wrap ternary doesn't count against App's complexity budget.
-const pickFocused = (keys: readonly string[], cursor: number): string | undefined =>
+const pickFocused = (keys: ReadonlyArray<string>, cursor: number): string | undefined =>
   keys.length ? keys[((cursor % keys.length) + keys.length) % keys.length] : undefined
 
 // Per-id expansion toggle set (orch nodes). Encapsulates the Set + reset-on-session.
@@ -292,7 +295,8 @@ const useNodeExpansion = (resetKey: unknown) => {
   const toggleNode = (id: string) =>
     setExpNodes((s) => {
       const n = new Set(s)
-      n.has(id) ? n.delete(id) : n.add(id)
+      if (n.has(id)) n.delete(id)
+      else n.add(id)
       return n
     })
   return { expNodes, toggleNode }
@@ -307,14 +311,14 @@ function App() {
   const deleteSession = useAtomSet(deleteSessionAtom)
   const [, send] = useAtom(sendAtom)
   const { width, height } = useTerminalDimensions()
-  const t = useTheme() // termcast-style hook accessor onto the resolved palette (same tokens as the `theme` const)
+  const themePalette = useTheme()
   // THEME SWITCH (the picker): the active name (also the mdStyle rebuild key), the ordered registry
   // names, and the switch action (live mutate + state bump + persist — theme-context.tsx).
   const themeCtl = useThemeSwitcher()
   // The shared SyntaxStyle, rebuilt ONLY when the theme name changes (stable across busy ticks). A
   // theme switch mutates the live palette in place, but a SyntaxStyle captures its hex at register
   // time, so it must be rebuilt; keying the memo on the name does exactly that.
-  const mdStyle = useMemo(() => makeSyntaxStyle(), [themeCtl.name])
+  const mdStyle = useMemo(() => makeSyntaxStyle(resolveTheme(themeCtl.name).palette), [themeCtl.name])
 
   const [text, setText] = useState("") // mirror of textarea content (for empty-detection)
   const taRef = useRef<any>(null)
@@ -335,7 +339,7 @@ function App() {
   const [histIdx, setHistIdx] = useState<number | null>(null)
   const draftRef = useRef("")
   // big-paste collapse: marker -> full text, expanded back at submit
-  const pastesRef = useRef<{ ph: string; text: string }[]>([])
+  const pastesRef = useRef<Array<{ ph: string; text: string }>>([])
   // esc-to-interrupt arming + transient header note (copied / interrupt hint)
   const [armed, setArmed] = useState(false)
   const [note, setNote] = useState<string | null>(null)
@@ -407,8 +411,8 @@ function App() {
   // copy selected transcript text to clipboard (OSC52 + pbcopy), transient note
   useSelectionHandler((sel: any) => {
     try {
-      const t = sel?.getSelectedText?.() ?? ""
-      if (copyToClipboard(t)) flash("copied")
+      const selText = sel?.getSelectedText?.() ?? ""
+      if (copyToClipboard(selText)) flash("copied")
     } catch {
       /* ignore */
     }
@@ -426,7 +430,7 @@ function App() {
   // reply — not in a session-level footer. A non-workflow session has no `workflow` on any turn.
   const orch = active?.orch
   const turns = active ? toTurns(active.messages, orch) : []
-  const isExpanded = (t: Turn) => expTurns.has(t.idx) || t.final === null // in-progress auto-expands
+  const isExpanded = (turn: Turn) => expTurns.has(turn.idx) || turn.final === null // in-progress auto-expands
 
   // FOCUS MODEL (captureFocus) — the composer is the DEFAULT focus owner and RECLAIMS focus the
   // instant anything steals it (row click, Tab/Enter toggle, orch re-render) UNLESS a capture
@@ -441,11 +445,11 @@ function App() {
   // node-tree rows to the ring (node:<id> collapses a node; tool:<id> drives an owned tool) —
   // ONLY when its WorkflowPart shows (t.workflow set). A non-workflow turn contributes none, so
   // hidden node rows never join the Tab cycle. Enter toggles the focused one.
-  const focusables: string[] = []
-  for (const t of turns) {
-    if (t.steps.length > 0) focusables.push(`turn:${t.idx}`)
-    if (isExpanded(t)) for (const s of t.steps) if (s.kind === "tool") focusables.push(`tool:${s.id}`)
-    if (t.workflow) focusables.push(...orchFocusables(workflowRows(t.workflow, expNodes)))
+  const focusables: Array<string> = []
+  for (const turn of turns) {
+    if (turn.steps.length > 0) focusables.push(`turn:${turn.idx}`)
+    if (isExpanded(turn)) for (const s of turn.steps) if (s.kind === "tool") focusables.push(`tool:${s.id}`)
+    if (turn.workflow) focusables.push(...orchFocusables(workflowRows(turn.workflow, expNodes)))
   }
   const focusedKey = pickFocused(focusables, focus)
   const toggleFocused = () => {
@@ -459,13 +463,15 @@ function App() {
   const toggleTurn = (idx: number) =>
     setExpTurns((s) => {
       const n = new Set(s)
-      n.has(idx) ? n.delete(idx) : n.add(idx)
+      if (n.has(idx)) n.delete(idx)
+      else n.add(idx)
       return n
     })
   const toggleTool = (id: string) =>
     setExpTools((s) => {
       const n = new Set(s)
-      n.has(id) ? n.delete(id) : n.add(id)
+      if (n.has(id)) n.delete(id)
+      else n.add(id)
       return n
     })
   const setInput = (v: string) => {
@@ -498,16 +504,16 @@ function App() {
       let v = taRef.current?.plainText ?? text
       for (const p of pastesRef.current) v = v.split(p.ph).join(p.text)
       pastesRef.current = []
-      const t = v.trim()
+      const trimmed = v.trim()
       setInput("")
       setHistIdx(null)
       draftRef.current = ""
-      if (t.length === 0) return
-      history.push(t)
+      if (trimmed.length === 0) return
+      history.push(trimmed)
       // QUEUE while busy: sendOrQueue (queue.ts) HOLDS the message in the pending slot when a turn
       // is in flight (the hook's busy→idle effect flushes it) instead of starting a concurrent turn;
       // idle ⇒ send immediately. Either way, pin the transcript to the bottom.
-      sendOrQueue(t)
+      sendOrQueue(trimmed)
       toBottom() // pin the transcript to the new turn (sticky-bottom on submit)
     }
     queueMicrotask(() => queueMicrotask(run))
@@ -636,7 +642,7 @@ function App() {
   // COMMAND REGISTRY — what ⌘K runs. Built from live state each render so "Switch: <session>"
   // reflects the current sessions. Every row here is a REAL action (the user: anything shown
   // must work) — no dead entries. Filtered by the live query (substring, case-insensitive).
-  const commands: Command[] = [
+  const commands: Array<Command> = [
     { title: "New session", hint: "n", run: () => void newSession() },
     // SESSION SWITCHER + MODEL PICK via the command palette (opencode reuse): a command OPENS the
     // shared DialogSelect picker rather than the palette inlining one "Switch: <session>" row per
@@ -663,7 +669,7 @@ function App() {
   // hand-roll; chat.tsx just feeds it the live items and routes keystrokes. Rebuilt each render so
   // "Switch: <session>" stays current — a fresh items array only re-derives the filter (cheap), it
   // does NOT reset the selection (that's separate controller state).
-  const palItems: Option<() => void>[] = commands.map((c) => ({ title: c.title, value: c.run, hint: c.hint }))
+  const palItems: Array<Option<() => void>> = commands.map((c) => ({ title: c.title, value: c.run, hint: c.hint }))
   const palModel = useDialogSelect(palItems, (run) => {
     run()
     closePalette()
@@ -691,10 +697,6 @@ function App() {
     queueMicrotask(() => setInput(""))
   }
   const closeWhichKey = () => mode.pop("whichkey")
-  // Printable-char guard for the palette filter: a single visible char with no ctrl/meta (so it
-  // doesn't swallow Ctrl+K etc.). Shared by the palette's char-append binding.
-  const printable = (e: KeyEventLike): string =>
-    typeof e.sequence === "string" && e.sequence.length === 1 && e.sequence >= " " && !e.ctrl && !e.meta ? e.sequence : ""
 
   // AUTOCOMPLETE (wire-autocomplete) — the @-mention / slash popup wired INTO the composer. The
   // controller (autocomplete.tsx useAutocomplete) owns the open/selection/file-load state; chat.tsx
@@ -706,12 +708,11 @@ function App() {
   // selecting one INSERTS "/title " as text (opencode's /slash autocomplete inserts the command
   // token; it isn't run from the popup). "@" items = a live repo file walk (the controller's default
   // loadFiles = walkRepoFiles over cwd). One pickable list per trigger, fuzzy-filtered by the query.
-  const slashItems: AcItem[] = commands.map((c) => ({
-    value: c.title,
-    display: `/${c.title}`,
-    ...(c.hint !== undefined ? { hint: c.hint } : {}),
-    kind: "command" as const,
-  }))
+  const slashItems: Array<AcItem> = commands.map((c) =>
+    c.hint !== undefined
+      ? { value: c.title, display: `/${c.title}`, hint: c.hint, kind: "command" as const }
+      : { value: c.title, display: `/${c.title}`, kind: "command" as const },
+  )
   const ac = useAutocomplete({
     commands: slashItems,
     onInsert: ({ text: next, cursor }) => {
@@ -755,7 +756,7 @@ function App() {
   // rows fire ONLY when that overlay's mode is on the stack top — so a base nav key (n / tab / arrow)
   // can NOT fire under a dialog. `when` adds the view/empty/history guards the old chains had inline.
   // The same table feeds which-key (activeBindings projects the active mode's rows to its display).
-  const binds: readonly Bind[] = [
+  const binds: ReadonlyArray<Bind> = [
     // ── GLOBAL ── Ctrl+C is the mode-INDEPENDENT panic quit (handled pre-dispatch below so it
     // fires in ANY mode, even with a dialog open — matching the old top-of-handler check + opentui's
     // exitOnCtrlC); this row is display-only so which-key still advertises it. Ctrl+K (palette
@@ -845,7 +846,7 @@ function App() {
     // (In base mode an unmatched printable just falls to the focused textarea, which inserts it.)
     if (dispatch(k, mode.active, binds)) return
     if (mode.is("palette")) {
-      const ch = printable(k)
+      const ch = palettePrintable(k)
       if (ch !== "") palModel.appendQuery(ch)
     } else if (mode.is("dialog")) {
       // A dialog's bindings are all named keys (esc/↵/↑↓/home/end/⌫), so a visible char never matches
@@ -859,10 +860,10 @@ function App() {
     return (
       <box flexDirection="column" style={{ height: "100%" }}>
         <List sessions={state.sessions} cursor={state.cursor} busySessions={busySessions} frame={work.frame} armedDelete={armedDelete} />
-        {palette ? <Palette model={palModel} theme={t} /> : null}
+        {palette ? <Palette model={palModel} theme={themePalette} /> : null}
         {/* SESSION SWITCHER / MODEL PICK overlays — the same shared DialogSelect, switched by
             dialogs.kind. Reachable from the list view too (⌘K → "Switch session…" / "Pick model…"). */}
-        <DialogOverlays dialogs={dialogs} theme={t} />
+        <DialogOverlays dialogs={dialogs} theme={themePalette} />
       </box>
     )
   }
@@ -896,19 +897,19 @@ function App() {
         stickyStart="bottom"
         scrollY
       >
-        {turns.map((t, i) => (
+        {turns.map((turn, i) => (
           <TurnView
-            key={t.idx}
-            t={t}
+            key={turn.idx}
+            t={turn}
             first={i === 0}
-            expanded={isExpanded(t)}
+            expanded={isExpanded(turn)}
             expTools={expTools}
             expNodes={expNodes}
             focusedKey={focusedKey}
             cols={width || 80}
             frame={work.frame}
             syntaxStyle={mdStyle}
-            onToggleTurn={() => toggleTurn(t.idx)}
+            onToggleTurn={() => toggleTurn(turn.idx)}
             onToggleTool={(id) => toggleTool(id)}
             renderNode={renderNode}
           />
@@ -931,7 +932,7 @@ function App() {
           returns null on mode===false). The textarea KEEPS focus under it (captureFocus excludes
           "autocomplete"); the popup's nav keys are intercepted in useKeyboard. `query` is the live
           textarea text (the controller filters by the post-trigger slice). */}
-      <Autocomplete mode={ac.mode} items={ac.items} selected={ac.selected} query={text} theme={t} left={1} bottom={6} width={Math.min(64, Math.max(40, (width || 80) - 4))} />
+      <Autocomplete mode={ac.mode} items={ac.items} selected={ac.selected} query={text} theme={themePalette} left={1} bottom={6} width={Math.min(64, Math.max(40, (width || 80) - 4))} />
       {/* COMPOSER (SPEC) — bordered textarea + metadata row (model) + status row (left
           spinner/hint, right token·cost / Cmd+K). flexShrink:0 so it ALWAYS reserves its
           height; the scrollbox (flexGrow:1) absorbs the slack and CLIPS the transcript
@@ -939,7 +940,7 @@ function App() {
           above): default owner, reclaims on blur UNLESS a palette captures focus. */}
       <Composer
         taRef={taRef}
-        theme={t}
+        theme={themePalette}
         busy={busy}
         armed={armed}
         model={selectedModel}
@@ -957,20 +958,20 @@ function App() {
       {/* FOOTER ACTION-BAR — cwd (left only). Pinned flexShrink:0. The token/cost · Cmd+K
           cluster now lives on the composer status row above; the footer keeps the cwd so the
           working directory stays a glance away. Drops opencode's LSP/MCP/permission dots. */}
-      <ActionBar cwd={footerCwd} right="" theme={t} />
+      <ActionBar cwd={footerCwd} right="" theme={themePalette} />
       {/* ⌘K command palette — absolute overlay on top of the transcript (termcast DialogOverlay).
           Rendered last so it floats over everything; chat.tsx owns its state + key routing. */}
-      {palette ? <Palette model={palModel} theme={t} /> : null}
+      {palette ? <Palette model={palModel} theme={themePalette} /> : null}
       {/* SESSION SWITCHER / MODEL PICK — the same shared DialogSelect (dialogs.tsx), switched by
           dialogs.kind. Absolute overlays like the palette; chat.tsx owns the open/close via the
           "dialog" mode + routes keys to the active controller. Opened from ⌘K. */}
-      <DialogOverlays dialogs={dialogs} theme={t} />
+      <DialogOverlays dialogs={dialogs} theme={themePalette} />
       {/* WHICH-KEY overlay (`?`) — contextual keybind hints, now read straight from the REGISTRY:
           activeBindings("base", binds) projects the base-mode rows whose `when` currently holds to
           the which-key display shape. With inChat true that's exactly the chat-view bindings (the
           list rows' `when` fails) — the overlay shows what you can press RIGHT NOW, no hand-rolled
           duplicate table. Absolute overlay like the palette; presentational only. */}
-      {whichKey ? <WhichKey bindings={activeBindings("base", binds)} cols={width || 80} theme={t} /> : null}
+      {whichKey ? <WhichKey bindings={activeBindings("base", binds)} cols={width || 80} theme={themePalette} /> : null}
     </box>
   )
 }

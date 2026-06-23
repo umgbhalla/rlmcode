@@ -22,7 +22,7 @@ const tool = (id: string, status: "running" | "ok" | "error"): Msg => ({ kind: "
 const settled = {
   idx: 0,
   user: "do the thing",
-  steps: [tool("a1", "ok"), tool("a2", "ok")] as Msg[],
+  steps: [tool("a1", "ok"), tool("a2", "ok")] as Array<Msg>,
   final: "done.",
   meta: { model: "kimi", ms: 1200, tokens: 800, budget: false },
   streaming: false,
@@ -31,7 +31,7 @@ const settled = {
 const inflight = {
   idx: 1,
   user: "another",
-  steps: [tool("b1", "running")] as Msg[],
+  steps: [tool("b1", "running")] as Array<Msg>,
   final: "partial",
   streaming: true,
 }

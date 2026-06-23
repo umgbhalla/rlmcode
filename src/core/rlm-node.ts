@@ -71,6 +71,10 @@ const RLM_TIMEOUT_MS = (() => {
 
 const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
 
+type RlmTok = { totalTokens?: number; promptTokens?: number; completionTokens?: number }
+const rlmTokensOf = (t: RlmTok | undefined): number =>
+  t === undefined ? 0 : typeof t.totalTokens === "number" ? t.totalTokens : (t.promptTokens ?? 0) + (t.completionTokens ?? 0)
+
 // Steer BOTH actor stages (distiller + executor) away from CommonJS AND away from giving up via
 // askClarification / a globalThis scan. The AxJSRuntime worker is a least-privilege ESM sandbox
 // (no require/import/Node modules — by design); an RLM mines an in-memory blob, so it never needs
@@ -123,7 +127,7 @@ export const runRlm = async (
   // workflow prim, replacing the deleted module-global onEvent. Defaults to a no-op so a
   // standalone live-harness call (no turn boundary) still runs — it just emits no live tree rows.
   onEvent: EmitSink = () => {},
-): Promise<{ answer: string; evidence: string[]; turns: number; callbacks: number }> => {
+): Promise<{ answer: string; evidence: Array<string>; turns: number; callbacks: number }> => {
   const budget = allocate(RLM_TOKEN_BUDGET, RLM_TOKEN_HARD)
   // SPAN GRANULARITY (telemetry 2b): the RLM's internal loop (distiller → executor turn 1..N
   // → responder) was an opaque single span. Thread our exporting tracer + the ambient trace
@@ -140,18 +144,19 @@ export const runRlm = async (
   // a.usage is the RLM's CUMULATIVE usage array; we charge the per-turn DELTA so the soft
   // budget streams live (not once-after). Track the highest total already charged.
   let chargedTokens = 0
-  type Tok = { totalTokens?: number; promptTokens?: number; completionTokens?: number }
-  const tokensOf = (t: Tok | undefined): number =>
-    t === undefined ? 0 : typeof t.totalTokens === "number" ? t.totalTokens : (t.promptTokens ?? 0) + (t.completionTokens ?? 0)
   // a.usage is an AxProgramUsage[] (cumulative) — read the last element's tokens.
-  const tokensFromTurn = (usage: ReadonlyArray<{ tokens?: Tok }> | undefined): number => tokensOf(usage?.[usage.length - 1]?.tokens)
+  const tokensFromTurn = (usage: ReadonlyArray<{ tokens?: RlmTok }> | undefined): number =>
+    rlmTokensOf(usage?.[usage.length - 1]?.tokens)
   // getUsage() is AxProgramUsage[] | AxAgentUsage ({ actor, responder }) — SUM every
   // entry's tokens so the final reconcile captures the responder stage too.
   const tokensFromGetUsage = (u: unknown): number => {
-    const entries: Array<{ tokens?: Tok }> = Array.isArray(u)
-      ? (u as Array<{ tokens?: Tok }>)
-      : [...((u as { actor?: Array<{ tokens?: Tok }> })?.actor ?? []), ...((u as { responder?: Array<{ tokens?: Tok }> })?.responder ?? [])]
-    return entries.reduce((sum, e) => sum + tokensOf(e?.tokens), 0)
+    const entries: Array<{ tokens?: RlmTok }> = Array.isArray(u)
+      ? (u as Array<{ tokens?: RlmTok }>)
+      : [
+          ...((u as { actor?: Array<{ tokens?: RlmTok }> })?.actor ?? []),
+          ...((u as { responder?: Array<{ tokens?: RlmTok }> })?.responder ?? []),
+        ]
+    return entries.reduce((sum, e) => sum + rlmTokensOf(e?.tokens), 0)
   }
 
   // The RLM, built EXACTLY per the proven standalone pattern (../ax/src/examples/rlm.ts):
@@ -183,7 +188,7 @@ export const runRlm = async (
       // so spend streams live across executor turns (the old model charged once-after).
       // charge() never throws for the soft line — it only flips overSoft(), which we nudge.
       // Only the HARD runaway ceiling throws; the RLM answer is still returned regardless.
-      const seen = tokensFromTurn(a.usage as ReadonlyArray<{ tokens?: Tok }> | undefined)
+      const seen = tokensFromTurn(a.usage as ReadonlyArray<{ tokens?: RlmTok }> | undefined)
       if (seen > chargedTokens) {
         budget.charge({ totalTokens: seen - chargedTokens })
         chargedTokens = seen

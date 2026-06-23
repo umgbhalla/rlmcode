@@ -17,7 +17,7 @@
 // registry chord, the bindings a registry projection). The Binding row IS the registry's display row.
 import { useMemo } from "react"
 import { TextAttributes } from "@opentui/core"
-import { type ResolvedTheme } from "./theme.ts"
+import type { ResolvedTheme } from "./theme.ts"
 import { Panel, Separator } from "./ui/panel.tsx"
 
 // One active keybind, the row the registry's active-mode query yields (opencode Entry :70-76;
@@ -27,7 +27,7 @@ import { Panel, Separator } from "./ui/panel.tsx"
 export type Binding = { readonly keys: string; readonly desc: string; readonly group: string }
 
 // A group = a category label + its bindings (opencode Group :78-81).
-export type BindingGroup = { readonly label: string; readonly bindings: readonly Binding[] }
+export type BindingGroup = { readonly label: string; readonly bindings: ReadonlyArray<Binding> }
 
 // Column-layout constants (opencode :41-44). A column is at most MAX_COLUMN_WIDTH wide; COLUMN_GAP
 // separates columns; up to 3 columns when the terminal can fit them.
@@ -39,8 +39,8 @@ const OVERLAY_MAX_WIDTH = 110
 
 // groupBindings(): bucket bindings by `group`, sort each bucket by desc then keys, then sort the
 // groups by label (opencode grouped() :153-166). Pure — stable order so the frame is deterministic.
-export const groupBindings = (bindings: readonly Binding[]): BindingGroup[] => {
-  const map = new Map<string, Binding[]>()
+export const groupBindings = (bindings: ReadonlyArray<Binding>): Array<BindingGroup> => {
+  const map = new Map<string, Array<Binding>>()
   for (const b of bindings) map.set(b.group, [...(map.get(b.group) ?? []), b])
   return [...map]
     .map(([label, items]) => ({
@@ -58,10 +58,10 @@ export const whichKeyColumns = (contentWidth: number): number =>
 // chunkColumns(): split a flat list into `cols` near-even column-major chunks (opencode shown()
 // :238-251 fills column-major down each column). Pure helper kept out of the component so the
 // render stays under the nesting budget.
-const chunkColumns = <T,>(items: readonly T[], cols: number): T[][] => {
+const chunkColumns = <T,>(items: ReadonlyArray<T>, cols: number): Array<Array<T>> => {
   if (cols <= 1) return [[...items]]
   const perCol = Math.ceil(items.length / cols)
-  const out: T[][] = []
+  const out: Array<Array<T>> = []
   for (let i = 0; i < items.length; i += perCol) out.push(items.slice(i, i + perCol))
   return out
 }
@@ -79,7 +79,7 @@ function BindingRow({ b, theme }: { b: Binding; theme: ResolvedTheme }) {
 
 // One group column: its category header (muted, bold) + each binding row under it. A column can
 // hold several groups stacked (opencode group header + entries :455-489).
-function GroupColumn({ groups, width, theme }: { groups: readonly BindingGroup[]; width: number; theme: ResolvedTheme }) {
+function GroupColumn({ groups, width, theme }: { groups: ReadonlyArray<BindingGroup>; width: number; theme: ResolvedTheme }) {
   return (
     <box flexDirection="column" style={{ width, paddingRight: COLUMN_GAP }}>
       {groups.map((g) => (
@@ -103,7 +103,7 @@ export function WhichKey({
   cols,
   theme,
 }: {
-  bindings: readonly Binding[]
+  bindings: ReadonlyArray<Binding>
   cols: number
   theme: ResolvedTheme
 }) {
@@ -130,8 +130,8 @@ export function WhichKey({
         </box>
         {/* grouped, multi-column-if-wide grid */}
         <box flexDirection="row" style={{ paddingLeft: 1 }}>
-          {columns.map((groupsInCol, i) => (
-            <GroupColumn key={i} groups={groupsInCol} width={columnWidth} theme={theme} />
+          {columns.map((groupsInCol) => (
+            <GroupColumn key={groupsInCol.map((g) => g.label).join("|")} groups={groupsInCol} width={columnWidth} theme={theme} />
           ))}
         </box>
         {/* footer / toggle hint */}

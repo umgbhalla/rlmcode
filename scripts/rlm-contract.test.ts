@@ -44,11 +44,11 @@ const makeFaultingAI = (): AxMockAIService<string> =>
 
 await (async () => {
   console.log("D4 — runRlm returns a PARTIAL on a forward fault, never throws")
-  const events: NodeEvent[] = []
+  const events: Array<NodeEvent> = []
   const onEvent = (e: NodeEvent): void => void events.push(e)
 
   let threw = false
-  let out: { answer: string; evidence: string[]; turns: number; callbacks: number } | undefined
+  let out: { answer: string; evidence: Array<string>; turns: number; callbacks: number } | undefined
   try {
     // Drive the REAL runRlm with the faulting provider. A bare AbortController signal (never
     // aborted) so the fault — not a cancel — is what we exercise. rootId nests the (empty) node.

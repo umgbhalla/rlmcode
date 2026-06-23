@@ -36,7 +36,7 @@ const ORCH_CONCURRENCY = (() => {
 })()
 
 const clip = (s: string, n = 256) => (s.length > n ? `${s.slice(0, n)}…` : s)
-const numbered = (xs: readonly string[]) => xs.map((c, i) => `#${i + 1}:\n${c}`).join("\n\n")
+const numbered = (xs: ReadonlyArray<string>) => xs.map((c, i) => `#${i + 1}:\n${c}`).join("\n\n")
 
 // agent()'s node gen — a REAL sub-agent: BASE_PROMPT (the capable base) + the caller's label as
 // a stance overlay, carrying BASE_TOOLS ONLY (the one-level recursion guard — no workflow tool).
@@ -49,6 +49,38 @@ const agentGen = (label: string): AxGen => {
   return g
 }
 const BASE_TOOL_NAMES = BASE_TOOLS.map((f) => f.name)
+
+// parallel — BARRIER: ORCH_CONCURRENCY in flight; a throwing thunk resolves to null (parallelLimit).
+const workflowParallel = <T>(thunks: ReadonlyArray<() => Promise<T>>): Promise<Array<T | null>> =>
+  parallelLimit(thunks, ORCH_CONCURRENCY)
+
+// pipeline — per-item fan-through; a throwing stage drops THAT item to null (stops flowing).
+const workflowPipeline = async <T>(
+  items: Iterable<T> | AsyncIterable<T>,
+  ...stages: ReadonlyArray<(prev: unknown, item: T, i: number) => Promise<unknown>>
+): Promise<Array<unknown>> => {
+  const buf: Array<T> = []
+  for await (const it of items as AsyncIterable<T>) buf.push(it)
+  const adapted = stages.map((stage) => async (prev: unknown): Promise<unknown> => {
+    const { i, value } = prev as { i: number; value: unknown }
+    if (value === null) return { i, value: null }
+    // null-on-throw drops the item out of the flow (yielded as null at the end).
+    try {
+      return { i, value: await stage(value, buf[i] as T, i) }
+    } catch {
+      return { i, value: null }
+    }
+  })
+  const out: Array<unknown> = Array.from({ length: buf.length }, () => null)
+  for await (const r of pipelineCore(
+    buf.map((value, i) => ({ i, value })),
+    ...adapted,
+  )) {
+    const { i, value } = r as { i: number; value: unknown }
+    out[i] = value
+  }
+  return out
+}
 
 // The assistant Workflow API shape — the prim names bound as the script body's parameters (the
 // intended API; the body can still reach host globals — see workflow.ts header). agent/parallel/
@@ -69,8 +101,8 @@ export type WorkflowPrims = {
   log: (msg: string) => void
   agent: (prompt: string, opts?: AgentOpts) => Promise<string | object | null>
   parallel: <T>(thunks: ReadonlyArray<() => Promise<T>>) => Promise<Array<T | null>>
-  pipeline: <T>(items: Iterable<T> | AsyncIterable<T>, ...stages: ReadonlyArray<(prev: unknown, item: T, i: number) => Promise<unknown>>) => Promise<unknown[]>
-  judge: (candidates: readonly string[], criteria?: string) => Promise<string>
+  pipeline: <T>(items: Iterable<T> | AsyncIterable<T>, ...stages: ReadonlyArray<(prev: unknown, item: T, i: number) => Promise<unknown>>) => Promise<Array<unknown>>
+  judge: (candidates: ReadonlyArray<string>, criteria?: string) => Promise<string>
   rlm: (context: string, query: string, opts?: { readonly model?: string | undefined }) => Promise<string>
   budget: { total: number | null; spent: () => number; remaining: () => number }
   args: unknown
@@ -172,50 +204,12 @@ export const buildWorkflowPrims = (
     }
   }
 
-  // parallel — BARRIER: run all thunks concurrently (await all), at most ORCH_CONCURRENCY in
-  // flight (the rest queue), a throwing thunk resolves to null. EXACTLY parallelLimit's contract.
-  const parallel = <T>(thunks: ReadonlyArray<() => Promise<T>>): Promise<Array<T | null>> =>
-    parallelLimit(thunks, ORCH_CONCURRENCY)
-
-  // pipeline — NO barrier between stages: each item flows through ALL stages independently
-  // (item A may be in stage 3 while B is still in stage 1). The core `pipeline` async-generator
-  // does the fan-through; we adapt each Workflow-API stage(prev, item, i) — which also sees the
-  // ORIGINAL item + its index — onto the core's single-arg (prev) => next stage shape, and a
-  // throwing stage drops THAT item to null (it stops flowing). Drained to an array at the barrier
-  // the caller awaits (the per-stage flow has no barrier; the final await collects results).
-  const pipeline = async <T>(
-    items: Iterable<T> | AsyncIterable<T>,
-    ...stages: ReadonlyArray<(prev: unknown, item: T, i: number) => Promise<unknown>>
-  ): Promise<unknown[]> => {
-    // Snapshot the items so each carries its original value + index into every stage. The core
-    // pipeline threads only the running `prev`; we pair it with the item via the indexed buffer.
-    const buf: T[] = []
-    for await (const it of items as AsyncIterable<T>) buf.push(it)
-    const adapted = stages.map((stage) => async (prev: unknown): Promise<unknown> => {
-      // prev arrives as { i, value } from the previous stage (or the seed); run the user stage,
-      // null-on-throw drops the item out of the flow (yielded as null at the end).
-      const { i, value } = prev as { i: number; value: unknown }
-      if (value === null) return { i, value: null }
-      try {
-        return { i, value: await stage(value, buf[i] as T, i) }
-      } catch {
-        return { i, value: null }
-      }
-    })
-    const out: unknown[] = new Array(buf.length).fill(null)
-    for await (const r of pipelineCore(
-      buf.map((value, i) => ({ i, value })),
-      ...adapted,
-    )) {
-      const { i, value } = r as { i: number; value: unknown }
-      out[i] = value
-    }
-    return out
-  }
+  const parallel = workflowParallel
+  const pipeline = workflowPipeline
 
   // judge — one judge NODE picks the best candidate verbatim. A pure-reasoning gen (NO tools —
   // strictly stronger than the one-level guard). criteria defaults to a generic best-pick prompt.
-  const judge = async (candidates: readonly string[], criteria?: string): Promise<string> => {
+  const judge = async (candidates: ReadonlyArray<string>, criteria?: string): Promise<string> => {
     const list = candidates.filter((c) => typeof c === "string" && c.length > 0)
     if (list.length === 0) return ""
     if (list.length === 1) return list[0]!
@@ -228,7 +222,7 @@ export const buildWorkflowPrims = (
     try {
       const judged = await judgeRecipe(ai, list, judgeGen, optsFor(), (cs) => ({
         message: criteria ?? "Pick the single best candidate.",
-        candidates: numbered(cs as readonly string[]),
+        candidates: numbered(cs as ReadonlyArray<string>),
       }))
       budget.charge(readUsageOf(judgeGen))
       const reply = String((judged as { reply?: string }).reply ?? list[0]!)

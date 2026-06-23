@@ -39,7 +39,7 @@ export const assistantFooter = (
   m: { readonly model: string; readonly ms: number; readonly tokens?: number | undefined; readonly finishReason?: string | undefined; readonly budget: boolean },
   fmtTokens: (n: number) => string,
 ): string => {
-  const parts: string[] = [m.model, `${(m.ms / 1000).toFixed(1)}s`]
+  const parts: Array<string> = [m.model, `${(m.ms / 1000).toFixed(1)}s`]
   if (typeof m.tokens === "number") parts.push(fmtTokens(m.tokens))
   if (m.finishReason && m.finishReason !== "stop") parts.push(m.finishReason === "length" ? "truncated (max tokens)" : m.finishReason)
   if (m.budget) parts.push("stopped: step budget — answer may be incomplete")

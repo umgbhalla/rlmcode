@@ -55,10 +55,10 @@ type NodeRec = { nodeId: string; event: string; parentId?: string; detail?: stri
 const runWorkflowLive = async (
   script: string,
   liveAi: AxAIService,
-): Promise<{ reply: string; nodes: NodeRec[] }> => {
+): Promise<{ reply: string; nodes: Array<NodeRec> }> => {
   const tool = WORKFLOW_TOOLS.find((t) => t.name === "workflow")
   if (!tool?.func) throw new Error("workflow tool not found in WORKFLOW_TOOLS")
-  const nodes: NodeRec[] = []
+  const nodes: Array<NodeRec> = []
   // Capture the workflow's node events via the PER-TURN emit sink: the handler recovers its sink
   // with getTurnEmit(sessionId), so registering one under the SAME sessionId ("live-wf") receives
   // every node Activity the script's nodes emit. (The module-global setActivitySink is gone — the
@@ -85,7 +85,7 @@ const isReal = (s: string): boolean => {
   return !/^(workflow failed:|partial:|error:|\(workflow returned no value\))/i.test(t)
 }
 
-const fmtNodes = (nodes: NodeRec[]): string =>
+const fmtNodes = (nodes: Array<NodeRec>): string =>
   nodes.map((n) => `    ${n.event} ${n.nodeId}${n.detail ? ` — ${n.detail}` : ""}`).join("\n")
 
 await (async () => {
@@ -116,7 +116,7 @@ await (async () => {
 
   // (b) rlm() BLOB-MINE — a buried fact in a large module string, mined by the rlm() node-kind.
   console.log("\n(b) workflow({script}) — rlm() BLOB-MINE (real CF-Kimi, rlm node-kind as a prim)")
-  const blobLines: string[] = []
+  const blobLines: Array<string> = []
   for (let i = 0; i < 60; i += 1) blobLines.push(`function helper${i}(x){ return x + ${i}; } // util ${i}`)
   blobLines.splice(
     37,

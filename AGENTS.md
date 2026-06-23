@@ -68,8 +68,10 @@ imports count). The TUI consumes the engine ONLY through the barrel + the app ha
     bun run chat         # the agent (src/tui/chat.tsx)
     bun run emit         # headless trace smoke
     bun run sdk:smoke    # barrel-only SDK consumer (examples/sdk-usage.ts) — the SDK seam gate
-    bun run lint         # check + test + analyze + debt (run before commit)
+    bun run lint         # check + oxlint + test + analyze + debt (run before commit)
     bun run check        # tsc --noEmit + Effect LS (Effect anti-patterns)
+    bun run oxlint       # oxlint tier-1 errors (tier-2 suspicious/perf warn)
+    bun run oxlint:report # tier upgrade roadmap + tier-3 preview counts
     bun run analyze      # yuku semantic design analysis (incl. the crosscore boundary rule)
     bun run debt         # ponytail debt ledger
     bun run test:tui     # HEADLESS TUI GATE — see below (needs the termctrl binary + a PTY)
@@ -79,9 +81,10 @@ imports count). The TUI consumes the engine ONLY through the barrel + the app ha
 | command | what it checks | run it when |
 |---|---|---|
 | `bun run check` | `tsc` + `@effect/language-service` — types + Effect anti-patterns (floating effects, missing service deps, error-channel bugs) | after **any** edit to `.ts`/`.tsx`, especially Effect code (`core/agent.ts`, `core/run.ts`, `tui/atoms.ts`, `otel.ts`, `core/sessions.ts`). The fast inner loop. |
-| `bun run analyze` | `yuku-analyzer` — dead exports, unused imports, circular deps, per-function cyclomatic/nesting/param budgets | after adding/removing exports or modules, or when a function grows branchy. Before committing structural changes. |
+| `bun run oxlint` | `oxlint` via `scripts/oxlint-check.ts` — tier 1 `correctness` + tier 2 `suspicious`/`perf` both error (0 warnings today); tier 3 preview via `oxlint:report`. Scope: `src` + `scripts` + `examples`. Does **not** duplicate yuku crosscore/CC/mutate/capture. | after any edit to `.ts`/`.tsx`. Fast (~10ms). `oxlint:fix` for auto-fix; `oxlint:upgrade` bumps the dep + prints the next tier preview. |
+| `bun run analyze` | `yuku-analyzer` via `scripts/design-check.ts` — **semantic/architecture** on `src/` only: crosscore barrel seam, dead exports/modules, cycles, CC/nest/params budgets, mutate/capture write-flow. Scripts/examples join the import graph but are not structurally linted. Complements oxlint; `scripts/lint-coordination.test.ts` guards against fighting fixes. | after adding/removing exports or modules, or when a function grows branchy. Before committing structural changes. |
 | `bun run debt` | `ponytail:` marker ledger — fails on any marker with no `Upgrade:` line | after adding a `ponytail:` shortcut comment; it forces every shortcut to name its upgrade path. |
-| `bun run lint` | `check` + `analyze` + `debt` (all of the above) | **before every commit**, and in CI. One gate. Must be green to ship. |
+| `bun run lint` | `check` + `oxlint` + `test` + `analyze` + `debt` (all of the above) | **before every commit**, and in CI. One gate. Must be green to ship. |
 
 Workflow: edit → `bun run check` (tight loop) → when done → `bun run lint` → commit.
 Budgets in `scripts/design-check.ts` (CC 18, nest 5, params 6) are tunable; raise only

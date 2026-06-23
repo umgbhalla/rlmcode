@@ -26,7 +26,7 @@ const FILES = [
   "README.md",
 ]
 // Canned / command list — the shape the composer would pass from the palette registry.
-const COMMANDS: AcItem[] = [
+const COMMANDS: Array<AcItem> = [
   { value: "new", display: "/new", hint: "n", kind: "command" },
   { value: "quit", display: "/quit", hint: "ctrl+c", kind: "command" },
 ]

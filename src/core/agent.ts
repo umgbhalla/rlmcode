@@ -3,7 +3,7 @@
 // emits canonical gen_ai.* child spans (token usage, finish reasons, message
 // events). Effect's own Telemetry.addGenAIAnnotations stamps the semconv
 // attributes on our span. Metrics + correlated logs come along automatically.
-import { ax, type AxAIService, type AxFunction, type AxGen, AxMemory } from "@ax-llm/ax"
+import { ax, type AxAIService, type AxFunction, type AxGen, type AxMemory } from "@ax-llm/ax"
 import { existsSync, readFileSync } from "node:fs"
 import { makeLiveLogger } from "./activity.ts"
 import { allocate, type ActivitySink, BudgetExhaustedError, type BudgetUsage } from "./orch.ts"
@@ -89,7 +89,7 @@ export const projectDocLoaded = (["AGENTS.md", "CLAUDE.md"] as const).find((f) =
 // inject its own (e.g. [] for a headless smoke). The full system prompt (BASE_PROMPT +
 // RLM_WORKFLOW_OVERLAY + projectDoc) is assembled inside createAgent so the prompt always
 // matches whatever gen the factory constructs.
-export const CHAT_TOOLS: AxFunction[] = [...BASE_TOOLS, ...WORKFLOW_TOOLS]
+export const CHAT_TOOLS: Array<AxFunction> = [...BASE_TOOLS, ...WORKFLOW_TOOLS]
 
 // The assembled system prompt (BASE_PROMPT + RLM_WORKFLOW_OVERLAY + projectDoc) — sent on
 // EVERY turn. Built once here for the DEFAULT agent; createAgent re-assembles the identical
@@ -100,9 +100,14 @@ const buildSystemPrompt = (): string => `${BASE_PROMPT} ${RLM_WORKFLOW_OVERLAY}$
 // lever. Exported (atoms.ts/chat.tsx-stable); turn() reads its OWN agent's prompt size.
 export const SYSTEM_PROMPT_CHARS = buildSystemPrompt().length
 
+const clipSpan = (s: string, n = 4000): string => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
+
 class ChatError {
   readonly _tag = "ChatError"
-  constructor(readonly cause: unknown) {}
+  readonly cause: unknown
+  constructor(cause: unknown) {
+    this.cause = cause
+  }
 }
 
 // LEAK FIX (D3): a module-level registry of per-agent `turnAborters` clearers. `turnAborters` is
@@ -190,7 +195,7 @@ export type AxAgentConfig = {
   readonly model: string
   readonly maxSteps?: number | undefined
   readonly tokenBudget?: number | undefined
-  readonly tools?: AxFunction[] | undefined
+  readonly tools?: Array<AxFunction> | undefined
 }
 
 export const createAgent = (config: AxAgentConfig) => {
@@ -434,10 +439,9 @@ export const createAgent = (config: AxAgentConfig) => {
       // events on ax's gen_ai child span; squatting gen_ai.prompt would mislead
       // semconv-aware tooling.
       const reply = res.reply ?? ""
-      const clip = (s: string, n = 4000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
       yield* Effect.annotateCurrentSpan({
-        "chat.prompt": clip(message),
-        "chat.reply": clip(reply),
+        "chat.prompt": clipSpan(message),
+        "chat.reply": clipSpan(reply),
         "chat.budget_exhausted": budgetExhausted,
       })
 

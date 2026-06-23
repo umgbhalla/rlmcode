@@ -48,7 +48,7 @@ const main = async () => {
   // Drive ONE turn as a serializable event stream — the ONLY input is (sessionId, message), the
   // session is opened lazily. Collect every event type; the terminal {type:'reply'} carries the
   // normalized TurnResult. NO Effect, NO manual OTel — the SDK runs it on the app runtime inside.
-  const types: string[] = []
+  const types: Array<string> = []
   let reply: string | undefined
   let replyCount = 0
   let usageTotal: number | undefined

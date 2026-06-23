@@ -25,7 +25,7 @@
 // mode stack for KeymapProvider + createOpencodeModeStack (its mode-require layer fields), keeping
 // this module's Bind/dispatch surface so chat.tsx's table is the only thing that moves.
 import { useCallback, useState } from "react"
-import { type Binding } from "./which-key.tsx"
+import type { Binding } from "./which-key.tsx"
 
 // A keyboard event the matcher reads — the fields of opentui's ParsedKey (KeyEvent implements it)
 // the chord grammar needs. Kept structural (not an import of ParsedKey) so the registry has no
@@ -117,7 +117,7 @@ export const matchesChord = (event: KeyEventLike, chord: string): boolean => {
 // helpers (open an overlay → push its mode; close → pop it, idempotent on the specific mode).
 
 export type ModeStack = {
-  readonly stack: readonly Mode[]
+  readonly stack: ReadonlyArray<Mode>
   readonly active: Mode
   readonly push: (mode: Mode) => void
   // pop the TOP if it equals `mode` (idempotent — closing an already-closed overlay is a no-op);
@@ -130,7 +130,7 @@ export type ModeStack = {
 // active "base"). Opening an overlay pushes; closing pops its own mode. Functional updaters keep
 // rapid open/close stable (no stale-closure clobber, same discipline as the dialog controller).
 export const useModeStack = (): ModeStack => {
-  const [stack, setStack] = useState<Mode[]>([])
+  const [stack, setStack] = useState<Array<Mode>>([])
   const push = useCallback((mode: Mode) => setStack((s) => [...s, mode]), [])
   const pop = useCallback(
     (mode?: Mode) =>
@@ -154,7 +154,7 @@ export const useModeStack = (): ModeStack => {
 // inserting a char). First-match-wins mirrors the old if-chain's top-to-bottom order, so table
 // order is the precedence (put the specific guarded rows — empty-composer Enter — before general
 // ones). Only active-mode rows are even considered, so a base nav key can't fire under a dialog.
-export const dispatch = (event: KeyEventLike, active: Mode, binds: readonly Bind[]): boolean => {
+export const dispatch = (event: KeyEventLike, active: Mode, binds: ReadonlyArray<Bind>): boolean => {
   for (const b of binds) {
     if (b.mode !== active) continue
     if (b.display) continue // display-only doc row (textarea-native key) — never dispatched
@@ -171,7 +171,7 @@ export const dispatch = (event: KeyEventLike, active: Mode, binds: readonly Bind
 // and rows whose `when` guard currently fails, so the overlay shows exactly what will fire RIGHT
 // NOW. This is the seam the which-key overlay reads instead of chat.tsx's old hand-rolled
 // chatBindings() table (opencode useBindings / gather, projected to the display row).
-export const activeBindings = (active: Mode, binds: readonly Bind[]): Binding[] =>
+export const activeBindings = (active: Mode, binds: ReadonlyArray<Bind>): Array<Binding> =>
   binds
     .filter((b) => b.mode === active && !b.hidden && (!b.when || b.when()))
     .map(({ keys, desc, group }) => ({ keys, desc, group }))

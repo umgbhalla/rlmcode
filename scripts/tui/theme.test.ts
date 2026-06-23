@@ -49,8 +49,8 @@ const TUI_DIR = join(REPO_ROOT, "src", "tui")
 const HEX = /#[0-9a-fA-F]{6}\b/
 
 // Recursively collect every .ts/.tsx under src/tui except theme.ts (the palette home).
-const tuiSources = (dir: string): string[] => {
-  const out: string[] = []
+const tuiSources = (dir: string): Array<string> => {
+  const out: Array<string> = []
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, e.name)
     if (e.isDirectory()) out.push(...tuiSources(p))
@@ -74,9 +74,9 @@ await report("theme.test", async (a) => {
   a.ok(THEME_NAMES[0] === DEFAULT_THEME, "the default is first in the ordered name list")
   // COMPLETENESS: every palette must carry the EXACT key set of the default — a missing key is a
   // runtime crash (a reader gets undefined). Compare each theme's keys against rlmcode-dark's.
-  const refKeys = Object.keys(resolveTheme(DEFAULT_THEME).palette).sort().join(",")
+  const refKeys = Object.keys(resolveTheme(DEFAULT_THEME).palette).toSorted().join(",")
   for (const name of THEME_NAMES) {
-    const keys = Object.keys(themes[name]!.palette).sort().join(",")
+    const keys = Object.keys(themes[name]!.palette).toSorted().join(",")
     a.ok(keys === refKeys, `theme "${name}" has the COMPLETE key set (no missing/extra token vs the default)`)
   }
 

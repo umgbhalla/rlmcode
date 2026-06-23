@@ -11,7 +11,7 @@
 // (title/footer/placeholder) and hands the model straight to DialogSelect. A command's `value` in
 // the controller is its `run` thunk, so the controller's submit() = invoke the command.
 import { DialogSelect, type DialogSelectModel } from "./dialog-select.tsx"
-import { type ResolvedTheme } from "./theme.ts"
+import type { ResolvedTheme } from "./theme.ts"
 
 // A command the palette can run. `hint` is the optional key shortcut shown right-aligned (it maps
 // to DialogSelect's Option.hint). `run` is the action chat.tsx wraps as the option's value, so the

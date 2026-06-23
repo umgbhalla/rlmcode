@@ -34,7 +34,7 @@ await report("keys", async (a) => {
   // ── (1) PURE: the MODE STACK scopes dispatch — a base row does NOT fire under another mode ────
   let baseFired = 0
   let palFired = 0
-  const binds: readonly Bind[] = [
+  const binds: ReadonlyArray<Bind> = [
     { mode: "base", chord: "n", keys: "n", desc: "new", group: "G", run: () => void baseFired++ },
     { mode: "palette", chord: "escape", keys: "esc", desc: "close", group: "P", run: () => void palFired++ },
   ]

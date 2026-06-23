@@ -87,7 +87,7 @@ export interface TurnOptions {
 // signals end-of-stream so the drain loop terminates. No external dep. Scoped to ONE turn,
 // so two turns never share a buffer (the module-global sink it replaces could not say that).
 class TurnQueue<T> {
-  private readonly buffer: T[] = []
+  private readonly buffer: Array<T> = []
   private resolve: ((v: void) => void) | null = null
   private closed = false
   push(value: T): void {

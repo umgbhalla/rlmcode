@@ -15,11 +15,10 @@ import { AxFunctionError, type AxAIService, type AxGen } from "@ax-llm/ax"
 // here and dynamic-import the recipes below — static imports would hoist above this.
 process.env.RLM_NODE_BACKOFF_MS = "2"
 process.env.RLM_NODE_RETRIES = "2"
+import type { EmitSink } from "../src/core/orch-recipes.ts"
+import type { NodeEvent, NodeOpts } from "../src/core/orch.ts"
 const { classifyTransient, NODE_ATTEMPTS, NodeTimeoutError, parallelLimit, resilientNode, runNode, withRetry, withTimeout } = await import("../src/core/orch-recipes.ts")
-type EmitSink = import("../src/core/orch-recipes.ts").EmitSink
 const { BudgetExhaustedError, retryStatus } = await import("../src/core/orch.ts")
-type NodeOpts = import("../src/core/orch.ts").NodeOpts
-type NodeEvent = import("../src/core/orch.ts").NodeEvent
 
 let failed = 0
 const assert = (cond: boolean, msg: string) => {
@@ -37,7 +36,7 @@ const optsFor = (signal: AbortSignal = new AbortController().signal): NodeOpts =
   ({ mem: {}, sessionId: "test", tracer: undefined, traceContext: undefined, maxSteps: 1, stream: false, abortSignal: signal }) as unknown as NodeOpts
 
 const recorder = () => {
-  const events: NodeEvent[] = []
+  const events: Array<NodeEvent> = []
   const sink: EmitSink = (e) => events.push(e)
   return { events, sink }
 }

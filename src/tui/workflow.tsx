@@ -63,8 +63,8 @@ export const orchSigma = (orch: OrchTree, fmtTokens: FmtTokens): string => {
 // each EXPANDED node's owned tools then expose a `tool:<id>` key (same key as transcript
 // tools). Collapsed nodes are absent from `rows` (flatten omits their subtree) so their
 // tools stay out of the ring. Empty for a non-workflow turn (computeShowOrch gates the call).
-export const orchFocusables = (rows: readonly OrchRow[]): string[] => {
-  const out: string[] = []
+export const orchFocusables = (rows: ReadonlyArray<OrchRow>): Array<string> => {
+  const out: Array<string> = []
   for (const r of rows) {
     if (r.hasDetail) out.push(`node:${r.id}`)
     if (r.expanded) for (const m of r.tools) out.push(`tool:${m.id}`)
@@ -74,7 +74,7 @@ export const orchFocusables = (rows: readonly OrchRow[]): string[] => {
 
 // Flatten a turn's workflow tree into the velocity-capped Row[] the inline render + focus
 // ring share. Pure; kept here so chat.tsx doesn't re-derive the cap argument.
-export const workflowRows = (orch: OrchTree, expNodes: ReadonlySet<string>): OrchRow[] => flatten(orch, expNodes, ORCH_MAX_SHOWN)
+export const workflowRows = (orch: OrchTree, expNodes: ReadonlySet<string>): Array<OrchRow> => flatten(orch, expNodes, ORCH_MAX_SHOWN)
 
 // WORKFLOW PART — the inline orchestration block: an "orchestration" section header, the
 // velocity unicode tree (one row per flattened node, drawn by the injected renderRow), and
@@ -89,7 +89,7 @@ export function WorkflowPart({
   renderRow,
 }: {
   orch: OrchTree
-  rows: readonly OrchRow[]
+  rows: ReadonlyArray<OrchRow>
   fmtTokens: FmtTokens
   indent: number
   renderRow: (row: OrchRow) => React.ReactNode

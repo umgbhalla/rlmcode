@@ -34,8 +34,8 @@
 process.env.RLM_STREAM_STALL_MS = "300"
 
 import { AxMockAIService, type AxChatRequest, type AxChatResponse } from "@ax-llm/ax"
+import type { TurnEvent } from "../src/core/sdk.ts"
 const { createAgent } = await import("../src/core/sdk.ts")
-type TurnEvent = import("../src/core/sdk.ts").TurnEvent
 
 let failures = 0
 const assert = (cond: boolean, msg: string) => {
@@ -143,3 +143,7 @@ if (failures > 0) {
   process.exit(1)
 }
 console.log("\nturn-stall.test: all pass ✓")
+// The case-1 half-open stream is intentionally never closed; its pending read + the runtime's otel
+// handles keep the event loop alive, so a fall-off-the-end never exits and stalls the `&&` chain.
+// Mirror the failure path's process.exit — exit cleanly on success once assertions have printed.
+process.exit(0)

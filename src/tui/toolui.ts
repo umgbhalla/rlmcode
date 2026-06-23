@@ -108,7 +108,7 @@ export const toolDetail = (name: string, args: string, result: string, isError: 
   if (name !== "bash") return ""
   const wd = field(args, "workdir") || field(args, "cwd")
   const exit = result.match(EXIT_RE)
-  const bits: string[] = []
+  const bits: Array<string> = []
   if (wd && wd !== ".") bits.push(`in ${wd}`)
   // surface a NON-zero exit (a clean run is exit 0 / no marker); an errored row already reads ✗,
   // but its exit code is still useful, so show it whenever it's present + non-zero (or on error).
@@ -118,10 +118,10 @@ export const toolDetail = (name: string, args: string, result: string, isError: 
 
 // Width-aware: clamp each line to `cols` so one 5000-char line can't blow the
 // inline layout, independent of the `n` line cap.
-const headLines = (s: string, n: number, cols = 200): PreviewLine[] => {
+const headLines = (s: string, n: number, cols = 200): Array<PreviewLine> => {
   const clamp = (l: string) => (l.length > cols ? `${l.slice(0, cols - 1)}…` : l)
   const all = s.replace(/\s+$/, "").split("\n")
-  const out: PreviewLine[] = all.slice(0, n).map((l) => ({ text: clamp(l), tone: "dim" as const }))
+  const out: Array<PreviewLine> = all.slice(0, n).map((l) => ({ text: clamp(l), tone: "dim" as const }))
   if (all.length > n) out.push({ text: `… +${all.length - n} more`, tone: "dim" })
   return out
 }
@@ -131,20 +131,30 @@ const headLines = (s: string, n: number, cols = 200): PreviewLine[] => {
 // old block, add the whole new block" dump (which made a 1-line tweak look like a full
 // rewrite). O(m·k) DP — bounded by the caller's line cap. Returns unified-diff body lines
 // (" ctx" / "-del" / "+add"). Exported for a headless self-check (scripts/toolui-diff.test).
-export const lcsDiffLines = (o: readonly string[], n: readonly string[]): string[] => {
+const fileExt = (p: string): string => (p.includes(".") ? p.split(".").pop()! : "txt")
+
+export const lcsDiffLines = (o: ReadonlyArray<string>, n: ReadonlyArray<string>): Array<string> => {
   const m = o.length
   const k = n.length
   // dp[i][j] = LCS length of o[i:] and n[j:]; walked forward to reconstruct in order.
-  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(k + 1).fill(0))
+  const dp: Array<Array<number>> = Array.from({ length: m + 1 }, () => Array.from({ length: k + 1 }, () => 0))
   for (let i = m - 1; i >= 0; i--)
     for (let j = k - 1; j >= 0; j--) dp[i]![j] = o[i] === n[j] ? dp[i + 1]![j + 1]! + 1 : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!)
-  const out: string[] = []
+  const out: Array<string> = []
   let i = 0
   let j = 0
   while (i < m && j < k) {
-    if (o[i] === n[j]) (out.push(` ${o[i]}`), i++, j++)
-    else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) (out.push(`-${o[i]}`), i++)
-    else (out.push(`+${n[j]}`), j++)
+    if (o[i] === n[j]) {
+      out.push(` ${o[i]}`)
+      i++
+      j++
+    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
+      out.push(`-${o[i]}`)
+      i++
+    } else {
+      out.push(`+${n[j]}`)
+      j++
+    }
   }
   while (i < m) out.push(`-${o[i++]}`)
   while (j < k) out.push(`+${n[j++]}`)
@@ -160,7 +170,6 @@ export const toolDiff = (
   isError: boolean,
 ): { diff: string; filetype: string } | null => {
   if (isError) return null
-  const ext = (p: string) => (p.includes(".") ? p.split(".").pop()! : "txt")
   if (name === "edit_file") {
     const path = field(args, "path")
     const o = field(args, "old_string").split("\n")
@@ -168,14 +177,14 @@ export const toolDiff = (
     if (o.length + n.length > 600) return null // too big — fall back to text preview (LCS is O(m·k))
     const body = lcsDiffLines(o, n)
     const diff = `--- a/${path}\n+++ b/${path}\n@@ -1,${o.length} +1,${n.length} @@\n${body.join("\n")}\n`
-    return { diff, filetype: ext(path) }
+    return { diff, filetype: fileExt(path) }
   }
   if (name === "write_file") {
     const path = field(args, "path")
     const c = field(args, "content").split("\n")
     if (!c.length || c.length > 120) return null
     const diff = `--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${c.length} @@\n` + c.map((l) => `+${l}`).join("\n") + "\n"
-    return { diff, filetype: ext(path) }
+    return { diff, filetype: fileExt(path) }
   }
   return null
 }
@@ -217,8 +226,8 @@ const diffLineToPreview = (l: string): PreviewLine => {
  * line itself). edit_file/write_file render via toolDiff (native <diff>) — this is the TINY FALLBACK
  * they hit ONLY when the diff is too big for the native renderer (toolDiff returns null): a minimal
  * LCS -/+ diff (edit) / a head of the added content (write), NOT the old whole-block del+add dump. */
-export const toolPreview = (name: string, args: string, result: string, isError: boolean, cols = 200, max?: number): PreviewLine[] => {
-  if (isError || /^error:/.test(result.trim())) return [{ text: result.trim().slice(0, 200), tone: "del" }]
+export const toolPreview = (name: string, args: string, result: string, isError: boolean, cols = 200, max?: number): Array<PreviewLine> => {
+  if (isError || result.trim().startsWith("error:")) return [{ text: result.trim().slice(0, 200), tone: "del" }]
   const empty = /^\(no (output|matches)\)/.test(result.trim()) || result.trim() === ""
   const cap = (dflt: number) => max ?? dflt
   switch (name) {
@@ -235,9 +244,13 @@ export const toolPreview = (name: string, args: string, result: string, isError:
       // the -/+ lines) so even the text fallback shows ONLY what changed, not a full-rewrite dump.
       const diff = lcsDiffLines(field(args, "old_string").split("\n"), field(args, "new_string").split("\n"))
       const clamp = (t: string) => (t.length > cols ? `${t.slice(0, cols - 1)}…` : t)
-      const lines = diff.slice(0, cap(6)).map((l) => { const p = diffLineToPreview(l); return { ...p, text: clamp(p.text) } })
-      if (diff.length > cap(6)) lines.push({ text: `… +${diff.length - cap(6)} more`, tone: "dim" })
-      return lines
+      const previewLines: Array<PreviewLine> = []
+      for (const l of diff.slice(0, cap(6))) {
+        const p = diffLineToPreview(l)
+        previewLines.push({ text: clamp(p.text), tone: p.tone })
+      }
+      if (diff.length > cap(6)) previewLines.push({ text: `… +${diff.length - cap(6)} more`, tone: "dim" })
+      return previewLines
     }
     case "glob":
     case "grep":
@@ -250,7 +263,7 @@ export const toolPreview = (name: string, args: string, result: string, isError:
 }
 
 export const toolSummary = (name: string, result: string, isError: boolean): string => {
-  if (isError || /^error:/.test(result.trim())) return "error"
+  if (isError || result.trim().startsWith("error:")) return "error"
   const empty = /^\(no (output|matches)\)/.test(result.trim())
   switch (name) {
     case "bash":

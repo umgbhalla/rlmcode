@@ -28,7 +28,7 @@ export type Row = {
   readonly label: string
   readonly summary: string
   readonly tokens: number | undefined
-  readonly tools: readonly ToolMsg[] // PER-NODE TOOL ROUTING: this node's OWN tool steps
+  readonly tools: ReadonlyArray<ToolMsg> // PER-NODE TOOL ROUTING: this node's OWN tool steps
   readonly toolsLabel: string // collapsed-only "N tools" summary (empty when none)
   readonly hasKids: boolean
   readonly hasDetail: boolean // expandable = owns tools OR has child nodes
@@ -81,8 +81,8 @@ const toolsLabelOf = (n: OrchNode): string => {
 
 // parent->children index in first-seen (insertion) order; only edges whose parent
 // exists are kept. Mirrors the old chat.tsx childrenIndex so render order is stable.
-const childrenIndex = (orch: OrchTree): Record<string, string[]> => {
-  const idx: Record<string, string[]> = {}
+const childrenIndex = (orch: OrchTree): Record<string, Array<string>> => {
+  const idx: Record<string, Array<string>> = {}
   for (const id of Object.keys(orch.nodes)) {
     const p = orch.nodes[id]!.parentId
     if (p !== undefined && orch.nodes[p] !== undefined) (idx[p] ??= []).push(id)
@@ -92,11 +92,11 @@ const childrenIndex = (orch: OrchTree): Record<string, string[]> => {
 
 // One 3-col cell per NON-ROOT ancestor: "   " if that ancestor was its parent's last
 // child (its branch already closed) or "│  " if not (the vertical guide continues).
-const stemOf = (ancestors: readonly boolean[]): string => ancestors.map((last) => (last ? "   " : "│  ")).join("")
+const stemOf = (ancestors: ReadonlyArray<boolean>): string => ancestors.map((last) => (last ? "   " : "│  ")).join("")
 
 // Connector PREFIX for a NON-ROOT node header: the ancestor stem plus this node's own
 // cell — "└─ " when it is its parent's last child, else "├─ ".
-const prefixOf = (ancestors: readonly boolean[], isLast: boolean): string => stemOf(ancestors) + (isLast ? "└─ " : "├─ ")
+const prefixOf = (ancestors: ReadonlyArray<boolean>, isLast: boolean): string => stemOf(ancestors) + (isLast ? "└─ " : "├─ ")
 
 /**
  * Flatten an OrchTree into ordered Row[] for the unicode-tree render. Walks roots
@@ -131,7 +131,7 @@ const moreRow = (id: string, prefix: string, hidden: number): Row => ({
 // and collapse the older settled into one "… +N earlier" row. Default Infinity ⇒ no cap
 // (the golden test + small trees are unchanged); chat.tsx passes the real window so only the
 // last ~N runs-at-a-time show. Order is preserved (marker sits where the hidden ones were).
-const capChildren = (children: readonly string[], orch: OrchTree, cap: number): { shown: string[]; hidden: number } => {
+const capChildren = (children: ReadonlyArray<string>, orch: OrchTree, cap: number): { shown: Array<string>; hidden: number } => {
   if (children.length <= cap) return { shown: [...children], hidden: 0 }
   const keep = new Set<string>()
   for (const c of children) if (orch.nodes[c]?.status === "running") keep.add(c)
@@ -140,19 +140,19 @@ const capChildren = (children: readonly string[], orch: OrchTree, cap: number): 
   return { shown, hidden: children.length - shown.length }
 }
 
-export const flatten = (orch: OrchTree, expNodes: ReadonlySet<string>, maxChildren = Number.POSITIVE_INFINITY): Row[] => {
+export const flatten = (orch: OrchTree, expNodes: ReadonlySet<string>, maxChildren = Number.POSITIVE_INFINITY): Array<Row> => {
   const kids = childrenIndex(orch)
-  const rows: Row[] = []
+  const rows: Array<Row> = []
 
   // `ancestors` = last-child flags for NON-ROOT ancestors (empty for roots and their
   // direct children — a root contributes no column). `isLast` = is this node its
   // parent's last child (false/ignored for roots, which carry no connector).
-  const walk = (id: string, ancestors: readonly boolean[], isLast: boolean, isRoot: boolean) => {
+  const walk = (id: string, ancestors: ReadonlyArray<boolean>, isLast: boolean, isRoot: boolean) => {
     const n = orch.nodes[id]
     if (n === undefined) return
     const children = kids[id] ?? []
     const hasKids = children.length > 0
-    const tools = (n.tools ?? []) as readonly ToolMsg[]
+    const tools = (n.tools ?? []) as ReadonlyArray<ToolMsg>
     const hasDetail = hasKids || tools.length > 0
     const expanded = n.status === "running" || expNodes.has(id) || !hasDetail
     // The stem children/body hang under: a root adds no column; a non-root extends the

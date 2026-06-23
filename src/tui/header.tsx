@@ -75,7 +75,7 @@ export function NewPill({ scrollRef, turnCount, bottom = 0 }: { scrollRef: { cur
 
 // SESSION LIST — the list-view chrome (moved here from chat.tsx with the chat-view chrome). The
 // session rows with a per-session liveness spinner + the arm-to-close hint. Pure presentation.
-export function List({ sessions, cursor, busySessions, frame, armedDelete }: { sessions: readonly SessionView[]; cursor: number; busySessions: ReadonlySet<string>; frame: string; armedDelete: string | null }) {
+export function List({ sessions, cursor, busySessions, frame, armedDelete }: { sessions: ReadonlyArray<SessionView>; cursor: number; busySessions: ReadonlySet<string>; frame: string; armedDelete: string | null }) {
   return (
     <box flexDirection="column" padding={1}>
       <text fg={theme.muted}>SESSIONS · n new · ↑↓ move · enter open · d close · q quit</text>

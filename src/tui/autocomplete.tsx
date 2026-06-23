@@ -19,7 +19,7 @@
 // useFrecency) + honor .gitignore once a project file index exists.
 import { TextAttributes } from "@opentui/core"
 import { useEffect, useMemo, useState } from "react"
-import { type ResolvedTheme } from "./theme.ts"
+import type { ResolvedTheme } from "./theme.ts"
 import { getIconShape } from "./icons.ts"
 
 // ── DATA SHAPES ─────────────────────────────────────────────────────────────────────────────
@@ -72,9 +72,9 @@ export const fuzzyScore = (query: string, candidate: string): number | null => {
 // Rank `items` by fuzzyScore against `query`, dropping non-matches, capped at `limit`. An empty
 // query passes everything through in input order (no re-sort) — matches opencode's "no search ⇒
 // trust the upstream order" branch. Pure.
-export const filterItems = (items: readonly AcItem[], query: string, limit = 10): AcItem[] => {
+export const filterItems = (items: ReadonlyArray<AcItem>, query: string, limit = 10): Array<AcItem> => {
   if (query.trim() === "") return items.slice(0, limit)
-  const scored: { it: AcItem; s: number }[] = []
+  const scored: Array<{ it: AcItem; s: number }> = []
   for (const it of items) {
     const s = fuzzyScore(query, display(it))
     if (s !== null) scored.push({ it, s })
@@ -91,9 +91,9 @@ export const filterItems = (items: readonly AcItem[], query: string, limit = 10)
 // loads once per open and the popup filters the loaded set in-memory as the query grows.
 const SKIP = /(^|\/)(node_modules|\.git|dist|build|\.next|coverage|vendor|out)(\/|$)/
 const FILE_CAP = 2000
-export const walkRepoFiles = async (cwd: string, cap = FILE_CAP): Promise<string[]> => {
+export const walkRepoFiles = async (cwd: string, cap = FILE_CAP): Promise<Array<string>> => {
   try {
-    const out: string[] = []
+    const out: Array<string> = []
     // `as any` — Bun's global typings aren't always present under tsc's lib; the runtime has it.
     // ponytail: Bun.Glob cast. Upgrade: drop once @types/bun's Glob surfaces in this tsconfig.
     const glob = new (globalThis as any).Bun.Glob("**/*")
@@ -129,7 +129,7 @@ export const detectTrigger = (text: string, cursor: number): AcTrigger | null =>
   if (/\s/.test(between)) return null
   // an "@" mid-word (e.g. an email "a@b") shouldn't trigger: require the char before "@" to be a
   // boundary (start, space, or newline) — matches opencode mentionTriggerIndex's word-start rule.
-  const prev = at > 0 ? before[at - 1] : ""
+  const prev = at > 0 ? before[at - 1] ?? "" : ""
   if (prev !== "" && !/\s/.test(prev)) return null
   return { mode: "@", index: at, query: between }
 }
@@ -161,7 +161,7 @@ export const applyInsert = (
 // canned set deterministically). `onInsert` = apply the spliced text to the textarea.
 export type AutocompleteController = {
   readonly mode: AcMode
-  readonly items: readonly AcItem[]
+  readonly items: ReadonlyArray<AcItem>
   readonly selected: number
   /** Composer calls this on every keystroke (text + cursor) to open/track/close the popup. */
   readonly sync: (text: string, cursor: number) => void
@@ -171,13 +171,13 @@ export type AutocompleteController = {
 }
 
 export const useAutocomplete = (opts: {
-  commands: readonly AcItem[]
+  commands: ReadonlyArray<AcItem>
   onInsert: (next: { text: string; cursor: number }) => void
-  loadFiles?: (() => Promise<string[]>) | undefined
+  loadFiles?: (() => Promise<Array<string>>) | undefined
 }): AutocompleteController => {
   const [trigger, setTrigger] = useState<AcTrigger | null>(null)
   const [selected, setSelected] = useState(0)
-  const [files, setFiles] = useState<readonly AcItem[]>([])
+  const [files, setFiles] = useState<ReadonlyArray<AcItem>>([])
   // The (text, cursor) at the last sync — applyInsert needs them to splice the picked value in.
   const [pos, setPos] = useState<{ text: string; cursor: number }>({ text: "", cursor: 0 })
 
@@ -191,6 +191,7 @@ export const useAutocomplete = (opts: {
     const load = opts.loadFiles ?? (() => walkRepoFiles(process.cwd()))
     void load().then((paths) => {
       if (live) setFiles(paths.map((p) => ({ value: p, kind: "file" as const })))
+      return undefined
     })
     return () => {
       live = false
@@ -199,7 +200,10 @@ export const useAutocomplete = (opts: {
   }, [mode])
 
   // The candidate pool for the live trigger: files for "@", the passed commands for "/".
-  const pool = mode === "@" ? files : mode === "/" ? opts.commands : []
+  const pool = useMemo(
+    () => (mode === "@" ? files : mode === "/" ? opts.commands : []),
+    [mode, files, opts.commands],
+  )
   const items = useMemo(() => filterItems(pool, trigger?.query ?? ""), [pool, trigger?.query])
 
   // Keep the selection in range as the filtered list shrinks/grows.
@@ -265,7 +269,7 @@ export function Autocomplete({
   width,
 }: {
   mode: AcMode
-  items: readonly AcItem[]
+  items: ReadonlyArray<AcItem>
   selected: number
   query: string
   theme: ResolvedTheme

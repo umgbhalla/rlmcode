@@ -21,7 +21,7 @@ const assert = (cond: boolean, msg: string) => {
 }
 
 const recorder = () => {
-  const events: NodeEvent[] = []
+  const events: Array<NodeEvent> = []
   const sink: EmitSink = (e) => events.push(e)
   return { events, sink }
 }
@@ -49,7 +49,7 @@ const optsFor = (): NodeOpts =>
 // the run total is the sum over every node. Reproduced here so the test pins the same
 // arithmetic the footer renders.
 type TreeNode = { id: string; tokens?: number }
-const foldTree = (events: readonly NodeEvent[]): { nodes: Record<string, TreeNode>; totalTokens: number } => {
+const foldTree = (events: ReadonlyArray<NodeEvent>): { nodes: Record<string, TreeNode>; totalTokens: number } => {
   const nodes: Record<string, TreeNode> = {}
   for (const e of events) {
     if (e.type === "start") nodes[e.nodeId] ??= { id: e.nodeId }
@@ -95,7 +95,7 @@ await (async () => {
         { message: `task ${i}` },
       )
     }
-    const dones = events.filter((e) => e.type === "done") as Extract<NodeEvent, { type: "done" }>[]
+    const dones = events.filter((e) => e.type === "done") as Array<Extract<NodeEvent, { type: "done" }>>
     assert(dones.length === 3, `three done events, got ${dones.length}`)
     usages.forEach((u, i) => {
       const d = dones.find((e) => e.nodeId === `branch-${i}`)

@@ -26,7 +26,7 @@ const readText = async (path: string) => {
 }
 
 type RgOpts = { pattern: string; output_mode?: "content" | "files_with_matches" | "count"; glob?: string | undefined; context?: number | undefined; where: string }
-const buildRgArgs = ({ pattern, output_mode = "files_with_matches", glob, context, where }: RgOpts): string[] => {
+const buildRgArgs = ({ pattern, output_mode = "files_with_matches", glob, context, where }: RgOpts): Array<string> => {
   const args = ["--hidden", "--max-columns", "500"]
   if (output_mode === "files_with_matches") args.push("-l")
   else if (output_mode === "count") args.push("-c")
@@ -45,7 +45,7 @@ const buildRgArgs = ({ pattern, output_mode = "files_with_matches", glob, contex
 // LEAF may carry: the structural one-level recursion guard (rlm-workflow.ts) builds its
 // sub-run leaf gens with BASE_TOOLS, never BASE_TOOLS+RLM_WORKFLOW_TOOLS, so a leaf physically
 // cannot re-orchestrate. The main chat gen (agent.ts) gets BASE_TOOLS + RLM_WORKFLOW_TOOLS.
-export const BASE_TOOLS: AxFunction[] = [
+export const BASE_TOOLS: Array<AxFunction> = [
   {
     name: "bash",
     description:

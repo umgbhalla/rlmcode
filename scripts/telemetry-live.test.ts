@@ -75,7 +75,7 @@ await (async () => {
   // reasoningTokens is present (a number, possibly 0) — the field is now wired end-to-end.
   assert(hi.res.reasoningTokens !== undefined || hi.res.tokens !== undefined, "hi turn surfaced usage (reasoning wired)")
 
-  const ai = buildLiveAi()
+  const liveAi = buildLiveAi()
   // A long context with a buried fact (same shape as the RLM gate) so the executor runs
   // multiple turns — the multi-node tree we want to see in the trace.
   const sections = Array.from({ length: 40 }, (_, i) => {
@@ -90,13 +90,12 @@ await (async () => {
   const root = tracer.startSpan("run_rlm")
   const rootCtx = otelTrace.setSpan(otelContext.active(), root)
   const out = await otelContext.with(rootCtx, () =>
-    runRlm(context, query, ai, "live-telemetry-rlm", new AbortController().signal),
+    runRlm(context, query, liveAi, "live-telemetry-rlm", new AbortController().signal),
   )
   root.end()
 
   await provider.forceFlush()
   const spans = exporter.getFinishedSpans()
-  const names = spans.map((s) => s.name)
 
   console.log("─".repeat(60))
   console.log(`RLM result turns=${out.turns} callbacks=${out.callbacks}`)

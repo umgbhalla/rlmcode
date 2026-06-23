@@ -24,7 +24,7 @@ const assert = (cond: boolean, msg: string) => {
 
 // A recording sink: captures every NodeEvent so we can assert lifecycle order.
 const recorder = () => {
-  const events: NodeEvent[] = []
+  const events: Array<NodeEvent> = []
   const sink: EmitSink = (e) => events.push(e)
   return { events, sink }
 }
@@ -95,13 +95,13 @@ await (async () => {
     // And the memories are distinct instances (the fork, not one shared object).
     assert(new Set(mems.map((o) => o.mem)).size === 3, "each branch got a distinct AxMemory instance")
     // Cross-check: no branch's tag leaked into a sibling's history.
-    const allTurns = mems.map((o) => soleTurn(o.mem)).sort().join(",")
+    const allTurns = mems.map((o) => soleTurn(o.mem)).toSorted().join(",")
     assert(allTurns === "alpha,beta,gamma", `each tag landed in exactly one branch, got ${allTurns}`)
   }
 
   // 3) pipeline — each item flows stage→stage independently (no barrier); values map.
   {
-    const out: number[] = []
+    const out: Array<number> = []
     for await (const v of pipeline([1, 2, 3], async (x: number) => x * 10, async (x: number) => x + 1)) {
       out.push(v as number)
     }

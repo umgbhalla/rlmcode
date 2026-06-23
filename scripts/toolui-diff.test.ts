@@ -30,7 +30,7 @@ eq(lcsDiffLines([""], ["one", "two"]).join("|"), "-|+one|+two", "empty → new c
 // + the LCS body (context kept, one -/+). This is the PRIMARY diff render (native), not text.
 const ed = toolDiff("edit_file", JSON.stringify({ path: "x.ts", old_string: "a\nb\nc", new_string: "a\nB\nc" }), false)
 ok(ed !== null, "toolDiff returns a patch for edit_file")
-ok(!!ed && /^--- a\/x\.ts\n\+\+\+ b\/x\.ts\n@@ /.test(ed.diff), "toolDiff emits a real unified-diff header + hunk")
+ok(!!ed && ed.diff.startsWith("--- a/x.ts\n+++ b/x.ts\n@@ "), "toolDiff emits a real unified-diff header + hunk")
 ok(!!ed && ed.diff.includes("\n-b\n+B\n") && ed.filetype === "ts", "toolDiff body is the minimal LCS -/+ with the file's type")
 // A non-mutation tool has no diff (native <diff> is edit/write only).
 ok(toolDiff("bash", JSON.stringify({ command: "ls" }), false) === null, "toolDiff is null for a non-mutation tool")

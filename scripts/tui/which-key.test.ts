@@ -16,7 +16,7 @@ import { type Binding, groupBindings, whichKeyColumns } from "../../src/tui/whic
 
 await report("which-key", async (a) => {
   // ── (1) pure fixture: grouping + column math ────────────────────────────────────────────────
-  const fixture: Binding[] = [
+  const fixture: Array<Binding> = [
     { keys: "ctrl+k", desc: "command palette", group: "Global" },
     { keys: "↵", desc: "send message", group: "Compose" },
     { keys: "esc", desc: "back / interrupt", group: "Navigate" },

@@ -58,18 +58,18 @@ export type OrchNode = {
   // place by id). Populated only for nodes whose forward ran a nodeId-tagged logger
   // (makeNodeLogger). undefined for nodes that ran no tools / the main turn (whose tools live
   // in the transcript). NodeView renders these under the node, reusing ToolView.
-  readonly tools?: readonly Extract<Msg, { kind: "tool" }>[]
+  readonly tools?: ReadonlyArray<Extract<Msg, { kind: "tool" }>>
 }
 // COST-METER: `totalTokens` is the live RUN TOTAL — the sum of every node's `tokens` as
 // done events land. Rendered in the tree footer; never decreases (recompute from nodes).
-export type OrchTree = { readonly nodes: Readonly<Record<string, OrchNode>>; readonly roots: readonly string[]; readonly totalTokens: number }
-export type SessionView = { readonly id: string; readonly title: string; readonly messages: readonly Msg[]; readonly orch?: OrchTree }
+export type OrchTree = { readonly nodes: Readonly<Record<string, OrchNode>>; readonly roots: ReadonlyArray<string>; readonly totalTokens: number }
+export type SessionView = { readonly id: string; readonly title: string; readonly messages: ReadonlyArray<Msg>; readonly orch?: OrchTree }
 type View = "list" | "chat"
 export type AppState = {
   readonly view: View
   readonly activeId: string | null
   readonly cursor: number
-  readonly sessions: readonly SessionView[]
+  readonly sessions: ReadonlyArray<SessionView>
 }
 
 export const appAtom = Atom.make<AppState>({
@@ -150,7 +150,7 @@ export const deleteSessionAtom = appRuntime.fn((id: string, get) =>
 const patchNodeTools = (
   t: OrchTree,
   nodeId: string,
-  fn: (tools: readonly Extract<Msg, { kind: "tool" }>[]) => readonly Extract<Msg, { kind: "tool" }>[],
+  fn: (tools: ReadonlyArray<Extract<Msg, { kind: "tool" }>>) => ReadonlyArray<Extract<Msg, { kind: "tool" }>>,
 ): OrchTree => {
   const prev = t.nodes[nodeId]
   const base: OrchNode = prev ?? { id: nodeId, label: nodeId, phase: "", status: "running" }
@@ -163,7 +163,7 @@ const patchNodeTools = (
 // or its thinking), or start one if the trailing message isn't a live stream. Thinking
 // arrives first (model reasons, then answers), so the first thinking_delta mints the message
 // with empty text; reply_delta then grows text and chat.tsx auto-folds the thinking block.
-const grow = (m: readonly Msg[], field: "reply" | "thinking", text: string): readonly Msg[] => {
+const grow = (m: ReadonlyArray<Msg>, field: "reply" | "thinking", text: string): ReadonlyArray<Msg> => {
   const last = m[m.length - 1]
   if (last?.kind === "agent" && last.streaming === true) {
     const next: Msg = field === "reply" ? { ...last, text: last.text + text } : { ...last, thinking: (last.thinking ?? "") + text }
@@ -180,7 +180,7 @@ const grow = (m: readonly Msg[], field: "reply" | "thinking", text: string): rea
 // SAME OrchTree reducer the TUI already renders (tui/orch-tree.ts flattens it).
 const applyEvent = (
   ev: TurnEvent,
-  patch: (fn: (m: readonly Msg[]) => readonly Msg[]) => void,
+  patch: (fn: (m: ReadonlyArray<Msg>) => ReadonlyArray<Msg>) => void,
   orchPatch: (fn: (t: OrchTree) => OrchTree) => void,
 ): void => {
   switch (ev.type) {
@@ -276,11 +276,15 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
     const rt = sessionsRT.get(id)
     if (rt === undefined) return
 
-    const patch = (fn: (m: readonly Msg[]) => readonly Msg[]) => {
+    const patch = (fn: (m: ReadonlyArray<Msg>) => ReadonlyArray<Msg>) => {
       const cur = get(appAtom)
       get.set(appAtom, {
         ...cur,
-        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, messages: fn(x.messages) } : x)),
+        sessions: cur.sessions.map((x) => {
+          if (x.id !== id) return x
+          if (x.orch !== undefined) return { id: x.id, title: x.title, messages: fn(x.messages), orch: x.orch }
+          return { id: x.id, title: x.title, messages: x.messages }
+        }),
       })
     }
 
@@ -288,7 +292,10 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
       const cur = get(appAtom)
       get.set(appAtom, {
         ...cur,
-        sessions: cur.sessions.map((x) => (x.id === id ? { ...x, orch: fn(x.orch ?? { nodes: {}, roots: [], totalTokens: 0 }) } : x)),
+        sessions: cur.sessions.map((x) => {
+          if (x.id !== id) return x
+          return { id: x.id, title: x.title, messages: x.messages, orch: fn(x.orch ?? { nodes: {}, roots: [], totalTokens: 0 }) }
+        }),
       })
     }
 

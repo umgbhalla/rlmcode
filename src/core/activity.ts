@@ -59,7 +59,7 @@ const emitFromLog = (emit: (a: Activity) => void, m: { name?: string; value?: un
   }
   switch (m.name) {
     case "ChatResponseResults":
-      emitStep(m.value as StepResult[])
+      emitStep(m.value as Array<StepResult>)
       break
     case "ChatResponseStreamingDoneResult":
       emitStep([m.value as StepResult])

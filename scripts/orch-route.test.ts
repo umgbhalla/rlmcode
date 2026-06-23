@@ -20,6 +20,17 @@ import type { Activity } from "../src/core/activity.ts"
 import { runNode } from "../src/core/orch-recipes.ts"
 import type { ActivitySink, NodeOpts } from "../src/core/orch.ts"
 
+const captureGen = (): { gen: AxGen<AxGenIn, AxGenOut>; seen: { logger?: unknown } } => {
+  const seen: { logger?: unknown } = {}
+  const gen = {
+    forward: async (_ai: unknown, _input: unknown, opts?: { logger?: unknown }) => {
+      seen.logger = opts?.logger
+      return { reply: "ok" } as AxGenOut
+    },
+  } as unknown as AxGen<AxGenIn, AxGenOut>
+  return { gen, seen }
+}
+
 let failed = 0
 const assert = (cond: boolean, msg: string) => {
   if (!cond) {
@@ -67,8 +78,8 @@ const toolingGen = (toolName: string, callId: string): AxGen<AxGenIn, AxGenOut> 
 // to the main transcript. This is the SAME branch the UI uses — pinning it here proves the wire.
 type ToolStep = { id: string; name: string; status: string; result: string; nodeId?: string }
 const makeRouter = () => {
-  const transcript: ToolStep[] = []
-  const nodeTools: Record<string, ToolStep[]> = {}
+  const transcript: Array<ToolStep> = []
+  const nodeTools: Record<string, Array<ToolStep>> = {}
   const sink = (a: Activity) => {
     if (a.kind === "tool") {
       const step: ToolStep = { id: a.id, name: a.name, status: "running", result: "", nodeId: a.nodeId }
@@ -76,7 +87,11 @@ const makeRouter = () => {
       else transcript.push(step)
     } else if (a.kind === "result") {
       const list = a.nodeId !== undefined ? (nodeTools[a.nodeId] ?? []) : transcript
-      for (const s of list) if (s.id === a.id) (s.status = a.isError ? "error" : "ok"), (s.result = a.result)
+      for (const s of list)
+        if (s.id === a.id) {
+          s.status = a.isError ? "error" : "ok"
+          s.result = a.result
+        }
     }
   }
   return { transcript, nodeTools, sink }
@@ -120,16 +135,7 @@ await (async () => {
   // capture the forward opts each path receives and assert: turn:* → no injected logger; an
   // orch node → a logger present (so its tool activities carry the node id). This is the precise
   // guard for "don't regress the single-turn transcript while routing node tools per-node".
-  const captureGen = (): { gen: AxGen<AxGenIn, AxGenOut>; seen: { logger?: unknown } } => {
-    const seen: { logger?: unknown } = {}
-    const gen = {
-      forward: async (_ai: unknown, _input: unknown, opts?: { logger?: unknown }) => {
-        seen.logger = opts?.logger
-        return { reply: "ok" } as AxGenOut
-      },
-    } as unknown as AxGen<AxGenIn, AxGenOut>
-    return { gen, seen }
-  }
+
 
   const mainCap = captureGen()
   await runNode({ nodeId: "turn:s1", gen: mainCap.gen, opts: optsFor(), onEvent: () => {} }, fakeAi, { message: "go" })

@@ -297,7 +297,7 @@ export const themes: Record<string, Theme> = {
   tokyonight: { name: "tokyonight", label: "tokyo night (cool)", palette: tokyonight },
   "high-contrast": { name: "high-contrast", label: "high contrast", palette: highContrast },
 }
-export const THEME_NAMES: readonly string[] = ["rlmcode-dark", "gruvbox", "tokyonight", "high-contrast"]
+export const THEME_NAMES: ReadonlyArray<string> = ["rlmcode-dark", "gruvbox", "tokyonight", "high-contrast"]
 
 // DEFAULT_THEME: the registry NAME of the default (a string, NOT the palette object — opencode's
 // resolver shape, and the contract the registry needs). resolveTheme(name) maps it back to a Theme.

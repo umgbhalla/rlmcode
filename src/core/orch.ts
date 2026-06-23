@@ -8,7 +8,7 @@
 // calls ax.forward() is `node` (below); the lifecycle-bracketed runner is runNode()
 // (orch-recipes.ts). leaf/agent/worker/task/job/unit/runner are FORBIDDEN as names for
 // the unit — they are all the SAME thing = a node. NodeEvent/NodeView already use it.
-import { AxGen, type AxAIService, type AxGenIn, type AxGenOut, type AxLoggerFunction, type AxModelConfig, type AxProgramForwardOptions, type AxMemory, type AxRateLimiterFunction, type AxStepHooks } from "@ax-llm/ax"
+import type { AxGen, AxAIService, AxGenIn, AxGenOut, AxLoggerFunction, AxModelConfig, AxProgramForwardOptions, AxMemory, AxRateLimiterFunction, AxStepHooks } from "@ax-llm/ax"
 import { type Context as OtelContext, type Tracer, trace as otelTrace } from "@opentelemetry/api"
 import * as Effect from "effect/Effect"
 import type { Activity } from "./activity.ts"
@@ -137,12 +137,14 @@ export type Budget = {
 // catch can annotate a span or surface a partial.
 export class BudgetExhaustedError extends Error {
   readonly _tag = "BudgetExhaustedError"
-  constructor(
-    readonly reason: string,
-    readonly spent: number,
-    readonly total: number,
-  ) {
+  readonly reason: string
+  readonly spent: number
+  readonly total: number
+  constructor(reason: string, spent: number, total: number) {
     super(`budget exhausted (${reason}): spent ${spent} of ${total} tokens`)
+    this.reason = reason
+    this.spent = spent
+    this.total = total
     this.name = "BudgetExhaustedError"
   }
 }
