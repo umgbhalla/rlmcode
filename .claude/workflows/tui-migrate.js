@@ -26,9 +26,9 @@ const MAX_HARDEN = 2
 // patterns, NOT Solid mechanics); termcast = React+opentui (EXACT ax2 stack — lift near-verbatim).
 const BLUEPRINT = `
 SOURCES (read them — do not guess):
-- opencode TUI (Solid+@opentui) /Users/umang/hub/opencode/packages/tui/src — TRANSCRIPT/MESSAGE UX. Port patterns, rewrite Solid→React.
+- opencode TUI (Solid+@opentui) opencode/packages/tui/src — TRANSCRIPT/MESSAGE UX. Port patterns, rewrite Solid→React.
   layout session/index.tsx:1209-1412 (scrollbox stickyScroll bottom + pinned composer + 42-wide optional sidebar); user msg :1424-1528 (left-border agent-color card, paddingLeft=2, file badges, timestamp/QUEUED); assistant :1531-1637 (<For parts> PART_MAPPING[part.type] Dynamic, content paddingLeft=3, marginTop=1, "▣ mode · model · duration" footer); tool render :1902-2052 (inline vs block, collapse :1868-1900); composer component/prompt/index.tsx:1403-1762; footer footer.tsx:52-91; scroll toBottom() :1232-1250. PART_MAPPING dispatch :1556/:1640.
-- termcast (Raycast-in-terminal, React+@opentui — SAME STACK, copy near-verbatim) /Users/umang/hub/termcast/termcast/src:
+- termcast (Raycast-in-terminal, React+@opentui — SAME STACK, copy near-verbatim) termcast/termcast/src:
   THEME themes.ts (ResolvedTheme 50+ tokens: text/textMuted/background/backgroundPanel/backgroundElement/primary/accent/border/borderActive/success/warning/error/info/markdown*/syntax*/diff*) + theme.tsx (useTheme() via store, getResolvedTheme) — LIFT to src/tui/theme.ts.
   ICONS components/icon.tsx (ICON_MAP 400+ name→terminal-safe glyph, getIconShape fallback ●) — LIFT the subset ax2 uses to src/tui/icons.ts.
   APP SHELL internal/providers.tsx:150-277 (centered max-width frame), internal/navigation.tsx:40-197 (push/pop nav stack, key=depth remount), internal/dialog.tsx:39-144 (Dialog position center/top-right + DialogProvider InFocus isolation + DialogOverlay position:absolute), components/footer.tsx:243-300 (Footer flexShrink:0 space-between, bold-key + muted-label hints, toast overlay).

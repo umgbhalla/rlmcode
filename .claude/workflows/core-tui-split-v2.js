@@ -153,7 +153,7 @@ list — DERIVE everything from the actual tree right now.
 ${VERDICT}
 
 DO THIS:
-1. Run \`ls -1 /Users/umang/hub/ax2/src\` and \`ls -1 /Users/umang/hub/ax2/src/tui\` (and \`git -C /Users/umang/hub/ax2 status\`).
+1. Run \`ls -1 ax2/src\` and \`ls -1 ax2/src/tui\` (and \`git -C ax2 status\`).
    List every .ts/.tsx file that actually exists. Note any file in the verdict's inventory that is MISSING
    (e.g. orch-run.ts / orch-load.ts must be ABSENT) or any file present that the verdict does not mention.
 2. Classify each existing src/ root file as headless (-> src/core/) or UI (-> src/tui/). Headless = no
@@ -229,7 +229,7 @@ STEP 2 of 6 — folder-move. Mechanically relocate files into src/core/ and src/
 ${VERDICT}
 ${THREAD}
 
-CRITICAL: RE-GLOB src/ at the START of this step (\`ls -1 /Users/umang/hub/ax2/src\`) — the prior step may have
+CRITICAL: RE-GLOB src/ at the START of this step (\`ls -1 ax2/src\`) — the prior step may have
 added files. Use the manifest's toCore / toTui / staysRoot / newFiles as the plan, but reconcile against the
 live tree. Do NOT move otel.ts (it stays at src/ root). Do NOT create src/core/run.ts yet (that is step 3).
 

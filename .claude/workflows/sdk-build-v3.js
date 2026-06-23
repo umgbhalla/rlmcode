@@ -62,7 +62,7 @@ EVERY step: run ${CHECK} until green, commit on the current branch. Preserve mai
 phase('Split')
 
 const split = await agent(
-  `Run the ENTIRE core/tui split by executing the plan in /Users/umang/hub/ax2/.claude/workflows/core-tui-split-v2.js MANUALLY as its author intended (you cannot nest a workflow; do the steps yourself with full tools). Read that file first for the exact step prompts + the Phase-0 reground. Deliver: src/core/ (headless engine) + src/tui/ (UI), src/core/run.ts with runTurn(sessionId,message): AsyncGenerator<TurnEvent>, the GLOBAL SINK DELETED (per-turn closure emit + makeLiveLogger), the final-reply-once invariant (the atoms.ts catchCause '⚠' mapping moved into runTurn), and the 3 producers (orch.emit / runtime onEvent / rlm-workflow) rerouted to the per-turn emit. otel.ts STAYS at src/ root. ${CONTRACT}
+  `Run the ENTIRE core/tui split by executing the plan in ax2/.claude/workflows/core-tui-split-v2.js MANUALLY as its author intended (you cannot nest a workflow; do the steps yourself with full tools). Read that file first for the exact step prompts + the Phase-0 reground. Deliver: src/core/ (headless engine) + src/tui/ (UI), src/core/run.ts with runTurn(sessionId,message): AsyncGenerator<TurnEvent>, the GLOBAL SINK DELETED (per-turn closure emit + makeLiveLogger), the final-reply-once invariant (the atoms.ts catchCause '⚠' mapping moved into runTurn), and the 3 producers (orch.emit / runtime onEvent / rlm-workflow) rerouted to the per-turn emit. otel.ts STAYS at src/ root. ${CONTRACT}
 This phase lands the FOLDERS + a working (possibly raw {kind:'activity'} ) runTurn; the Seal phase refines the event/result shape next. Run ${CHECK} green; then ${LINT} green; commit. Return what moved + the runTurn signature you landed + confirmation grep emitActivity|setActivitySink is zero.`,
   { label: 'split:core-tui', phase: 'Split', effort: 'high' }
 )
@@ -70,7 +70,7 @@ This phase lands the FOLDERS + a working (possibly raw {kind:'activity'} ) runTu
 phase('Seal')
 
 const seal = await agent(
-  `On the post-Split tree (cwd /Users/umang/hub/ax2). Split result: ${split}
+  `On the post-Split tree (cwd ax2). Split result: ${split}
 ${CONTRACT}
 DO, in order, gating each on ${CHECK}:
 (A) DELETE the fetch.clone finish_reason skim (hide #1) and the getChatLog/remoteId probe (hide #3). KEEP readUsage internal (hide #2) with a ponytail Upgrade: line. Verify token usage still populates.

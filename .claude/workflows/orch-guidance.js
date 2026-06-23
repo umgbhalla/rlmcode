@@ -17,8 +17,8 @@ const MAX_HARDEN = 2
 
 const SPEC = `
 WORKTREE — CRITICAL: this workflow runs PARALLEL to another on the main checkout. ALL file reads, edits, shell commands, the live
-harness, and git commits MUST happen in the ISOLATED worktree at /Users/umang/hub/ax2-guidance (branch feat/orch-guidance) — cd there
-first / use that absolute path. NEVER touch /Users/umang/hub/ax2 (the main checkout — another workflow is editing it concurrently).
+harness, and git commits MUST happen in the ISOLATED worktree at ax2-guidance (branch feat/orch-guidance) — cd there
+first / use that absolute path. NEVER touch ax2 (the main checkout — another workflow is editing it concurrently).
 Commit on feat/orch-guidance in the worktree.
 
 ax2 agent (CF Kimi) has orchestration TOOLS (orchestrate, run_orch_script, run_rlm) but THIN guidance — so it orchestrates blind or

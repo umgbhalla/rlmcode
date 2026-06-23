@@ -21,9 +21,9 @@ const SMOKE = 'bun run emit'    // headless trace smoke — must still run clean
 const MAX_HEAL = 4
 const MAX_HARDEN = 2
 
-// Concrete paths (everything is under /Users/umang/hub/ax2; termcast is a sibling at ../termcast/termcast).
-const AX2 = '/Users/umang/hub/ax2'
-const TERMCAST = '/Users/umang/hub/termcast/termcast/src/components'
+// Concrete paths (everything is under ax2; termcast is a sibling at ../termcast/termcast).
+const AX2 = 'ax2'
+const TERMCAST = 'termcast/termcast/src/components'
 
 // The non-negotiable scope + invariants the whole workflow is bound by. Threaded into every agent call.
 // RE-GROUNDED to current chat.tsx (~672 lines): the node-tree, the animated input
@@ -86,7 +86,7 @@ const PLAN_SCHEMA = {
           key: { type: 'string' },
           title: { type: 'string' },
           goal: { type: 'string', description: 'what changes and why it removes real pain' },
-          files: { type: 'array', items: { type: 'string' }, description: 'concrete paths under /Users/umang/hub/ax2/src' },
+          files: { type: 'array', items: { type: 'string' }, description: 'concrete paths under ax2/src' },
           termcastRefs: { type: 'array', items: { type: 'string' }, description: 'termcast file:line patterns to adapt' },
           preserves: { type: 'array', items: { type: 'string' }, description: 'which hard invariants this feature must not break (cite the numbered list incl. node-tree / spinner / Tab-Enter focus)' },
           doneWhen: { type: 'array', items: { type: 'string' }, description: 'observable acceptance checks' },
