@@ -99,8 +99,11 @@ const study = (await parallel([
   () => agent(`Confirm the COPY targets exist as cited: skim opencode session/index.tsx (layout/message/PART_MAPPING) + termcast themes.ts/theme.tsx, icon.tsx, list.tsx, actions.tsx, dialog.tsx, footer.tsx, spinner.tsx, hooks.tsx. For each ax2 foundation/integration step, report the precise source file:line to lift/port + any opentui-React gotcha (Solid→React for opencode; verbatim for termcast). Cite file:line in BOTH trees.\n\n${SPEC}`,
     { label: 'sources', phase: 'Study', schema: FIND, agentType: 'Explore' }),
 ])).filter(Boolean)
-const depMissing = JSON.stringify(study).match(/do NOT exist|hasn't shipped|ABSENT|not found|no driver|STOP/i)
-if (depMissing) { log('DEP MISSING: tui-test-harness (driver.ts/test:tui) — STOPPING.'); return { stopped: 'harness dependency not shipped', study } }
+// POSITIVE dep check: the harness is present iff the study cites scripts/tui/driver.ts (do NOT
+// regex the whole study for negative words — the agents echo the prompt's own "STOP/ABSENT", a
+// false-positive that aborted run wf_0f5f7b9c-d62).
+const depPresent = study.some(s => s && JSON.stringify(s.cites || []).includes('scripts/tui/driver.ts'))
+if (!depPresent) { log('DEP MISSING: harness driver.ts not cited — STOPPING.'); return { stopped: 'harness dependency not shipped', study } }
 const STUDY = JSON.stringify(study, null, 1)
 log(`studied ${study.length}/3; harness present`)
 
