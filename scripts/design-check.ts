@@ -60,7 +60,12 @@ const resolveCoreTarget = (importerPath: string, specifier: string, resolved?: s
 // gate fixture scripts/tui/ui-atoms-demo.tsx (mounted by ui-atoms.test.ts, OUTSIDE the
 // src/-only scan). Roots like sdk.ts/mock.ts so the atom surface isn't pruned to its (empty,
 // pending integration) in-src callers before the sequential chat.tsx re-skin consumes it.
-const ENTRY = new Set(["src/tui/chat.tsx", "src/core/orch.ts", "src/core/orch-recipes.ts", "src/core/sdk.ts", "src/core/run.ts", "src/core/mock.ts", "src/core/mock-ai.ts", "src/tui/ui/spinner.tsx", "src/tui/ui/row.tsx", "src/tui/ui/hooks.tsx", "src/tui/ui/animation-tick.tsx"])
+// src/tui/autocomplete.tsx = the @-mention + /slash popup (Autocomplete + useAutocomplete) —
+// same case: a presentation foundation landed AHEAD of its composer wiring (the SEPARATE
+// wire-autocomplete step) and exercised by the frame gate fixture scripts/tui/autocomplete-demo.tsx
+// (mounted by autocomplete.test.ts, OUTSIDE the src/-only scan). A root so its popup surface isn't
+// pruned before the composer consumes it.
+const ENTRY = new Set(["src/tui/chat.tsx", "src/core/orch.ts", "src/core/orch-recipes.ts", "src/core/sdk.ts", "src/core/run.ts", "src/core/mock.ts", "src/core/mock-ai.ts", "src/tui/ui/spinner.tsx", "src/tui/ui/row.tsx", "src/tui/ui/hooks.tsx", "src/tui/ui/animation-tick.tsx", "src/tui/autocomplete.tsx"])
 const CC_BUDGET = 20 // cyclomatic complexity per function (UI render fns with several display states idiomatically reach ~19; >20 = real tangle)
 const NEST_BUDGET = 8 // block nesting depth per function
 const PARAM_BUDGET = 6 // parameters per function
