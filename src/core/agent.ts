@@ -102,6 +102,22 @@ class ChatError {
   constructor(readonly cause: unknown) {}
 }
 
+// LEAK FIX (D3): a module-level registry of per-agent `turnAborters` clearers. `turnAborters` is
+// closed over INSIDE createAgent (one Map per agent, so two agents never collide on a sessionId),
+// so the module-level deleteSession (sessions.ts) cannot reach it directly. Each createAgent
+// registers its own clearer here; clearTurnAborter(sessionId) fans the drop out across every live
+// agent, so closing a session frees its AbortController in all of them. Without this, the
+// per-session AbortController accumulates forever (sessionIds are never reused). A Set (not a Map)
+// because there is no key to dedupe agents on — each createAgent owns one distinct clearer.
+const aborterClearers = new Set<(sessionId: string) => boolean>()
+// Drop a closed session's AbortController across every agent. Called from deleteSession. Returns
+// whether any agent held an entry for the session (for the leak unit test).
+export const clearTurnAborter = (sessionId: string): boolean => {
+  let existed = false
+  for (const clear of aborterClearers) if (clear(sessionId)) existed = true
+  return existed
+}
+
 // The token budget (orch.allocate) throws BudgetExhaustedError, wrapped by
 // runForward into a ChatError. Unwrap one level to surface it on the span.
 const asBudgetExhausted = (e: unknown): BudgetExhaustedError | undefined =>
@@ -212,6 +228,12 @@ export const createAgent = (config: AxAgentConfig) => {
     c.abort()
     return true
   }
+  // LEAK FIX (D3): register THIS agent's turnAborters clearer in the module-level registry so
+  // deleteSession (via clearTurnAborter, fanning out across agents) frees this session's
+  // AbortController on close — turnAborters is closed over here, unreachable from the module sink
+  // otherwise. Returns whether an entry existed. (Never deregistered: an agent lives for the
+  // process; the registry holds at most one clearer per createAgent call.)
+  aborterClearers.add((sessionId: string): boolean => turnAborters.delete(sessionId))
 
   /**
    * Build a traced turn for a session. `chat.turn` (our Effect.fn span, kind=client,

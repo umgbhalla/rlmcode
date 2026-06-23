@@ -109,6 +109,10 @@ export const makeOnEvent =
 // handler recovers it via getTurnEmit(extra.sessionId). This is the SAME sessionId-keyed per-turn
 // store pattern as orch-spans' setTurnContext (also needed because ax drops the traceContext).
 // Concurrency-correct: each session has its own entry; serialized turns (busyAtom) never collide.
+// LEAK FIX (D3): this Map is keyed by a never-reused sessionId, so without an explicit drop on
+// session close it accumulates one dead ActivitySink closure per session for the process lifetime.
+// deleteSession (sessions.ts) calls clearTurnEmit alongside the sessionsRT drop so a closed
+// session frees its entry — turns are serialized (busyAtom), so the entry is never live at close.
 // ponytail: module Map keyed by sessionId. Upgrade: a context object threaded end-to-end if ax
 // ever forwards arbitrary tool extras. Absent ⇒ no-op (a standalone tool call with no turn).
 const turnEmits = new Map<string, ActivitySink>()
@@ -117,6 +121,9 @@ export const setTurnEmit = (sessionId: string, sink: ActivitySink): void => {
 }
 export const getTurnEmit = (sessionId: string | undefined): ActivitySink =>
   (sessionId !== undefined ? turnEmits.get(sessionId) : undefined) ?? (() => {})
+// LEAK FIX (D3): drop a closed session's emit closure. Called from deleteSession so the per-turn
+// emit registry never accumulates dead sessions. Returns whether an entry existed (for the test).
+export const clearTurnEmit = (sessionId: string): boolean => turnEmits.delete(sessionId)
 
 // Generic usage reader: a getUsage() probe over any AxGen the orchestration drivers
 // forward. Exported so a sub-run charges the shared Budget from each node's usage,

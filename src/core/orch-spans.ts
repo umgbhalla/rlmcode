@@ -53,14 +53,19 @@ export const setNodeSpanTracer = (tracer: Tracer | undefined): void => {
 // turn() stashes its traceContext here by sessionId; the workflow handler reads it (via the
 // extra.sessionId ax DOES pass) and runs the script under it, so node + RLM spans nest under
 // the live chat.turn — one trace per session. ponytail: module Map keyed by sessionId —
-// turns are serialized per session (busyAtom) so no cross-turn race; set per turn, cleared on
-// turn end. Upgrade: drop this if ax forwards traceContext into a tool func's extra.
+// turns are serialized per session (busyAtom) so no cross-turn race; set per turn. LEAK FIX
+// (D3): keyed by a never-reused sessionId, so it accumulates one dead OtelContext per session
+// without an explicit drop — deleteSession (sessions.ts) calls clearTurnContext alongside the
+// sessionsRT drop. Upgrade: drop this if ax forwards traceContext into a tool func's extra.
 const turnCtx = new Map<string, OtelContext>()
 export const setTurnContext = (sessionId: string, ctx: OtelContext): void => {
   turnCtx.set(sessionId, ctx)
 }
 export const getTurnContext = (sessionId: string | undefined): OtelContext | undefined =>
   sessionId !== undefined ? turnCtx.get(sessionId) : undefined
+// LEAK FIX (D3): drop a closed session's stashed trace context. Called from deleteSession so the
+// turn-context registry never accumulates dead sessions. Returns whether an entry existed.
+export const clearTurnContext = (sessionId: string): boolean => turnCtx.delete(sessionId)
 
 const clip = (v: unknown, max = 256): string => {
   const s = typeof v === "string" ? v : (() => { try { return JSON.stringify(v) ?? String(v) } catch { return String(v) } })()
