@@ -388,10 +388,11 @@ if (import.meta.main) {
   const { values } = parseArgs({ args: Bun.argv.slice(2), options: { staged: { type: "boolean", default: false } }, strict: false })
   const staged = values.staged === true
   const isLinted = isLintedPath
-  // src/ is LINTED; scripts/ + examples/ are CONSUMERS — they join the reference + import graph so
-  // a seam used only by a test/example reads as live, but they are not themselves linted.
+  // src/ is LINTED; scripts/ + examples/ + test/ are CONSUMERS — they join the reference + import
+  // graph so a seam used only by a test/example reads as live, but they are not themselves linted.
+  // (test/ holds the @effect/vitest unit suite — the port of the former scripts/*.test.ts.)
   const files: Array<{ path: string; source: string }> = []
-  for (const glob of ["src/**/*.{ts,tsx}", "scripts/**/*.{ts,tsx}", "examples/**/*.{ts,tsx}"])
+  for (const glob of ["src/**/*.{ts,tsx}", "scripts/**/*.{ts,tsx}", "examples/**/*.{ts,tsx}", "test/**/*.{ts,tsx}"])
     for await (const p of new Bun.Glob(glob).scan(".")) files.push({ path: p, source: await Bun.file(p).text() })
   const a = buildAnalyzer(files)
   const pkg = await Bun.file("package.json").json()
