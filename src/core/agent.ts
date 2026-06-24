@@ -340,9 +340,9 @@ export const createAgent = (config: AxAgentConfig) => {
       // context.active()) nests its gen_ai span under chat.turn. RECOVER ON GENUINE STALL (PART 2):
       // runStreamWithRetry forks a fresh attempt aborter per try off the turn aborter + backs off on
       // a retryable stall, surfaced via onStallRetry; exhaustion / a non-retryable stall rethrows.
-      const runForward = (msg: string) =>
+      const runForward = () =>
         Effect.tryPromise({
-          try: () => otelContext.with(traceContext, () => (void msg, runStreamWithRetry(forwardOnce, aborter, onStallRetry))),
+          try: () => otelContext.with(traceContext, () => runStreamWithRetry(forwardOnce, aborter, onStallRetry)),
           catch: (e) => new ChatError({ cause: e }),
         })
 
@@ -350,7 +350,7 @@ export const createAgent = (config: AxAgentConfig) => {
       // → 'forward.received' IS the model wall-clock; 'parsed' marks ax's response parse done.
       // Emitted on the raw OTel span so motel's span view shows the split.
       otelSpan.addEvent("forward.sent")
-      const res = yield* runForward(message).pipe(
+      const res = yield* runForward().pipe(
         (eff) => Effect.tap(eff, () => Effect.sync(() => otelSpan.addEvent("forward.received"))),
         // Token budget breach is a HARD failure: annotate the span with the typed
         // error's spent/total, then re-fail. (Max-steps no longer throws — it is
