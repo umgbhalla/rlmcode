@@ -8,7 +8,7 @@ import type { Msg, OrchNode, OrchTree } from "../src/tui/atoms.ts"
 import { flatten, type Row } from "../src/tui/orch-tree.ts"
 
 type ToolMsg = Extract<Msg, { kind: "tool" }>
-const tool = (id: string): ToolMsg => ({ kind: "tool", id, name: "bash", args: "", status: "ok", result: "ok" })
+const tool = (id: string): ToolMsg => ({ kind: "tool", seq: 0, id, name: "bash", args: "", status: "ok", result: "ok" })
 
 const N = (n: Partial<OrchNode> & { id: string }): OrchNode => ({ label: n.id, phase: "", status: "done", ...n })
 const nodes: Record<string, OrchNode> = {

@@ -16,8 +16,15 @@ export const MODEL = "@cf/moonshotai/kimi-k2.7-code"
 // Provenance for a completed reply, rendered as one muted line under the turn.
 export type TurnMeta = { readonly model: string; readonly ms: number; readonly tokens?: number | undefined; readonly finishReason?: string | undefined; readonly budget: boolean }
 
+// A6 — MESSAGE seq + IDENTITY (opencode uniqueIndex(session_id, seq), sql.ts:118-137): every Msg
+// minted into a session carries a MONOTONIC per-session `seq` + a stable `id`, minted ONCE on append
+// and NEVER mutated. This replaces array-index-as-identity (the fragile bit behind the multi-session
+// drift / resume-skip lessons) and is the seam A7 (durable store keyed (sessionId, seq)) builds on.
+// seq is derived purely from the message list (max(seq)+1, see nextSeq) so it's a deterministic
+// function of state — replay-safe, no external counter. Tool msgs already carry an `id` (the
+// tool-call id); seq is added to every variant. NOT rendered — pure identity metadata.
 export type Msg =
-  | { readonly kind: "you"; readonly text: string }
+  | { readonly kind: "you"; readonly text: string; readonly seq: number; readonly id: string }
   // STREAMING: `thinking` holds the live/settled reasoning_content (rendered as a collapsible
   // block that auto-folds once `liveText`/`text` starts). `streaming` marks the in-flight reply
   // (drives the cursor + tells sendAtom to FINALIZE this message with the authoritative res.reply
@@ -28,9 +35,10 @@ export type Msg =
   // canonical message FRESH (writes the authoritative reply to `text`, CLEARS liveText + streaming)
   // — the committed message is never an in-place overwrite of stale stream text. `text` stays the
   // canonical/committed field; on a settled non-streaming reply liveText is absent.
-  | { readonly kind: "agent"; readonly text: string; readonly meta?: TurnMeta; readonly thinking?: string; readonly streaming?: boolean; readonly liveText?: string | undefined }
+  | { readonly kind: "agent"; readonly text: string; readonly seq: number; readonly id: string; readonly meta?: TurnMeta; readonly thinking?: string; readonly streaming?: boolean; readonly liveText?: string | undefined }
   | {
       readonly kind: "tool"
+      readonly seq: number
       readonly id: string
       readonly name: string
       readonly args: string
@@ -161,6 +169,15 @@ export const deleteSessionAtom = appRuntime.fn((id: string, get) =>
   }),
 )
 
+// A6 — mint the NEXT monotonic seq for a session's transcript: max(existing seq)+1, derived purely
+// from the current message list so it's a deterministic function of state (replay-safe; no external
+// counter to drift out of sync with the array). Node-owned tool steps (orch tree) are NOT in the
+// main `messages` array, so their seq is minted off the same per-session counter at append time.
+const nextSeq = (m: ReadonlyArray<Msg>): number => m.reduce((mx, x) => Math.max(mx, x.seq), -1) + 1
+// A stable id for a non-tool Msg (tool msgs carry the tool-call id). seq is unique per session, so
+// `<kind>-<seq>` is a stable per-session identity that never changes once minted.
+const mintId = (kind: "you" | "agent", seq: number): string => `${kind}-${seq}`
+
 // PER-NODE TOOL ROUTING: apply `fn` to a node's OWN tools list within the OrchTree. The node's
 // `start` event always precedes its forward (runNode emits start, THEN forwards), so the node
 // exists by the time its tools fire; if a tool somehow lands first we synthesize a minimal
@@ -195,7 +212,9 @@ const grow = (m: ReadonlyArray<Msg>, field: "reply" | "thinking", text: string):
     const next: Msg = field === "reply" ? { ...last, liveText: (last.liveText ?? "") + text } : { ...last, thinking: (last.thinking ?? "") + text }
     return [...m.slice(0, -1), next]
   }
-  const fresh: Msg = field === "reply" ? { kind: "agent", text: "", liveText: text, streaming: true } : { kind: "agent", text: "", thinking: text, streaming: true }
+  const seq = nextSeq(m)
+  const id = mintId("agent", seq)
+  const fresh: Msg = field === "reply" ? { kind: "agent", seq, id, text: "", liveText: text, streaming: true } : { kind: "agent", seq, id, text: "", thinking: text, streaming: true }
   return [...m, fresh]
 }
 
@@ -226,7 +245,10 @@ const applyEvent = (
 ): void => {
   switch (ev.type) {
     case "message":
-      patch((m) => [...m, { kind: "agent", text: ev.text }])
+      patch((m) => {
+        const seq = nextSeq(m)
+        return [...m, { kind: "agent", seq, id: mintId("agent", seq), text: ev.text }]
+      })
       break
     case "reply_delta":
       // PER-NODE STREAM ROUTING (F8): a tagged delta (nodeId set) is a sub-agent NODE's stream —
@@ -239,12 +261,13 @@ const applyEvent = (
       else patch((m) => grow(m, "thinking", ev.text))
       break
     case "tool_call": {
-      const step: Msg = { kind: "tool", id: ev.id, name: ev.name, args: ev.args, status: "running", result: "", startedAt: Date.now() }
+      const mk = (seq: number): Extract<Msg, { kind: "tool" }> => ({ kind: "tool", seq, id: ev.id, name: ev.name, args: ev.args, status: "running", result: "", startedAt: Date.now() })
       // PER-NODE TOOL ROUTING: a tagged tool (nodeId set) belongs to that orchestration NODE —
       // append it to the node's OWN tools list (NodeView renders it under the node). An untagged
-      // tool is the MAIN turn's — append to the transcript (unchanged default).
-      if (ev.nodeId !== undefined) orchPatch((t) => patchNodeTools(t, ev.nodeId!, (tools) => [...tools, step]))
-      else patch((m) => [...m, step])
+      // tool is the MAIN turn's — append to the transcript (unchanged default). seq is minted off
+      // the destination list (the node's tools, or the main transcript) so it's monotonic per list.
+      if (ev.nodeId !== undefined) orchPatch((t) => patchNodeTools(t, ev.nodeId!, (tools) => [...tools, mk(nextSeq(tools))]))
+      else patch((m) => [...m, mk(nextSeq(m))])
       break
     }
     case "tool_result": {
@@ -356,7 +379,10 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
       })
     }
 
-    patch((m) => [...m, { kind: "you", text }])
+    patch((m) => {
+      const seq = nextSeq(m)
+      return [...m, { kind: "you", seq, id: mintId("you", seq), text }]
+    })
     get.set(busyAtom, true)
     get.set(busySessionsAtom, new Set(get(busySessionsAtom)).add(id))
 
@@ -395,7 +421,8 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
         if (last?.kind === "agent" && last.streaming === true) {
           return [...m.slice(0, -1), { ...last, text: reply, meta, streaming: false, liveText: undefined }]
         }
-        return [...m, { kind: "agent", text: reply, meta }]
+        const seq = nextSeq(m)
+        return [...m, { kind: "agent", seq, id: mintId("agent", seq), text: reply, meta }]
       })
     })
   }),

@@ -8,7 +8,9 @@ import { contentKey, interactionSig, isSettled, type MemoProps, turnPropsEqual, 
 import { workflowRows } from "../src/tui/workflow.tsx"
 
 const EMPTY: ReadonlySet<string> = new Set()
-const tool = (id: string, status: "running" | "ok" | "error"): Msg => ({ kind: "tool", id, name: "bash", args: "{}", status, result: "out" })
+// A6: every Msg carries a per-session `seq` (minted on append). The fixture mints seq from the id
+// digit (a1→1, b1→1, nt1→1) so equal-content fixtures share a stable seq and contentKey is stable.
+const tool = (id: string, status: "running" | "ok" | "error"): Msg => ({ kind: "tool", seq: Number(id.replace(/\D/g, "")) || 0, id, name: "bash", args: "{}", status, result: "out" })
 
 const settled = {
   idx: 0,

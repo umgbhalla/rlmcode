@@ -64,8 +64,14 @@ export const isSettled = (t: MemoTurn): boolean => t.settled ?? turnSettled(t)
 // the workflow's roots/total/node-count. Settled history is immutable, so this never has to detect
 // a mid-body edit — it only has to change if the turn at this idx is genuinely a different one.
 export const contentKey = (t: MemoTurn): string => {
+  // A6 — IDENTITY ON seq, NOT ARRAY INDEX. Each step keys on its stable per-session `seq` (minted
+  // once on append, never mutated) instead of its array position + a length proxy. seq makes the
+  // fingerprint robust to the index-as-identity fragility (the multi-session-drift / resume-skip
+  // lesson): a step is the SAME step iff its seq matches, regardless of where it sits in the array.
+  // The mutable per-step signal still travels alongside (tool status, agent text length) so a
+  // settled turn whose tool flips status / whose narration grows still repaints.
   const steps = t.steps
-    .map((s) => (s.kind === "tool" ? `t:${s.id}:${s.status}` : s.kind === "agent" ? `a:${s.text.length}` : `y`))
+    .map((s) => (s.kind === "tool" ? `t:${s.seq}:${s.id}:${s.status}` : s.kind === "agent" ? `a:${s.seq}:${s.text.length}` : `y:${s.seq}`))
     .join(",")
   const meta = t.meta ? `${t.meta.tokens ?? ""}|${t.meta.ms}|${t.meta.finishReason ?? ""}|${t.meta.budget ? 1 : 0}` : ""
   const wf = t.workflow ? `${t.workflow.roots.length}|${t.workflow.totalTokens}|${Object.keys(t.workflow.nodes).length}` : ""
