@@ -48,6 +48,7 @@ const previewSign = (tone: PreviewLine["tone"]): string => (tone === "add" ? "+"
 // Keyboard-focus gutter: a leading "❯ " ONLY when this row is the Tab-ring focus (never on mere
 // hover) — keyboard focus visually distinct from a mouse-over. Two cells wide so focused/unfocused
 // rows stay column-aligned.
+// ponytail: exported but used only in this file. Upgrade: unexport / inline at the ToolHeader+NodeHeader call sites.
 export const FocusGutter = ({ focused }: { focused: boolean }) =>
   focused ? <span fg={theme.focus}>{"❯ "}</span> : <span fg={theme.faint}>{"  "}</span>
 

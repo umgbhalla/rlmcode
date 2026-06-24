@@ -33,6 +33,7 @@ type StreamDelta = { delta?: { reply?: string; thought?: string } }
 // stream that honors the signal cancels its live request) and REJECT with the typed stall/wall
 // message. `isWall` picks the message so the surfaced "⚠ …" partial is honest about which guard
 // fired. Cleared in finally so a fast chunk never leaves a dangling timer.
+// ponytail: single-caller timer-race helper. Upgrade: inline into drainWithWatchdog when the two-deadline logic is touched next.
 const raceDeadline = (
   step: Promise<IteratorResult<unknown>>,
   ms: number,

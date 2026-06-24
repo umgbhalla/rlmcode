@@ -1,3 +1,4 @@
+// ponytail: lifted-ahead-of-use atom, only the demo references it. Upgrade: wire into chat.tsx or delete (atom + ui-atoms-demo.tsx + ui-atoms.test.ts).
 // LIFTED near-verbatim from termcast/src/components/spinner.tsx — a pulsing-dot loading glyph
 // (' ' · •) driven by the shared animation tick. Theme-aware: defaults to theme.muted, the
 // idle-hint role in rlmcode's palette; pass `color` to override (e.g. theme.busy for in-flight).

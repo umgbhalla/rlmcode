@@ -53,3 +53,28 @@ stdlib or native equivalent. Files with churn 0 (untouched in the window) are om
 | 30 | `src/tui/chat-model.ts` | tui | 137 | 38 | 2 | 882 | _(agent: fill on inspect)_ |
 
 _59 candidate file(s) with churn > 0 in the last 90 days; showing the top 30._
+
+## ponytail-audit 2026-06-24 (cross-file)
+
+Findings from the semantic `/ponytail-audit` pass that span MULTIPLE files, so they have
+no single source line to host a `ponytail:` marker — recorded here instead. The single-site
+findings from the same pass live as `ponytail:` markers at their sites (`bun run debt`).
+
+### Diffuse (real debt — no single home)
+
+| # | what | sites (file:line) | fix | ~lines |
+|---|------|-------------------|-----|--------|
+| 5 | `clip()` copy-pasted identically | `src/core/orch.ts:266`, `src/core/orch-spans.ts:70`, `src/core/workflow.ts:54`, `src/core/rlm-node.ts:72` | one exported `clip` in `orch.ts`, re-export via `runtime.ts` | ~9 |
+| 6 | usage-triple fallback reimplemented (`readUsage`/`readUsageOf`/`rlmTokensOf`) | `src/core/agent.ts:170`, `src/core/runtime.ts:188`, `src/core/rlm-node.ts:75` (`orch.ts:155` `tokensOf` already does it) | share one helper | ~6 |
+| 7 | BRANCH AST-node-kind `Set` duplicated | `scripts/design-check.ts:100`, `scripts/debt-audit.ts:45` | one shared const | ~22 |
+| 8 | `process.argv.includes` flag-parsing | `scripts/design-check.ts:385`, `scripts/oxlint-check.ts:90`, `scripts/ponytail-debt.ts:100` | `Bun.parseArgs()` | ~6 |
+| 9 | hermetic-test boilerplate (`let failed=0` + `assert`/`ok`, ~6-8 lines × ~18 files) | `scripts/*.test.ts` | a tiny shared `scripts/test-harness.ts` — judgment call vs AGENTS.md "no fixtures unless asked" | ~120 if taken |
+
+### Audited, NOT debt (do not re-flag)
+
+- **Panel / Separator** — 4 callers + a `variant` prop: a legit shared primitive, not speculative.
+- **ActionBar** — actually rendered at `src/tui/chat.tsx:961`; wired, not dead.
+- **emitFromLog** — 2 callers, so the shared helper is justified DRY.
+- **tsconfig.core.json severity overlap** — TS does NOT merge plugin config across `extends`,
+  so the per-dir ERROR-core / OFF-edge split is the unavoidable price, not duplication.
+- **lineOf binary search** — justified perf, not over-engineering.
