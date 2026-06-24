@@ -37,7 +37,22 @@ export { groupSteps, groupSummary, type StepItem }
 //     the in-flight streaming one + the workflow has no still-RUNNING node). The memo comparator reads
 //     this flag instead of re-deriving it (and re-walking workflow.nodes) on every busy-tick compare —
 //     settledness is now a property of the assembled turn, inferred at the single assembly site.
-export type Turn = { idx: number; user: string; steps: Array<Msg>; items: Array<StepItem>; final: string | null; meta?: TurnMeta | undefined; thinking?: string | undefined; streaming?: boolean; settled: boolean; workflow?: OrchTree | undefined; rows?: ReadonlyArray<OrchRow> | undefined }
+export type Turn = { idx: number; user: string; steps: Array<Msg>; items: Array<StepItem>; final: string | null; meta?: TurnMeta | undefined; thinking?: string | undefined; streaming?: boolean; settled: boolean; workflow?: OrchTree | undefined; rows?: ReadonlyArray<OrchRow> | undefined; parts: Array<Part> }
+
+// A1 — THE PART UNION (opencode AssistantContent[], session-message.ts:136-154 — mapped onto
+// rlmcode). A turn's render body is a STRUCTURED ordered array of these tagged parts instead of the
+// old hand-promoted `thinking`/`final` + flat `items`; TurnView dispatches each through the
+// PART_RENDER registry (parts.tsx) keyed on `kind`. The DATA shape lives HERE (no JSX) so parts.tsx
+// (the renderers) imports it without a value cycle — chat-model owns data, parts.tsx owns the JSX.
+//   The array is positional-ordered EXACTLY like the old render so the frame stays byte-identical:
+//   tool parts (the groupSteps `items`, rendered inside the collapsible steps box) → a reasoning
+//   part (the `thinking` block) → a text part (the promoted reply + footer / ErrorCard) → a task
+//   part (the workflow orch tree). toTurns assembles it; parts.tsx renders each kind.
+export type Part =
+  | { readonly kind: "reasoning"; readonly id: string; readonly thinking: string; readonly settled: boolean; readonly durationMs: number | undefined }
+  | { readonly kind: "tool"; readonly id: string; readonly item: StepItem }
+  | { readonly kind: "text"; readonly id: string; readonly text: string; readonly meta: TurnMeta | undefined; readonly streaming: boolean; readonly failed: boolean }
+  | { readonly kind: "task"; readonly id: string; readonly orch: OrchTree; readonly rows: ReadonlyArray<OrchRow> }
 
 export const oneLine = (s: string, n = 90): string => {
   const t = s.replace(/\s+/g, " ").trim()
@@ -92,7 +107,7 @@ export const statusBar = (busy: boolean, armed: boolean, note: string | null, wo
 export function toTurns(messages: ReadonlyArray<Msg>, orch?: OrchTree, expNodes: ReadonlySet<string> = EMPTY_SET): Array<Turn> {
   const turns: Array<Turn> = []
   for (const m of messages) {
-    if (m.kind === "you") turns.push({ idx: turns.length, user: m.text, steps: [], items: [], final: null, settled: false })
+    if (m.kind === "you") turns.push({ idx: turns.length, user: m.text, steps: [], items: [], final: null, settled: false, parts: [] })
     else if (turns.length > 0) turns[turns.length - 1]!.steps.push(m)
   }
   // INLINE NODE-TREE: the session holds ONE OrchTree (the live fan-out). Attach it to the turn
@@ -131,6 +146,14 @@ export function toTurns(messages: ReadonlyArray<Msg>, orch?: OrchTree, expNodes:
     // products of assembly, identical no matter which surface consumes them — no out-of-order flicker.
     t.items = groupSteps(t.steps)
     if (t.workflow) t.rows = workflowRows(t.workflow, expNodes)
+    // A1 — ASSEMBLE THE PART ARRAY (once, here at assembly). Built in RENDER ORDER so TurnView's
+    // PART_RENDER dispatch produces a byte-identical frame: the grouped tool/narration units, then a
+    // reasoning part iff there's thinking (ThinkingPart renders null on empty, so emitting it only
+    // when present is identical), then the text reply part iff a final reply is shown (matching
+    // TurnView's `t.final !== null && !(empty && streaming)` guard) carrying its failed/ErrorCard
+    // flag, then the task part iff a worth-showing workflow is attached. tool parts render inside the
+    // collapsible steps box; reasoning/text/task render after (chat.tsx partitions on kind).
+    t.parts = buildParts(t)
     // SETTLED/COMMITTED BOUNDARY (W5.2, F12): the single assembly-site inference of settledness,
     // collapsing the three heterogeneous in-flight signals into ONE first-class flag the memo
     // comparator then reads (no re-walk of workflow.nodes per compare). A turn is settled iff a final
@@ -150,6 +173,26 @@ export const turnSettled = (t: { readonly final: string | null; readonly streami
   t.final !== null &&
   t.streaming !== true &&
   !(t.workflow !== undefined && Object.values(t.workflow.nodes).some((n) => n.status === "running"))
+
+// A1 — assemble a turn's PART array from its already-computed render fields, in the EXACT order +
+// under the EXACT guards TurnView used to inline, so the PART_RENDER dispatch is byte-identical:
+//   1. tool parts — one per grouped `items` unit (rendered inside the collapsible steps box).
+//   2. reasoning  — iff `thinking` is set (ThinkingPart renders null on empty/absent, so emitting it
+//      only when present is identical). settled = !(t.streaming ?? false); duration = meta.ms.
+//   3. text       — iff a final reply is SHOWN: `t.final !== null && !(t.final === "" && streaming)`
+//      (TurnView's guard). `failed` = the reply is an interrupted/errored "⚠ …" (→ ErrorCard).
+//   4. task       — iff a worth-showing workflow is attached (t.workflow set by toTurns).
+// The tool parts carry the assembly-time index in their id so two identical grouped units (rare)
+// keep stable, unique React keys; the non-tool parts carry a per-turn-stable id.
+const buildParts = (t: Turn): Array<Part> => {
+  const parts: Array<Part> = []
+  t.items.forEach((item, i) => parts.push({ kind: "tool", id: `tool-part-${t.idx}-${i}`, item }))
+  if (t.thinking !== undefined) parts.push({ kind: "reasoning", id: `reasoning-${t.idx}`, thinking: t.thinking, settled: !(t.streaming ?? false), durationMs: t.meta?.ms })
+  if (t.final !== null && !(t.final === "" && (t.streaming ?? false)))
+    parts.push({ kind: "text", id: `text-${t.idx}`, text: t.final, meta: t.meta, streaming: t.streaming ?? false, failed: t.final.startsWith("⚠") })
+  if (t.workflow) parts.push({ kind: "task", id: `task-${t.idx}`, orch: t.workflow, rows: t.rows ?? [] })
+  return parts
+}
 
 const EMPTY_SET: ReadonlySet<string> = new Set()
 

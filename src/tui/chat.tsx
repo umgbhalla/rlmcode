@@ -10,18 +10,19 @@
 import { RegistryProvider, useAtom, useAtomSet, useAtomValue } from "@effect/atom-react"
 import { createCliRenderer, decodePasteBytes } from "@opentui/core"
 import { createRoot, useBlur, useFocus, useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/react"
-import { memo, useEffect, useMemo, useRef, useState } from "react"
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react"
 import { abortTurn, MODELS, type ModelName } from "../app/default-agent.ts"
 import { appAtom, busyAtom, busySessionsAtom, deleteSessionAtom, MODEL, newSessionAtom, sendAtom } from "./atoms.ts"
 import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { makeSyntaxStyle, resolveTheme, theme } from "./theme.ts"
 import { ThemeProvider, useTheme, useThemeSwitcher } from "./theme-context.tsx"
-import { focusGutter, ToolView } from "./tool-view.tsx"
+import { focusGutter } from "./tool-view.tsx"
 import { type Row as OrchRow, RUNNING_DOT } from "./orch-tree.ts"
 import { ActionBar, shortCwd } from "./shell.tsx"
 import { Composer, useComposerFocus } from "./composer.tsx"
-import { AssistantReply, ErrorCard, QueuedCard, ThinkingPart, UserCard } from "./messages.tsx"
+import { QueuedCard, UserCard } from "./messages.tsx"
+import { PART_RENDER, type PartCtx, partKey } from "./parts.tsx"
 import { useMessageQueue } from "./queue.ts"
 import { type Option, useDialogSelect } from "./dialog-select.tsx"
 import { type AcItem, Autocomplete, useAutocomplete } from "./autocomplete.tsx"
@@ -29,10 +30,10 @@ import { type Command, Palette } from "./palette.tsx"
 import { DialogOverlays, printableChar, useDialogs } from "./dialogs.tsx"
 import { WhichKey } from "./which-key.tsx"
 import { activeBindings, type Bind, dispatch, type KeyEventLike, matchesChord, useModeStack } from "./keys.ts"
-import { activeRetry, orchFocusables, WorkflowPart } from "./workflow.tsx"
+import { activeRetry, orchFocusables } from "./workflow.tsx"
 import { turnPropsEqual } from "./turn-memo.ts"
 import { List, NewPill, SessionHeader } from "./header.tsx"
-import { fmtTokens, groupSummary, INDENT, navKeyName, oneLine, sessionTokens, SPIN_FRAMES, statusBar, type StepItem, toTurns, toolsUsed, type Turn } from "./chat-model.ts"
+import { fmtTokens, INDENT, navKeyName, oneLine, sessionTokens, SPIN_FRAMES, statusBar, toTurns, toolsUsed, type Turn } from "./chat-model.ts"
 
 // The shared syntax style for the reply <markdown> + the tool <diff> is built INSIDE App via
 // useMemo keyed on the active theme name (theme.ts makeSyntaxStyle over the LIVE palette), so a
@@ -71,39 +72,6 @@ function useWorking(busy: boolean): { frame: string; elapsed: number } {
 // The keyboard-focus gutter (focusGutter) + the per-tool row (ToolView, with the matured
 // inline-vs-block + per-tool detail + output-collapse) live in tool-view.tsx, imported above —
 // TurnView + NodeRow render the SAME ToolView for the main turn's steps and a node's owned tools.
-
-// TOOL-GROUP UNIT (W3.1, fixes F2/F3): renders ONE assembly-time StepItem — a collapsed explore
-// GROUP as the single "⊙ explored N (…)" summary row, a TOOL step as the bounded ToolView, or a
-// narration line. The grouping authority (toolui.groupSteps) is run ONCE at assembly (toTurns →
-// t.items), so this component is pure presentation over the already-grouped unit; the SAME unit
-// shape is what the node Activity reuses, so a node's explore run renders identically to a turn's.
-function ToolGroupView({ it, expTools, focusedKey, cols, bodyBudget, frame, syntaxStyle, onToggleTool }: {
-  it: StepItem
-  expTools: Set<string>
-  focusedKey: string | undefined
-  cols: number
-  bodyBudget: number
-  frame: string
-  syntaxStyle: unknown
-  onToggleTool: (id: string) => void
-}) {
-  if (it.kind === "group") return <text fg={theme.dim}>{`⊙ ${groupSummary(it.tools)}`}</text>
-  const s = it.m
-  if (s.kind === "tool")
-    return (
-      <ToolView
-        m={s}
-        expanded={expTools.has(s.id)}
-        focused={focusedKey === `tool:${s.id}`}
-        cols={cols}
-        bodyBudget={bodyBudget}
-        frame={frame}
-        syntaxStyle={syntaxStyle}
-        onToggle={() => onToggleTool(s.id)}
-      />
-    )
-  return <text fg={theme.subtext}>{`· ${oneLine(s.text)}`}</text>
-}
 
 // STATIC-COMMIT (claude_code): TurnView is wrapped in React.memo with the turnPropsEqual
 // comparator (turn-memo.ts) so a SETTLED turn does NOT repaint on the ~12×/s busy tick — only
@@ -156,9 +124,29 @@ function TurnViewImpl({
   // half, one gets it all; collapsed tools don't draw from it. Floored at 1 (never 0/NaN ÷ by zero).
   const expandedCount = expanded ? t.steps.filter((s) => s.kind === "tool" && expTools.has(s.id)).length : 0
   const perToolBudget = Math.floor(bodyBudget / Math.max(1, expandedCount))
-  // An interrupted / errored turn surfaces as a "⚠ …" reply (atoms.ts catchCause). Carry
-  // the tool-row red convention up to the final reply so failure isn't painted success-green.
-  const failed = t.final !== null && t.final.startsWith("⚠")
+  // PART_RENDER DISPATCH (A1): the per-render context the registry (parts.tsx) threads into each
+  // part renderer — the live focus/expansion + layout + injected closures TurnView used to thread
+  // inline. Built once per render; the markdown body renderer (the only JSX closure) is captured here
+  // so parts.tsx stays free of the <markdown> + style wiring (the same renderBody AssistantReply got).
+  const ctx: PartCtx = {
+    expTools,
+    focusedKey,
+    cols,
+    perToolBudget,
+    frame,
+    syntaxStyle,
+    detailKey,
+    onToggleTool,
+    renderNode,
+    renderBody: (content, streaming) => <markdown content={content} syntaxStyle={syntaxStyle as any} streaming={streaming} internalBlockMode="top-level" />,
+  }
+  // A1 — the turn body is a STRUCTURED Part[] (chat-model.toTurns → t.parts) dispatched through the
+  // PART_RENDER registry. tool parts render INSIDE the collapsible steps box (the turn chrome); the
+  // reasoning/text/task parts render AFTER it, in order. This partition reproduces the old inline
+  // sequence (steps box → ThinkingPart → AssistantReply/ErrorCard → WorkflowPart) byte-for-byte —
+  // PART_RENDER[kind] emits the EXACT JSX the old TurnView inlined; only the DISPATCH moved.
+  const toolParts = t.parts.filter((p) => p.kind === "tool")
+  const bodyParts = t.parts.filter((p) => p.kind !== "tool")
   return (
     <box flexDirection="column" style={{ marginTop: first ? 0 : 1 }}>
       <UserCard text={t.user} />
@@ -177,61 +165,24 @@ function TurnViewImpl({
           </text>
           {expanded && (
             <box flexDirection="column" style={{ paddingLeft: INDENT }}>
-              {/* ASSEMBLY-TIME GROUPING (W3.1): the steps are PRE-GROUPED in toTurns (t.items), so
-                  TurnView just renders the units via the shared ToolGroupView — it no longer re-runs
-                  groupSteps on every busy tick, and the grouped shape is the same first-class unit the
-                  node Activity reuses (toolui.groupSteps), so a node's explore run reads identically. */}
-              {t.items.map((it) => (
-                <ToolGroupView
-                  key={it.kind === "group" ? `g:${groupSummary(it.tools)}` : it.m.kind === "tool" ? it.m.id : `narr:${oneLine(it.m.text)}`}
-                  it={it}
-                  expTools={expTools}
-                  focusedKey={focusedKey}
-                  cols={cols}
-                  bodyBudget={perToolBudget}
-                  frame={frame}
-                  syntaxStyle={syntaxStyle}
-                  onToggleTool={onToggleTool}
-                />
+              {/* PART_RENDER (A1): the grouped tool parts (toTurns → t.parts, kind:"tool") rendered
+                  via the registry — the SAME grouped StepItem the old ToolGroupView drew, now a
+                  first-class part dispatched on `kind`, computed ONCE at assembly (no per-tick regroup). */}
+              {toolParts.map((p) => (
+                <Fragment key={partKey(p)}>{PART_RENDER[p.kind](p, ctx)}</Fragment>
               ))}
             </box>
           )}
         </box>
       )}
-      {/* ASSISTANT CARD (PART_MAPPING dispatch, opencode :1556-1637 ported): reasoning part →
-          ThinkingPart, then text part → AssistantReply (with the "▣ model · duration" footer)
-          OR, when the reply is an interrupted/errored "⚠ …", the red ErrorCard instead. The
-          reasoning is SETTLED once the turn stops streaming; its duration = the turn wall-clock. */}
-      <ThinkingPart thinking={t.thinking} settled={!(t.streaming ?? false)} durationMs={t.meta?.ms} />
-      {t.final !== null && !(t.final === "" && (t.streaming ?? false)) ? (
-        failed ? (
-          <ErrorCard text={t.final} />
-        ) : (
-          <AssistantReply
-            text={t.final}
-            meta={t.meta}
-            streaming={t.streaming ?? false}
-            fmtTokens={fmtTokens}
-            renderBody={(content, streaming) => <markdown content={content} syntaxStyle={syntaxStyle as any} streaming={streaming} internalBlockMode="top-level" />}
-          />
-        )
-      ) : null}
-      {/* INLINE NODE-TREE (opencode-ux-blueprint Option B): a workflow turn renders its
-          orchestration node-tree HERE, right after the reply — so the fan-out reads as part
-          of THIS turn's answer. A non-workflow turn carries no `workflow` ⇒ no block. */}
-      {/* FLATTEN MEMO (W3.2, F4): the Row[] is computed ONCE at assembly (toTurns → t.rows), shared
-          with the focus ring + the memo comparator — NOT re-flattened here on every busy tick. */}
-      {t.workflow && (
-        <WorkflowPart
-          orch={t.workflow}
-          rows={t.rows ?? []}
-          fmtTokens={fmtTokens}
-          indent={INDENT}
-          detailKey={detailKey}
-          frame={frame}
-          renderRow={renderNode}
-        />
-      )}
+      {/* PART_RENDER DISPATCH (A1, opencode PART_MAPPING message-part.tsx:189/:1273): the assistant
+          body parts (reasoning → text → task) rendered through the registry keyed on `kind` —
+          reasoning→ThinkingPart, text→AssistantReply/ErrorCard, task→WorkflowPart (the inline orch
+          tree). The order + guards live in toTurns (buildParts); here we just dispatch, so a new part
+          kind is added by registering a renderer, never by editing this body. */}
+      {bodyParts.map((p) => (
+        <Fragment key={partKey(p)}>{PART_RENDER[p.kind](p, ctx)}</Fragment>
+      ))}
     </box>
   )
 }
