@@ -22,7 +22,8 @@ import { setNodeSpanTracer } from "./orch-spans.ts"
 import { BASE_PROMPT, limits, makeOnEvent, rateLimiter, readUsageOf } from "./runtime.ts"
 import { abortSession, acquireSession, clearTurnAborter, setTurnAborter, setTurnContext, setTurnEmit } from "./sessions.ts"
 import { setMockEmit } from "./mock-ai.ts"
-import { drainWithWatchdog } from "./stream-watchdog.ts"
+import { drainWithWatchdog, makeToolGate, runStreamWithRetry } from "./stream-watchdog.ts"
+import { classifyTransient, NODE_ATTEMPTS } from "./orch-resilience.ts"
 import { WORKFLOW_TOOLS } from "./workflow.ts"
 
 // Step/token ceilings default to today's app values (limits, from runtime.ts): maxSteps is
@@ -305,44 +306,43 @@ export const createAgent = (config: AxAgentConfig) => {
         budgetExhausted = true
       })
 
+      // TOOL-AWARE STALL + RECOVER (long-session resilience): ONE ToolGate per turn, fed by ax's
+      // logger (makeLiveLogger(emit, gate.observe) — the logger now ALSO counts tool/result into the
+      // gate) and READ by the watchdog. While a tool executes the watchdog suspends the idle
+      // deadline (a 5-min bash / a multi-node workflow is real progress, not a stall); the per-turn
+      // wall-clock cap stays armed (a genuine 24h hang still terminates). On a GENUINE dead-air
+      // stall with NO tool having run, the watchdog fails `retryable` and withRetry redoes the whole
+      // forward (safe — no side effect ran), surfaced as a `retry` node event ("⏳ retrying N/M ·
+      // Xs"); a stall after a tool ran, or the wall cap, is non-retryable → ⚠-abort, no loop.
+      const gate = makeToolGate()
+      const logger = makeLiveLogger(emit, gate.observe)
+      // Surface a stall retry on the synthetic turn node so the UI shows the backoff (not silent
+      // "thinking…"). attempt is 0-based from withRetry; render it 1-based "N/M" like the node path.
+      const onStallRetry = (tryIndex: number, err: unknown, delayMs: number) =>
+        onEvent({ type: "retry", nodeId: `turn:${sessionId}`, cause: classifyTransient(err), attempt: tryIndex + 1, max: NODE_ATTEMPTS, delayMs })
+
+      // ONE attempt: open ax's streamingForward + drain it under the tool-aware watchdog (shared
+      // gate). Only streamingForward yields per-chunk deltas (plain forward collapses to ONE
+      // done-result); ax emits reasoning then answer, both incremental → the per-turn emit grows the
+      // in-flight message. Tools render via the per-turn `logger`; a tool handler recovers the SAME
+      // emit via getTurnEmit(sessionId). stepHooks + the attempt's abortSignal ride along. A watchdog
+      // fire aborts the ATTEMPT aborter; runStreamWithRetry loops a retryable stall, rethrows the rest.
+      const forwardOnce = async (attemptAborter: AbortController): Promise<string> => {
+        const opts = { mem, sessionId, tracer, traceContext, maxSteps, stream: true, abortSignal: attemptAborter.signal, stepHooks, logger, debug: true }
+        const stream = chat.streamingForward(service, { message }, opts as Parameters<typeof chat.streamingForward>[2])
+        const reply = await drainWithWatchdog(stream, attemptAborter, emit, undefined, gate)
+        // ADVISORY budget charge (runNode used to do this; the streaming drain bypasses it).
+        budget.charge(readUsageOf(chat))
+        return reply
+      }
+
       // Make chat.turn the ACTIVE OTel context during forward so ax's tracer (which reads
-      // context.active()) nests its gen_ai span under chat.turn. abortSignal -> ax cancels in-flight.
+      // context.active()) nests its gen_ai span under chat.turn. RECOVER ON GENUINE STALL (PART 2):
+      // runStreamWithRetry forks a fresh attempt aborter per try off the turn aborter + backs off on
+      // a retryable stall, surfaced via onStallRetry; exhaustion / a non-retryable stall rethrows.
       const runForward = (msg: string) =>
         Effect.tryPromise({
-          try: () =>
-            otelContext.with(traceContext, async () => {
-              // LIVE STREAM: drain ax's streamingForward generator. PROVEN (scripts probe): plain
-              // forward(stream:true) collapses to ONE ChatResponseStreamingDoneResult (a single
-              // dump, nothing live) — only streamingForward yields per-chunk deltas. ax emits the
-              // reasoning first (delta.thought) then the answer (delta.reply), both INCREMENTAL, so
-              // we append each to the per-turn emit → atoms grows the in-flight message → the dim-
-              // italic thinking + the reply render token-by-token. Tools render via the per-turn
-              // logger (makeLiveLogger(emit), set in `opts.logger` below — replaces the old service-
-              // level liveLogger binding). A tool handler recovers the SAME per-turn emit via
-              // getTurnEmit(sessionId) (ax drops non-standard opts from `extra`). stepHooks +
-              // abortSignal ride along.
-              const opts = {
-                mem,
-                sessionId,
-                tracer,
-                traceContext,
-                maxSteps,
-                stream: true,
-                abortSignal: aborter.signal,
-                stepHooks,
-                logger: makeLiveLogger(emit),
-                debug: true,
-              }
-              // STALL-WATCHDOG (FIX A): drain the stream under a per-chunk stall deadline + an
-              // outer wall-clock cap, both threading `aborter` so a fire cancels the CF request and
-              // breaks the loop (→ run.ts .finally → queue.close → a "⚠ …" partial). Good turns are
-              // byte-identical: the watchdog only ever fires on dead air / a runaway.
-              const stream = chat.streamingForward(service, { message: msg }, opts as Parameters<typeof chat.streamingForward>[2])
-              const reply = await drainWithWatchdog(stream, aborter, emit)
-              // ADVISORY budget charge (runNode used to do this; the streaming drain bypasses it).
-              budget.charge(readUsageOf(chat))
-              return { reply }
-            }),
+          try: () => otelContext.with(traceContext, () => (void msg, runStreamWithRetry(forwardOnce, aborter, onStallRetry))),
           catch: (e) => new ChatError({ cause: e }),
         })
 
@@ -414,7 +414,7 @@ export const createAgent = (config: AxAgentConfig) => {
       // (chat.*), NOT the gen_ai.* semconv — the canonical message records live as
       // events on ax's gen_ai child span; squatting gen_ai.prompt would mislead
       // semconv-aware tooling.
-      const reply = res.reply ?? ""
+      const reply = res ?? ""
       yield* Effect.annotateCurrentSpan({
         "chat.prompt": clipSpan(message),
         "chat.reply": clipSpan(reply),

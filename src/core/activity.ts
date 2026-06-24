@@ -85,7 +85,17 @@ const emitFromLog = (emit: (a: Activity) => void, m: { name?: string; value?: un
 // activities flow into THIS turn's queue. ax invokes it during forward() as steps complete.
 // makeNodeLogger (below) is already a per-id factory; this gives the main turn the SAME shape,
 // so run.ts can build BOTH from one per-turn emit and the module-load global sink can die.
-export const makeLiveLogger = (emit: (a: Activity) => void): AxLoggerFunction => (m) => emitFromLog(emit, m)
+//
+// TOOL-AWARE STALL (long-session resilience): an OPTIONAL `observe` sink is notified of EVERY
+// activity this logger emits BEFORE the real emit. agent.ts threads the watchdog's ToolGate.observe
+// here so the gate counts tool-CALL / tool-RESULT activities (ax logs them as steps run) — the
+// signal the watchdog reads to SUSPEND the inter-chunk stall while a tool executes. Absent ⇒ the
+// unchanged main-turn behaviour (the SDK/headless paths don't watch tool state).
+export const makeLiveLogger = (emit: (a: Activity) => void, observe?: (a: Activity) => void): AxLoggerFunction => (m) =>
+  emitFromLog((a) => {
+    observe?.(a)
+    emit(a)
+  }, m)
 
 // PER-NODE logger factory: returns an AxLoggerFunction that STAMPS every tool/result it
 // emits with `nodeId`, so the node's own tools route to its OrchTree node (not the main

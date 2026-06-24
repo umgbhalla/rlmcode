@@ -15,7 +15,7 @@ import { Cause, Effect, Fiber } from "effect"
 import * as Duration from "effect/Duration"
 import { TestClock } from "effect/testing"
 import { createAgent } from "../src/core/sdk.ts"
-import { drainWithWatchdogEffect } from "../src/core/stream-watchdog.ts"
+import { drainWithWatchdogEffect, makeToolGate, StreamStallError, type ToolGate } from "../src/core/stream-watchdog.ts"
 import { AxAI } from "./ax-layer.ts"
 
 const usage = { ai: "mock", model: "@mock/test", tokens: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } }
@@ -48,15 +48,16 @@ const driveWatchdog = (
   stallMs: number,
   turnMs: number,
   firstTokenMs = 300_000,
+  gate?: ToolGate,
 ) =>
   Effect.gen(function* () {
     const events: Array<{ kind: string; text?: string }> = []
     const emit = (a: { kind: string; text?: string }) => void events.push(a)
-    const fiber = yield* Effect.forkChild(drainWithWatchdogEffect(stream, aborter, emit as never, { stallMs, turnMs, firstTokenMs }))
+    const fiber = yield* Effect.forkChild(drainWithWatchdogEffect(stream, aborter, emit as never, { stallMs, turnMs, firstTokenMs }, undefined, gate))
     yield* TestClock.adjust(Duration.millis(adjustMs))
     const exit = yield* Effect.exit(Fiber.join(fiber))
-    // The drain FAILS with a plain Error on a watchdog fire; squash flattens the Cause to it so the
-    // typed "stream stalled" / "turn exceeded" message is assertable. Empty string on success.
+    // The drain FAILS with a StreamStallError on a watchdog fire; squash flattens the Cause to it so
+    // the typed "stream stalled" / "turn exceeded" message is assertable. Empty string on success.
     const msg = exit._tag === "Failure" ? String((Cause.squash(exit.cause) as { message?: string })?.message ?? "") : ""
     return { exit, events, msg }
   })
@@ -142,6 +143,109 @@ it.effect("NO HANG / clean pass: a stream that closes resolves to its real reply
     expect(exit._tag === "Success" ? exit.value : "", "the accumulated reply is verbatim").toBe("All good.")
     expect(aborter.signal.aborted, "a clean turn never aborts its controller").toBe(false)
     expect(events.filter((e) => e.kind === "replyDelta").length, "both reply deltas were emitted").toBe(2)
+  }),
+)
+
+it.effect("LONG-TOOL-NO-STALL: a tool running 3 MIN (≫ the 60s inter-chunk stall) does NOT fire — the idle deadline is suspended while a tool executes", () =>
+  Effect.gen(function* () {
+    // The shape of a real long-session turn: one delta lands (firstStep flips → the tight 60s
+    // inter-chunk guard is now active), THEN ax executes a tool INSIDE streamingForward — it.next()
+    // blocks the whole time, yielding NO delta. The logger emits a `tool` activity into the gate
+    // (depth → 1) when the call starts. With the OLD single-threshold watchdog this 3-min no-delta
+    // gap would FALSE-fire at 60s; the tool-aware watchdog suspends the idle deadline while depth>0.
+    const aborter = new AbortController()
+    const gate = makeToolGate()
+    const events: Array<{ kind: string }> = []
+    const emit = (a: { kind: string }) => void events.push(a)
+    const fiber = yield* Effect.forkChild(
+      drainWithWatchdogEffect(scriptedStream([{ reply: "calling tool… " }]), aborter, emit as never, { stallMs: 60_000, turnMs: 600_000, firstTokenMs: 300_000 }, undefined, gate),
+    )
+    // Let the first delta drain + the watchdog arm (one poll slice of virtual time).
+    yield* TestClock.adjust(Duration.millis(1_000))
+    // ax calls a tool → the logger feeds the gate. Now the iterator is blocked running the tool.
+    gate.observe({ kind: "tool", id: "t1", name: "bash", args: "sleep 180" } as never)
+    // THREE MINUTES of no-delta tool execution — 3× the 60s inter-chunk stall. Must NOT fire.
+    yield* TestClock.adjust(Duration.millis(180_000))
+    expect(fiber.pollUnsafe(), "still draining — the inter-chunk stall is SUSPENDED while the tool runs (no false stall)").toBe(undefined)
+    expect(aborter.signal.aborted, "no abort — a running tool is real progress, not dead air").toBe(false)
+    yield* Fiber.interrupt(fiber) // clean up the suspended fiber
+  }),
+)
+
+it.effect("TOOL-THEN-DEAD-AIR: after the tool RESULT lands the idle budget restarts fresh, then genuine dead air fires 60s LATER (not 60s after the tool started)", () =>
+  Effect.gen(function* () {
+    // A tool runs long, returns, then the stream goes genuinely dead. The stall must fire 60s after
+    // the tool FINISHED (the idle budget re-anchors on the result), proving the gate boundary resets
+    // the deadline — a tool does not "spend" the next gap's budget, and a real post-tool stall still
+    // aborts. toolCount>0 now, so the fire is NON-retryable (a tool may have had side effects).
+    const aborter = new AbortController()
+    const gate = makeToolGate()
+    const events: Array<{ kind: string }> = []
+    const emit = (a: { kind: string }) => void events.push(a)
+    const fiber = yield* Effect.forkChild(
+      drainWithWatchdogEffect(scriptedStream([{ reply: "x" }]), aborter, emit as never, { stallMs: 60_000, turnMs: 600_000, firstTokenMs: 300_000 }, undefined, gate),
+    )
+    yield* TestClock.adjust(Duration.millis(1_000))
+    gate.observe({ kind: "tool", id: "t1", name: "bash", args: "" } as never) // tool starts (depth 1)
+    yield* TestClock.adjust(Duration.millis(120_000)) // 2-min tool — no fire (suspended)
+    expect(fiber.pollUnsafe(), "no fire during the 2-min tool").toBe(undefined)
+    gate.observe({ kind: "result", id: "t1", result: "ok", isError: false } as never) // tool ends (depth 0, budget re-anchors)
+    yield* TestClock.adjust(Duration.millis(30_000)) // 30s of post-tool dead air — UNDER the fresh 60s budget
+    expect(fiber.pollUnsafe(), "no fire at 30s post-tool — the budget restarted fresh, not from the tool start").toBe(undefined)
+    yield* TestClock.adjust(Duration.millis(31_000)) // now > 60s of post-tool dead air → fire
+    const exit = yield* Effect.exit(Fiber.join(fiber))
+    const e = exit._tag === "Failure" ? (Cause.squash(exit.cause) as StreamStallError) : undefined
+    expect(exit._tag, "genuine post-tool dead air FIRES the inter-chunk stall").toBe("Failure")
+    expect(/stream stalled/i.test(e?.message ?? ""), "the cause is the inter-chunk stall").toBe(true)
+    expect(e?.retryable, "NON-retryable — a tool already ran (possible side effects), so do NOT redo the forward").toBe(false)
+  }),
+)
+
+it.effect("DEAD-AIR-RECOVERS (retryable gate): a no-tool dead-air stall fails RETRYABLE so the turn can retry the forward", () =>
+  Effect.gen(function* () {
+    // No tool ran (toolCount 0): a genuine network hang. The stall is typed retryable=true so
+    // agent.ts's withRetry redoes the whole forward (safe — no side effect). This pins the GATE the
+    // retry decision keys off; the agent-level loop is exercised by the resilience unit + isTransient.
+    const aborter = new AbortController()
+    const gate = makeToolGate()
+    const { exit } = yield* driveWatchdog(scriptedStream([{ reply: "hi " }]), aborter, 61_000, 60_000, 600_000, 300_000, gate)
+    const e = exit._tag === "Failure" ? (Cause.squash(exit.cause) as StreamStallError) : undefined
+    expect(exit._tag, "the no-tool stall FIRED").toBe("Failure")
+    expect(e?.retryable, "RETRYABLE — no tool ran, so re-running the forward redoes no side effect").toBe(true)
+  }),
+)
+
+it.effect("WALL CAP is NEVER retryable even with no tool: a runaway must terminate, not loop", () =>
+  Effect.gen(function* () {
+    const aborter = new AbortController()
+    const gate = makeToolGate()
+    const { exit, msg } = yield* driveWatchdog(scriptedStream([{ reply: "x" }]), aborter, 5_000, 60_000, 5_000, 300_000, gate)
+    const e = exit._tag === "Failure" ? (Cause.squash(exit.cause) as StreamStallError) : undefined
+    expect(/turn exceeded/i.test(msg), "the wall cap fired").toBe(true)
+    expect(e?.retryable, "the wall cap is NEVER retryable (a runaway loop would defeat the cap)").toBe(false)
+  }),
+)
+
+it.effect("TOOL HANGS FOREVER: a tool that never returns still terminates at the WALL CAP (the hang backstop survives tool-awareness)", () =>
+  Effect.gen(function* () {
+    // The risk in the tool-aware design: a tool whose RESULT never arrives keeps depth>0 forever,
+    // suspending the idle deadline indefinitely. The wall-clock cap MUST still fire — a 24h hung tool
+    // is not progress. Here depth stays 1 and the stream hangs; only the wall cap can end it.
+    const aborter = new AbortController()
+    const gate = makeToolGate()
+    const events: Array<{ kind: string }> = []
+    const emit = (a: { kind: string }) => void events.push(a)
+    const fiber = yield* Effect.forkChild(
+      drainWithWatchdogEffect(scriptedStream([{ reply: "go" }]), aborter, emit as never, { stallMs: 60_000, turnMs: 300_000, firstTokenMs: 300_000 }, undefined, gate),
+    )
+    yield* TestClock.adjust(Duration.millis(1_000))
+    gate.observe({ kind: "tool", id: "t1", name: "bash", args: "" } as never) // tool starts, never returns
+    yield* TestClock.adjust(Duration.millis(300_000)) // reach the wall cap with depth still 1
+    const exit = yield* Effect.exit(Fiber.join(fiber))
+    const msg = exit._tag === "Failure" ? String((Cause.squash(exit.cause) as { message?: string })?.message ?? "") : ""
+    expect(exit._tag, "a forever-hung tool STILL terminates — at the wall cap (no infinite spinner)").toBe("Failure")
+    expect(/turn exceeded/i.test(msg), "the WALL cap (not the idle stall) is what fired").toBe(true)
+    expect(aborter.signal.aborted, "the wall cap aborted the turn").toBe(true)
   }),
 )
 

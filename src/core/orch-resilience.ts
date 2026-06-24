@@ -84,6 +84,11 @@ const isTransient = (err: unknown): boolean => {
   // constructor name so we don't depend on importing every error subclass.
   const name = (err as { name?: unknown; constructor?: { name?: unknown } }).name ?? (err as { constructor?: { name?: unknown } }).constructor?.name
   if (typeof name === "string" && /Network|Timeout|StreamTerminated/i.test(name)) return true
+  // STREAM STALL (long-session resilience): a genuine inter-chunk/first-token stall that the
+  // watchdog typed `retryable` (a network hang with NO tool having run) is safe to retry — the
+  // whole forward redoes no side effect. A stall AFTER a tool ran (or the wall cap) carries
+  // retryable === false and falls through to non-transient → the main turn ⚠-aborts, no retry.
+  if (name === "StreamStallError" && (err as { retryable?: unknown }).retryable === true) return true
   return false
 }
 
