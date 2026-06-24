@@ -9,6 +9,7 @@ import * as Config from "effect/Config"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Redacted from "effect/Redacted"
+import * as Semaphore from "effect/Semaphore"
 import { type ActivitySink, type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
 // CYCLE-BREAKER RE-EXPORT: clip + tokensOf are defined ONCE in orch.ts; runtime.ts re-exports
 // them so the orchestration drivers (workflow.ts / rlm-node.ts) — which already import runtime.ts
@@ -98,9 +99,16 @@ const NODE_MAX_RPS = (() => {
 // (Clock.currentTimeMillis) and the wait is an Effect.sleep — NOT Date.now() + a raw setTimeout.
 // So the throttle interval is DETERMINISTIC under `TestClock.adjust` (the rate-limiter unit proves
 // "two starts are >= one interval apart" + "the backlog cap bounds the worst-case wait" INSTANTLY,
-// zero real wall-clock), while production runs it on the live clock for identical behaviour. The
-// `nextAllowed` reservation clock stays a closure (the limiter is a single hot path, not worth a
-// Ref); reserveSlot returns the wait ms so a test can assert the schedule without the sleep.
+// zero real wall-clock), while production runs it on the live clock for identical behaviour.
+//
+// SEMAPHORE (adoption #4): the slot RESERVATION (the read-then-write of `nextAllowed`) runs under a
+// 1-permit `Semaphore.withPermits(1)` so concurrent callers reserve ATOMICALLY — no two forwards
+// can interleave the clock read + advance and claim the SAME slot (the old bare closure mutation
+// was only correct because JS is single-threaded between awaits; the permit makes the invariant
+// explicit and composable with retry/timeout). Each makeRateLimiter() mints its OWN semaphore, so
+// the two lanes (chat vs node) reserve on SEPARATE clocks AND separate permits — the two-lane
+// behaviour is preserved exactly. reserveSlot returns the wait ms so a test can assert the schedule
+// without the sleep; the semaphore is a no-op for a single sequential reserver (the test path).
 export const makeRateLimiter = (
   rps: number,
   maxBacklog: number,
@@ -108,16 +116,21 @@ export const makeRateLimiter = (
   const interval = 1000 / rps
   const cap = maxBacklog * interval // the clock may lead `now` by at most this many ms
   let nextAllowed = 0
+  // ONE permit per lane: serializes the reservation so the `nextAllowed` claim+advance is atomic.
+  const gate = Semaphore.makeUnsafe(1)
   // reserveSlot: claim this caller's start slot against the shared `nextAllowed` clock and RETURN
   // the ms to wait. Clamp the start to within `cap` of now: a flood can't push this caller's slot
   // (or any later one — incl. the interactive turn) arbitrarily far into the future. `start` is the
   // SOONEST free slot that respects both the per-interval stagger and the backlog cap; the NEXT
-  // slot is reserved one interval past it so concurrent callers still stagger.
-  const reserveSlot: Effect.Effect<number> = Effect.map(Clock.currentTimeMillis, (now) => {
-    const start = Math.min(Math.max(now, nextAllowed), now + cap)
-    nextAllowed = start + interval
-    return start - now
-  })
+  // slot is reserved one interval past it so concurrent callers still stagger. Wrapped in the
+  // 1-permit gate so concurrent reservations are atomic (no two callers claim the same slot).
+  const reserveSlot: Effect.Effect<number> = gate.withPermits(1)(
+    Effect.map(Clock.currentTimeMillis, (now) => {
+      const start = Math.min(Math.max(now, nextAllowed), now + cap)
+      nextAllowed = start + interval
+      return start - now
+    }),
+  )
   const limiter: AxRateLimiterFunction = (reqFunc) =>
     Effect.runPromise(
       Effect.flatMap(reserveSlot, (wait) =>

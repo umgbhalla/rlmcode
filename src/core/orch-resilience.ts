@@ -157,9 +157,19 @@ export const withRetry = async <T>(
 
 // withTimeout — race `run(signal)` against a `timeoutMs` deadline. We fork a child
 // AbortController off the turn's `parentSignal` (so a cancelled turn STILL aborts the
-// node), and ALSO abort it when the timer fires — so a hung forward() (which honors
-// opts.abortSignal) is cut loose and the race rejects with NodeTimeoutError. The node's
+// node), and ALSO abort it when the deadline fires — so a hung forward() (which honors
+// opts.abortSignal) is cut loose and the call rejects with NodeTimeoutError. The node's
 // NodeOpts.abortSignal must be the forked signal so ax actually aborts the in-flight HTTP.
+//
+// EFFECT-NATIVE (adoption #5): the deadline is `Effect.timeoutOrElse` over the Effect Clock
+// — NOT a hand-rolled `setTimeout` + `Promise.race`. The forward runs as an `Effect.tryPromise`
+// (the real Promise the node returns); timeoutOrElse RACES it against the duration and, on the
+// deadline, runs the `orElse` branch which (1) aborts the forked controller so the in-flight
+// forward stops working and (2) fails with NodeTimeoutError. So the deadline composes with
+// retry/Clock (deterministic under TestClock) while preserving the exact prior behaviour:
+// timeout ⇒ ctrl.abort() + NodeTimeoutError; a parent (turn) abort still aborts the node; the
+// forked signal is the one threaded INTO run() so ax honours it. Run via Effect.runPromise at
+// the recipes-layer boundary (the prim stays Promise-returning).
 export const withTimeout = <T>(
   nodeId: string,
   timeoutMs: number,
@@ -175,15 +185,25 @@ export const withTimeout = <T>(
   const onParentAbort = () => ctrl.abort()
   if (parent.aborted) ctrl.abort()
   else parent.addEventListener("abort", onParentAbort, { once: true })
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      ctrl.abort() // abort the in-flight forward so it stops working, not just rejected.
-      reject(new NodeTimeoutError(nodeId, timeoutMs))
-    }, timeoutMs)
-  })
-  return Promise.race([run(ctrl.signal), timeout]).finally(() => {
-    if (timer !== undefined) clearTimeout(timer)
+  // The forward as an Effect: tryPromise so a forward rejection surfaces in the error channel
+  // (re-thrown by runPromise verbatim, preserving the exact reject behaviour). The Effect is
+  // INTERRUPTED by timeoutOrElse on the deadline; the orElse branch fires ctrl.abort() so the
+  // in-flight forward (which honours ctrl.signal) actually stops, then fails NodeTimeoutError.
+  const raced = Effect.timeoutOrElse(
+    // catch: cast to Error to satisfy the LS error-channel rule; the value is the real forward
+    // rejection and runPromise rethrows it VERBATIM (causeSquash returns it untouched), so the
+    // node/retry path sees the exact ax error (status/_tag) — the cast is type-only.
+    Effect.tryPromise({ try: () => run(ctrl.signal), catch: (e) => e as Error }),
+    {
+      duration: Duration.millis(timeoutMs),
+      orElse: () =>
+        Effect.flatMap(
+          Effect.sync(() => ctrl.abort()), // abort the in-flight forward so it stops working, not just rejected.
+          () => Effect.fail(new NodeTimeoutError(nodeId, timeoutMs)),
+        ),
+    },
+  )
+  return Effect.runPromise(raced).finally(() => {
     parent.removeEventListener("abort", onParentAbort)
   })
 }

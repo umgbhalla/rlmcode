@@ -7,6 +7,7 @@
 // core `node` prim) bracketed by its start→done|error lifecycle events. leaf/agent/
 // worker/task/job/unit/runner are forbidden as names for the unit.
 import type { AxAIService, AxGen, AxGenIn, AxGenOut, AxStepHooks } from "@ax-llm/ax"
+import * as Effect from "effect/Effect"
 import { makeNodeLogger } from "./activity.ts"
 import { type Budget, type BudgetUsage, node, type NodeOpts, type NodeEvent, tokensOf } from "./orch.ts"
 import { classifyTransient, LEAF_TIMEOUT_MS, NODE_ATTEMPTS, resilientNode } from "./orch-resilience.ts"
@@ -23,36 +24,36 @@ export const MAX_CONCURRENCY = 100
 // parallelLimit — BOUNDED fan-out: run at most `n` thunks concurrently, QUEUE the rest,
 // return results in INPUT ORDER (results[i] is thunks[i]'s outcome), and map a failed
 // slot to null — the SAME contract as the core `parallel` prim, just bounded. NOT a 6th
-// core primitive (orch.ts stays exactly 5): a userland helper over Promise plumbing. `n`
-// is clamped to 1..MAX_CONCURRENCY (a non-finite/<=0 n falls back to the default 8). A
-// fixed pool of `n` pumps each pulls the next unclaimed index until the queue drains,
-// so order is preserved by writing into results[idx] (not by completion order).
-export const parallelLimit = async <T>(
+// core primitive (orch.ts stays exactly 5): a userland helper. `n` is clamped to
+// 1..MAX_CONCURRENCY (a non-finite/<=0 n falls back to the default 8).
+//
+// EFFECT-NATIVE (adoption #7): the hand-rolled pump-pool (a shared cursor + a fixed pool of
+// `limit` consumers writing into results[idx]) is GONE — replaced by `Effect.forEach(thunks,
+// f, { concurrency: limit })`. forEach runs at most `concurrency` effects at once, QUEUES the
+// rest, and returns the results IN INPUT ORDER (results[i] is thunks[i]'s outcome) — the exact
+// prior contract — while gaining STRUCTURED INTERRUPTION (the in-flight slots auto-cancel when
+// the boundary scope closes / the run is cancelled, no manual abort threading). Each thunk runs
+// as Effect.tryPromise; a rejection is mapped to a `null` slot via orElseSucceed (the same
+// null-on-failure contract as the old try/catch). Run via Effect.runPromise at the recipes
+// boundary (the prim stays Promise-returning — the orch.ts 5-prim contract is untouched).
+export const parallelLimit = <T>(
   thunks: ReadonlyArray<() => Promise<T>>,
   n = 8,
 ): Promise<Array<T | null>> => {
   const limit = Number.isFinite(n) ? Math.min(MAX_CONCURRENCY, Math.max(1, Math.floor(n))) : 8
-  const results = Array.from({ length: thunks.length }, (): T | null => null)
-  // Shared cursor: each pump claims the next unclaimed index and advances it. A holder
-  // object (not a bare `let next`) so the analyzer reads cursor.i on both the claim AND
-  // the advance — a bare post-increment `next++` reads as a dead final write to it.
-  const cursor = { i: 0 }
-  // A fixed pool of `limit` PUMPS (Promise-plumbing consumers, NOT orchestration nodes —
-  // they only pull thunk indices). Each pumps the queue until it drains.
-  const pump = async (): Promise<void> => {
-    for (;;) {
-      const idx = cursor.i
-      cursor.i = idx + 1
-      if (idx >= thunks.length) return
-      try {
-        results[idx] = await thunks[idx]!()
-      } catch {
-        results[idx] = null
-      }
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, thunks.length) }, () => pump()))
-  return results
+  return Effect.runPromise(
+    Effect.forEach(
+      thunks,
+      (thunk): Effect.Effect<T | null> =>
+        // catch: cast to Error so the LS error-channel rule is satisfied (the typed-error
+        // ledger); the value is mapped straight to a null slot by orElseSucceed, never read.
+        Effect.orElseSucceed(
+          Effect.tryPromise({ try: () => thunk(), catch: (e) => e as Error }),
+          (): T | null => null,
+        ),
+      { concurrency: limit },
+    ),
+  )
 }
 
 
