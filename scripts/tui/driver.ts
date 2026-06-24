@@ -83,8 +83,8 @@ export type LaunchDriverOptions = {
   readonly env?: Readonly<Record<string, string>>
   /**
    * Alternate entry to mount instead of chat.tsx — an absolute path to a `bun`-runnable file
-   * that boots its own createRoot/render. Used by the ui-atoms frame gate to mount a tiny
-   * fixture (a Row + Spinner) through the REAL renderer without launching the full app.
+   * that boots its own createRoot/render. Used by standalone-fixture frame gates (e.g.
+   * dialog-select-demo) to mount a tiny fixture through the REAL renderer without the full app.
    */
   readonly entry?: string
 }
