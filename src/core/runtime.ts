@@ -4,6 +4,8 @@
 // id, AI service, budget ceilings, node-event sink and usage reader from a module
 // that imports NONE of them — breaking the old agent ⇄ rlm-workflow static cycle.
 import { ai, type AxAIService, type AxRateLimiterFunction } from "@ax-llm/ax"
+import * as Clock from "effect/Clock"
+import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import { type ActivitySink, type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
 // CYCLE-BREAKER RE-EXPORT: clip + tokensOf are defined ONCE in orch.ts; runtime.ts re-exports
@@ -67,34 +69,49 @@ const NODE_MAX_RPS = (() => {
   const v = Number(process.env.RLM_NODE_MAX_RPS ?? MAX_RPS / 2)
   return Number.isFinite(v) && v > 0 ? Math.max(0.1, v) : MAX_RPS / 2
 })()
-const minIntervalRateLimiter = (rps: number, maxBacklog: number): AxRateLimiterFunction => {
+// EFFECT-NATIVE (adoption #4/#12): the min-interval stagger is computed over the Effect Clock
+// (Clock.currentTimeMillis) and the wait is an Effect.sleep — NOT Date.now() + a raw setTimeout.
+// So the throttle interval is DETERMINISTIC under `TestClock.adjust` (the rate-limiter unit proves
+// "two starts are >= one interval apart" + "the backlog cap bounds the worst-case wait" INSTANTLY,
+// zero real wall-clock), while production runs it on the live clock for identical behaviour. The
+// `nextAllowed` reservation clock stays a closure (the limiter is a single hot path, not worth a
+// Ref); reserveSlot returns the wait ms so a test can assert the schedule without the sleep.
+export const makeRateLimiter = (
+  rps: number,
+  maxBacklog: number,
+): { readonly limiter: AxRateLimiterFunction; readonly reserveSlot: Effect.Effect<number> } => {
   const interval = 1000 / rps
   const cap = maxBacklog * interval // the clock may lead `now` by at most this many ms
   let nextAllowed = 0
-  return async (reqFunc) => {
-    const now = Date.now()
-    // Clamp the reserved start to within `cap` of now: a flood can't push this caller's slot (or
-    // any later one — incl. the interactive turn) arbitrarily far into the future. `start` is the
-    // SOONEST free slot that respects both the per-interval stagger and the backlog cap.
+  // reserveSlot: claim this caller's start slot against the shared `nextAllowed` clock and RETURN
+  // the ms to wait. Clamp the start to within `cap` of now: a flood can't push this caller's slot
+  // (or any later one — incl. the interactive turn) arbitrarily far into the future. `start` is the
+  // SOONEST free slot that respects both the per-interval stagger and the backlog cap; the NEXT
+  // slot is reserved one interval past it so concurrent callers still stagger.
+  const reserveSlot: Effect.Effect<number> = Effect.map(Clock.currentTimeMillis, (now) => {
     const start = Math.min(Math.max(now, nextAllowed), now + cap)
-    const wait = start - now
-    // Reserve the NEXT slot one interval past this start, so concurrent callers still stagger.
     nextAllowed = start + interval
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait))
-    return reqFunc()
-  }
+    return start - now
+  })
+  const limiter: AxRateLimiterFunction = (reqFunc) =>
+    Effect.runPromise(
+      Effect.flatMap(reserveSlot, (wait) =>
+        wait > 0 ? Effect.as(Effect.sleep(Duration.millis(wait)), undefined) : Effect.succeed(undefined),
+      ),
+    ).then(() => reqFunc())
+  return { limiter, reserveSlot }
 }
 // The CHAT-lane limiter instance — attached in agent.ts's setOptions (the ONE setOptions call,
 // since setOptions reassigns every field). Exported so the live harness's standalone service
 // can attach the SAME throttle and the bounded-fan-out gate exercises the real limited path.
-export const rateLimiter: AxRateLimiterFunction = minIntervalRateLimiter(MAX_RPS, MAX_BACKLOG)
+export const rateLimiter: AxRateLimiterFunction = makeRateLimiter(MAX_RPS, MAX_BACKLOG).limiter
 
 // The BACKGROUND-NODE lane limiter — a SEPARATE clock (its own `nextAllowed`) from the chat lane,
 // so a background workflow fan-out reserves slots here and can never push the chat lane forward.
 // Threaded onto every node forward's opts at the single chokepoint (workflow-prims optsFor); a
 // per-forward rateLimiter overrides the service-level one (FIX B / STUCK-ANALYSIS R2). Same backlog
 // cap so a within-lane burst is also bounded. Exported for the wiring + the contention measure.
-export const nodeRateLimiter: AxRateLimiterFunction = minIntervalRateLimiter(NODE_MAX_RPS, MAX_BACKLOG)
+export const nodeRateLimiter: AxRateLimiterFunction = makeRateLimiter(NODE_MAX_RPS, MAX_BACKLOG).limiter
 
 // The capable base system prompt shared by the MAIN agent (agent.ts re-exports it)
 // and every orchestration NODE (rlm-workflow.ts nodeGen). Lives HERE — the neutral

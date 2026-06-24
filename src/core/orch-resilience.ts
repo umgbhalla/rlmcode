@@ -15,6 +15,8 @@
 //     retried — re-running yields the same error and burns tokens/time.
 // Default = NOT transient (fail fast). Only the known-transient shapes opt INTO a retry.
 import { AxFunctionError, type AxAIService, type AxGen, type AxGenIn, type AxGenOut } from "@ax-llm/ax"
+import * as Duration from "effect/Duration"
+import * as Effect from "effect/Effect"
 import { BudgetExhaustedError, type NodeOpts, node, type RetryCause } from "./orch.ts"
 
 // Max forward attempts for a transient failure (the first try + retries). Env override
@@ -88,21 +90,36 @@ const isTransient = (err: unknown): boolean => {
 export const classifyTransient = (err: unknown): RetryCause =>
   err != null && typeof err === "object" && (err as { status?: unknown }).status === 429 ? "rate_limited" : "transient"
 
-// Sleep that ALSO respects an abort signal — a cancelled turn cuts the backoff wait short
-// (rejects) instead of stalling the full delay before honoring the cancel.
+// BACKOFF SCHEDULE (pure): retry i waits base*2^i + i*(base/4) — exponential growth with a
+// per-attempt stagger BY INDEX (no Math.random) so a wave of simultaneous failures doesn't re-fire
+// in lockstep (deterministic, test-stable jitter). Exported so the deterministic rate-limit retry
+// unit can assert the exact schedule a TestClock must advance through.
+export const backoffDelayMs = (tryIndex: number): number =>
+  NODE_BACKOFF_MS * 2 ** tryIndex + tryIndex * (NODE_BACKOFF_MS >> 2)
+
+// EFFECT-NATIVE (adoption #12): the backoff wait is an `Effect.sleep` over the Effect Clock raced
+// against an abort-watcher, run via Effect.runPromise — NOT a raw setTimeout. So the retry backoff
+// is DETERMINISTIC under `TestClock.adjust` (the rate-limit retry unit advances virtual time across
+// the schedule INSTANTLY, zero real wall-clock) while production runs it on the live clock. A
+// cancelled turn still cuts the wait short: the abort branch wins the race and rejects "aborted",
+// preserving the exact pre-Effect behaviour (the backoff never stalls past a cancel).
 const sleep = (ms: number, signal: AbortSignal): Promise<void> =>
-  new Promise<void>((resolve, reject) => {
-    if (signal.aborted) return reject(new Error("aborted"))
-    const t = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort)
-      resolve()
-    }, ms)
-    const onAbort = () => {
-      clearTimeout(t)
-      reject(new Error("aborted"))
-    }
-    signal.addEventListener("abort", onAbort, { once: true })
-  })
+  Effect.runPromise(
+    Effect.flatMap(
+      Effect.sync(() => signal.aborted),
+      (already) =>
+        already
+          ? Effect.fail(new Error("aborted"))
+          : Effect.raceFirst(
+              Effect.sleep(Duration.millis(ms)),
+              Effect.callback<never, Error>((resume) => {
+                const onAbort = () => resume(Effect.fail(new Error("aborted")))
+                signal.addEventListener("abort", onAbort, { once: true })
+                return Effect.sync(() => signal.removeEventListener("abort", onAbort))
+              }),
+            ),
+    ),
+  ).then(() => undefined)
 
 // withRetry — run `attempt()` up to NODE_ATTEMPTS times, retrying ONLY on a transient
 // error (isTransient). Backoff between retries is exponential (NODE_BACKOFF_MS * 2^i)
@@ -126,7 +143,7 @@ export const withRetry = async <T>(
       // Exponential backoff + jitter-by-INDEX (NOT Math.random): later retries wait
       // longer AND are staggered by their own index so a wave of simultaneous failures
       // doesn't re-fire in perfect lockstep.
-      const delayMs = NODE_BACKOFF_MS * 2 ** i + i * (NODE_BACKOFF_MS >> 2)
+      const delayMs = backoffDelayMs(i)
       onRetry(i, err, delayMs)
       await sleep(delayMs, signal)
     }
