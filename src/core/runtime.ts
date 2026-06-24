@@ -5,8 +5,10 @@
 // that imports NONE of them — breaking the old agent ⇄ rlm-workflow static cycle.
 import { ai, type AxAIService, type AxRateLimiterFunction } from "@ax-llm/ax"
 import * as Clock from "effect/Clock"
+import * as Config from "effect/Config"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
+import * as Redacted from "effect/Redacted"
 import { type ActivitySink, type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
 // CYCLE-BREAKER RE-EXPORT: clip + tokensOf are defined ONCE in orch.ts; runtime.ts re-exports
 // them so the orchestration drivers (workflow.ts / rlm-node.ts) — which already import runtime.ts
@@ -28,8 +30,31 @@ export const MODEL = KIMI
 // the previous one began, then runs. AxRateLimiterFunction must return the reqFunc's result
 // (Promise or stream) — we just delay, then call through. Default 12 RPS (sensible for CF
 // Workers AI); RLM_MAX_RPS overrides. Clamped to >= 0.1 so a bad env never divides by zero.
+// EFFECT-NATIVE CONFIG (adoption #2/#3): ONE validated parse of every RLM_* env knob +
+// the redacted CF token at boot, instead of eight inline `Number(process.env.X)` reads that
+// each re-clamp on access (the old processEnvInEffect smell). `Config.number(name).pipe(
+// withDefault(d))` reads the env via the default ConfigProvider (fromEnv → process.env) and
+// falls back to `d` on a MISSING key; a PRESENT-but-non-numeric value yields NaN here (Config
+// does not throw for it), so the existing clamp helpers below still map a bad value to its
+// default — preserving the prior "a bad env never throws" behaviour BYTE-FOR-BYTE. The token is
+// Config.redacted → a Redacted<string> (opaque, safe-to-log); unwrapped ONLY at the ai() boundary.
+// withDefault("") keeps the old `?? undefined`-then-`!` shape: absent ⇒ "" (the CF call errors at
+// request time exactly as the old `process.env.CLOUDFLARE_API_TOKEN!` did when unset).
+const ENV = Effect.runSync(
+  Config.all({
+    maxRps: Config.number("RLM_MAX_RPS").pipe(Config.withDefault(12)),
+    maxBacklog: Config.number("RLM_MAX_BACKLOG").pipe(Config.withDefault(8)),
+    nodeMaxRps: Config.number("RLM_NODE_MAX_RPS").pipe(Config.withDefault(Number.NaN)),
+    maxSteps: Config.number("RLM_MAX_STEPS").pipe(Config.withDefault(24)),
+    tokenBudget: Config.number("RLM_TOKEN_BUDGET").pipe(Config.withDefault(2_000_000)),
+    cfApiToken: Config.redacted("CLOUDFLARE_API_TOKEN").pipe(Config.withDefault(Redacted.make(""))),
+    cfAccountId: Config.string("CLOUDFLARE_ACCOUNT_ID").pipe(Config.withDefault("")),
+    mock: Config.string("RLM_MOCK").pipe(Config.withDefault("")),
+  }),
+)
+
 const MAX_RPS = (() => {
-  const v = Number(process.env.RLM_MAX_RPS ?? 12)
+  const v = ENV.maxRps
   return Number.isFinite(v) && v > 0 ? Math.max(0.1, v) : 12
 })()
 // CONTENTION (FIX B / STUCK-ANALYSIS R2+R5): chat turns AND background workflow nodes USED to share
@@ -58,7 +83,7 @@ const MAX_RPS = (() => {
 // the chat turn does not). Upgrade: a first-class per-forward `priority` field if ax ever surfaces
 // caller identity in the limiter `info` arg, so lanes need no out-of-band opts wiring.
 const MAX_BACKLOG = (() => {
-  const v = Number(process.env.RLM_MAX_BACKLOG ?? 8)
+  const v = ENV.maxBacklog
   return Number.isFinite(v) && v > 0 ? Math.max(1, Math.floor(v)) : 8
 })()
 // BACKGROUND-NODE lane RPS: background workflow nodes throttle on their OWN clock (nodeRateLimiter
@@ -66,7 +91,7 @@ const MAX_BACKLOG = (() => {
 // user's interactive turn. Default = half MAX_RPS (the background lane yields to the interactive one);
 // RLM_NODE_MAX_RPS overrides. Same clamp as MAX_RPS (>= 0.1 so a bad env never divides by zero).
 const NODE_MAX_RPS = (() => {
-  const v = Number(process.env.RLM_NODE_MAX_RPS ?? MAX_RPS / 2)
+  const v = ENV.nodeMaxRps
   return Number.isFinite(v) && v > 0 ? Math.max(0.1, v) : MAX_RPS / 2
 })()
 // EFFECT-NATIVE (adoption #4/#12): the min-interval stagger is computed over the Effect Clock
@@ -141,12 +166,12 @@ export const BASE_PROMPT = [
 // radius of a runaway explore while leaving real multi-step work ample room. RLM_MAX_STEPS overrides
 // (raise it for a genuinely long task). The ceiling is enforced GRACEFULLY in-loop (agent.ts
 // finalizeOnMaxSteps forces a final reply with tools stripped), never a hard throw.
-const MAX_STEPS = Number(process.env.RLM_MAX_STEPS ?? 24)
+const MAX_STEPS = ENV.maxSteps
 // Hard per-turn TOKEN ceiling, enforced by orch's Budget (charged after each node
 // from the forward result's usage). Distinct from MAX_STEPS (tool-call iterations,
 // still recovered by turn() in agent.ts): this is a real token gate that throws
 // BudgetExhaustedError when a turn's cumulative usage crosses it.
-const TOKEN_BUDGET = Number(process.env.RLM_TOKEN_BUDGET ?? 2_000_000)
+const TOKEN_BUDGET = ENV.tokenBudget
 
 // The shared AI service. Exported so turn() (agent.ts) and the rlm-workflow driver
 // (rlm-workflow.ts) drive the SAME provider — one
@@ -159,12 +184,15 @@ const TOKEN_BUDGET = Number(process.env.RLM_TOKEN_BUDGET ?? 2_000_000)
 // service for the canned mock AI (mock-ai.ts — zero network). Without this, `ai({…})`
 // throws "OpenAI API key not set" at module load when the CF env is absent, so a headless
 // harness (no .env) can't even boot chat.tsx. Unset ⇒ the unchanged CF construction.
-export const llm: AxAIService = process.env.RLM_MOCK === "1"
+export const llm: AxAIService = ENV.mock === "1"
   ? makeMockAI()
   : ai({
       name: "openai",
-      apiKey: process.env.CLOUDFLARE_API_TOKEN!,
-      apiURL: `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/v1`,
+      // SECRET BOUNDARY (adoption #3): the token rode here as an opaque Redacted<string>
+      // (never logged, never on a span) — Redacted.value() unwraps it ONLY at this ax service
+      // construction call, the single point that needs the raw secret.
+      apiKey: Redacted.value(ENV.cfApiToken),
+      apiURL: `https://api.cloudflare.com/client/v4/accounts/${ENV.cfAccountId}/ai/v1`,
       config: { model: MODEL as any },
     })
 
