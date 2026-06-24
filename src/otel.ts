@@ -24,7 +24,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime"
 import * as Atom from "effect/unstable/reactivity/Atom"
 
 export const SERVICE_NAME = "rlmcode"
-export const SERVICE_VERSION = "0.0.1"
+export const SERVICE_VERSION = "0.0.2"
 
 const BASE = process.env.MOTEL_OTLP_URL ?? "http://127.0.0.1:27686"
 

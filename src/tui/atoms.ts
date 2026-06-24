@@ -283,7 +283,7 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
         sessions: cur.sessions.map((x) => {
           if (x.id !== id) return x
           if (x.orch !== undefined) return { id: x.id, title: x.title, messages: fn(x.messages), orch: x.orch }
-          return { id: x.id, title: x.title, messages: x.messages }
+          return { id: x.id, title: x.title, messages: fn(x.messages) }
         }),
       })
     }

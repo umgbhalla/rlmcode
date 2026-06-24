@@ -59,8 +59,13 @@ await report("autocomplete.test", async (a) => {
     a.has(slashOpen, /↑↓ select · ↵ insert · esc close/, "the slash menu shows the nav/insert/close footer")
 
     // close the slash popup (esc) + delete the lone "/" so the buffer is empty for the @ flow.
+    // Frame-gate BOTH transitions (popup closed AND buffer cleared) before typing "@" — otherwise
+    // a residual "/" left by a still-closing menu makes the @ query non-empty, pre-filtering the
+    // file list (the flake this guards). Waits are frame-stable, never setTimeout-then-assert.
     await d.key("Escape")
+    await d.waitForFrame((f) => !/\/ commands/.test(f), 5000)
     await d.key("Backspace")
+    await d.waitForFrame((f) => /input:\s*$/m.test(f), 5000)
 
     // 2) OPEN — typing "@" raises the file-mention popup with the canned files + the footer.
     await d.type("@")

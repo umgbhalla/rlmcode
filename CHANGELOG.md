@@ -3,6 +3,55 @@
 All notable changes to rlmcode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## v0.0.2 — 2026-06-24
+
+Lint/quality-gate rework — the gate now "thinks like the Rust compiler": every rule lands at a
+tier (ERROR blocks the gate, WARN is surfaced + counted but non-blocking, OFF). Four complementary
+layers — tsc strict, `@effect/language-service`, oxlint, and yuku design-check — with no overlap.
+
+### Quality gate
+- **Effect language-service enforcement.** The already-loaded `@effect/language-service` plugin
+  now sets a `diagnosticSeverity` tier split (it previously enforced NOTHING — editor hints only),
+  run headlessly in `bun run check` so it gates. Correctness + anti-pattern diagnostics
+  (`floatingEffect`, `missingEffectContext`, `leakingRequirements`, …) are ERROR; the Effect-native
+  side-effect detectors (`globalDate`/`globalRandom`/`globalConsoleInEffect`/`globalFetchInEffect`/
+  `processEnvInEffect`/`newPromise`/… — the full mutable/imperative ban as type diagnostics) are
+  ERROR inside `src/core/` (via a `tsconfig.core.json`
+  override) and OFF at the composition edge (`src/app/`, `src/tui/`, `src/otel.ts`), which
+  legitimately touches `process.env`/`console`/node builtins. `Ref`/`SubscriptionRef` are sanctioned
+  — never banned. Style/opportunity diagnostics ride at WARN.
+- **tsconfig strict flags added:** `noUncheckedIndexedAccess`, `noUncheckedSideEffectImports`,
+  `erasableSyntaxOnly`, `isolatedModules`, `noImplicitOverride`, `noFallthroughCasesInSwitch`,
+  `moduleDetection: "force"` — well past plain `strict`. Strict flags are non-negotiable: fallout is
+  fixed in code, never silenced by relaxing a flag.
+- **oxlint (NEW gate step).** A Rust per-statement linter (`bun run oxlint`) complementing yuku's
+  cross-file analysis: `no-var` + `no-param-reassign` (the mutable-state ban), inline type-imports,
+  `import/no-duplicates`/`no-cycle`, generic array types. Correctness/suspicious/perf at ERROR;
+  `no-console`/`unicorn` idioms at WARN. yuku is retained (reachability dead-code, the `crosscore`
+  SDK-barrel boundary, write-flow) — the layers are complementary, not duplicative.
+- **design-check budgets (still FIXED).** `scripts/design-check.ts` keeps the FIXED named-const
+  ceilings — `CC_BUDGET` 20, `NEST_BUDGET` 8, `INDEX_LINE_BUDGET` 300 / `LINE_BUDGET` 500,
+  `PARAM_BUDGET` 6 (tunable only with a reason) — every finding ERROR-tier (blocking, staged-blocking
+  under `--staged`). The DYNAMIC budget rubric (role × export-fan × 90d-churn × complexity-density,
+  with a WARN "approaching budget" / hotspot tier) is DEFERRED to a follow-up `design-check.ts`
+  rework — it is NOT shipped in v0.0.2 (it would tighten core CC to 12 and squeeze hot files,
+  requiring real refactors of `agent.ts`/`orch.ts`/`run.ts`/`atoms.ts` first).
+- **`bun run debt:audit` (advisory).** A non-blocking semantic over-engineering pass alongside the
+  deterministic, blocking `ponytail-debt.ts` ledger, churn-ranked so debt in hot files surfaces first.
+- **AGENTS.md policies.** Documented the rustc tier model, the Effect-driven design mandate
+  (state = immutable data + Effect DI), the test-rewrite-on-version-bump rule, and the hermetic
+  mock-first gate (zero network / zero live AI; `RLM_LIVE` is a separate on-demand gate).
+
+### TUI gate fixes (test:tui now fully green)
+- Fixed a transcript-drop bug in `sendAtom` (`src/tui/atoms.ts`): for a session with no orch tree
+  (the common plain-chat case) the `patch` returned the OLD message list instead of the updated one,
+  so user cards and replies never rendered. Non-orch turns now render their full transcript.
+- Hardened the headless TUI driver (`scripts/tui/driver.ts`): `type()` self-heals the composer's
+  mount/focus-flap race (the textarea gains focus a tick after its placeholder paints, so an
+  early keystroke was silently dropped) by frame-stably re-sending into the empty composer only —
+  scoped away from overlays (palette/dialog/autocomplete) and list-nav. De-flaked `autocomplete.test`
+  with frame-stable buffer-clear gates. No fixed-sleep waits introduced.
+
 ## v0.0.1 — 2026-06-23
 
 First tagged release: a self-orchestrating, fully traced TUI coding agent.

@@ -41,6 +41,8 @@
           "globalDateInEffect": "error",
           "globalRandom": "error",
           "globalRandomInEffect": "error",
+          "globalConsoleInEffect": "error",
+          "globalFetchInEffect": "error",
           "globalTimersInEffect": "error",
           "processEnvInEffect": "error",
           "newPromise": "error",
