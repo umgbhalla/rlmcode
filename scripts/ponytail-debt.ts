@@ -11,6 +11,7 @@
 //
 // Marker convention: `// ponytail: <ceiling>, <upgrade path>` (Upgrade: may be
 // on a following continuation comment line).
+import { parseArgs } from "node:util"
 import type { Node } from "@yuku-toolchain/types"
 import { Analyzer, type Module } from "yuku-analyzer"
 
@@ -97,7 +98,8 @@ export const harvest = (path: string, text: string): DebtResult => {
 
 if (import.meta.main) {
   const BUDGET = Number(process.env.LOC_BUDGET ?? 0)
-  const staged = process.argv.includes("--staged")
+  const { values } = parseArgs({ args: Bun.argv.slice(2), options: { staged: { type: "boolean", default: false } }, strict: false })
+  const staged = values.staged === true
   const SCAN_DIRS = ["src", "scripts"]
   const SCAN_FILES: Array<string> = []
 

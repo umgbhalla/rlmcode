@@ -21,6 +21,7 @@
 // column; promote a finding to the blocking debt gate only per the escalation
 // rule (age > 2mo AND churn ≥ median) once the false-positive rate is known.
 import { Analyzer } from "yuku-analyzer"
+import { BRANCH } from "./design-check.ts"
 
 // Per-file commit count over the last 90 days, from ONE `git log` invocation (the same
 // churn-map approach design-check uses for its hotspot squeeze). `--name-only
@@ -39,21 +40,9 @@ const churnMap = (since = "90 days ago"): Map<string, number> => {
   return counts
 }
 
-// Branch-node kinds — a rough cyclomatic proxy (same set design-check counts for CC),
-// summed over the whole file rather than per-function. A blunt complexity signal, which
-// is all the ranking needs.
-const BRANCH = new Set([
-  "IfStatement",
-  "ForStatement",
-  "ForInStatement",
-  "ForOfStatement",
-  "WhileStatement",
-  "DoWhileStatement",
-  "ConditionalExpression",
-  "LogicalExpression",
-  "SwitchCase",
-  "CatchClause",
-])
+// BRANCH (the cyclomatic-proxy node-kind set) is imported from design-check.ts — ONE
+// source of truth. Summed here over the whole file rather than per-function: a blunt
+// complexity signal, which is all the ranking needs.
 
 const ROLE_OF = (path: string): string =>
   path.startsWith("src/core/") ? "core"

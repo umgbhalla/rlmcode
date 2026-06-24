@@ -12,6 +12,7 @@
 // promote tier 3 per the preview when ready.
 import { spawnSync } from "node:child_process"
 import { readFileSync } from "node:fs"
+import { parseArgs } from "node:util"
 
 export type OxlintDiag = { path: string; line: number; severity: "error" | "warning"; rule: string; message: string }
 
@@ -87,8 +88,13 @@ const filterStaged = (diags: Array<OxlintDiag>, stage: Set<string>): Array<Oxlin
   diags.filter((d) => stage.has(d.path) || stage.has(d.path.replace(/^\.\//, "")))
 
 if (import.meta.main) {
-  const staged = process.argv.includes("--staged")
-  const upgradeReport = process.argv.includes("--upgrade-report")
+  const { values } = parseArgs({
+    args: Bun.argv.slice(2),
+    options: { staged: { type: "boolean", default: false }, "upgrade-report": { type: "boolean", default: false } },
+    strict: false,
+  })
+  const staged = values.staged === true
+  const upgradeReport = values["upgrade-report"] === true
 
   if (upgradeReport) {
     console.log("oxlint tiers (promote top → bottom when the prior tier is clean):\n")

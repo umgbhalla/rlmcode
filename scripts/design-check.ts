@@ -25,6 +25,7 @@
 // (scripts/oxlint-check.ts) owns syntax/correctness/perf on src + scripts +
 // examples. Overlap on unused imports is aligned; neither gate prescribes fixes
 // the other rejects — see scripts/lint-coordination.test.ts.
+import { parseArgs } from "node:util"
 import { Analyzer, SymbolFlags } from "yuku-analyzer"
 
 export type Finding = { tag: "broken" | "crosscore" | "delete" | "native" | "cycle" | "shrink" | "yagni" | "mutate" | "capture"; msg: string }
@@ -97,7 +98,9 @@ const NATIVE_DUPES: Record<string, string> = {
   rimraf: "fs.rm({ recursive: true })",
 }
 
-const BRANCH = new Set([
+// Branch-node kinds = the cyclomatic-complexity proxy. Exported as the SINGLE
+// source of truth: debt-audit.ts imports it for its blunt per-file branch count.
+export const BRANCH = new Set([
   "IfStatement",
   "ForStatement",
   "ForInStatement",
@@ -382,7 +385,8 @@ const stagedSet = (): Set<string> => {
 }
 
 if (import.meta.main) {
-  const staged = process.argv.includes("--staged")
+  const { values } = parseArgs({ args: Bun.argv.slice(2), options: { staged: { type: "boolean", default: false } }, strict: false })
+  const staged = values.staged === true
   const isLinted = isLintedPath
   // src/ is LINTED; scripts/ + examples/ are CONSUMERS — they join the reference + import graph so
   // a seam used only by a test/example reads as live, but they are not themselves linted.
