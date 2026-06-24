@@ -33,8 +33,11 @@ export type TurnDriver = Pick<AxAgentSDK, "turn" | "abortTurn">
 // discriminant here at the yield boundary (no {kind:'activity'} wrapper). A future socket can
 // JSON.stringify a TurnEvent verbatim.
 export type TurnEvent =
-  | { readonly type: "reply_delta"; readonly text: string }
-  | { readonly type: "thinking_delta"; readonly text: string }
+  // PER-NODE STREAM ROUTING (F8): nodeId tags a delta with the orchestration NODE that streamed
+  // it (the seam tool_call/tool_result already carry). UNSET ⇒ the MAIN turn (grows the transcript
+  // reply, the unchanged default); SET ⇒ a sub-agent node's transient streamed text. Serializable.
+  | { readonly type: "reply_delta"; readonly text: string; readonly nodeId?: string | undefined }
+  | { readonly type: "thinking_delta"; readonly text: string; readonly nodeId?: string | undefined }
   | { readonly type: "message"; readonly text: string }
   | { readonly type: "tool_call"; readonly id: string; readonly name: string; readonly args: string; readonly nodeId?: string | undefined }
   | { readonly type: "tool_result"; readonly id: string; readonly result: string; readonly isError: boolean; readonly nodeId?: string | undefined }
@@ -126,9 +129,9 @@ const toEvent = (a: Activity): TurnEvent => {
     case "text":
       return { type: "message", text: a.text }
     case "replyDelta":
-      return { type: "reply_delta", text: a.text }
+      return { type: "reply_delta", text: a.text, nodeId: a.nodeId }
     case "thinkingDelta":
-      return { type: "thinking_delta", text: a.text }
+      return { type: "thinking_delta", text: a.text, nodeId: a.nodeId }
     case "tool":
       return { type: "tool_call", id: a.id, name: a.name, args: a.args, nodeId: a.nodeId }
     case "result":

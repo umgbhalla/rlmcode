@@ -24,6 +24,9 @@ const deepEq = (a: unknown, b: unknown): boolean => JSON.stringify(norm(a)) === 
 const samples: Array<TurnEvent> = [
   { type: "reply_delta", text: "tok" },
   { type: "thinking_delta", text: "hmm" },
+  // PER-NODE STREAM ROUTING (F8): a node-tagged delta — nodeId must survive the JSON round-trip.
+  { type: "reply_delta", text: "node tok", nodeId: "n1" },
+  { type: "thinking_delta", text: "node hmm", nodeId: "n1" },
   { type: "message", text: "step narration" },
   { type: "tool_call", id: "c1", name: "bash", args: '{"cmd":"ls"}' },
   { type: "tool_call", id: "c2", name: "read_file", args: "{}", nodeId: "n1" },

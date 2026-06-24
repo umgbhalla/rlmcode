@@ -93,7 +93,11 @@ export function toTurns(messages: ReadonlyArray<Msg>, orch?: OrchTree): Array<Tu
       // per-chunk reorder flicker (the old hazard was many separate narration msgs). Carry its
       // thinking + streaming flag up so the render shows the collapsible thinking + live cursor.
       if (s.kind === "agent" && (s.meta || s.streaming === true)) {
-        t.final = s.text
+        // LIVE/COMMITTED SPLIT (F9): while STREAMING, show the transient `liveText` buffer (the
+        // in-flight stream); a SETTLED reply (carries meta, liveText cleared by finalize) shows the
+        // canonical `text`. liveText ?? text coalesces — the committed message is `text`, the live
+        // preview is liveText, and finalize swaps one for the other atomically (no in-place overwrite).
+        t.final = s.liveText ?? s.text
         t.meta = s.meta
         t.streaming = s.streaming === true && s.meta === undefined
         t.thinking = s.thinking

@@ -180,6 +180,13 @@ export const runNode = async <I extends AxGenIn, O extends AxGenOut>(
   const onEvent: EmitSink = isMainTurn ? noopSink : (spec.onEvent ?? noopSink)
   const timeoutMs = isMainTurn ? Number.POSITIVE_INFINITY : LEAF_TIMEOUT_MS
   const opts = isMainTurn ? spec.opts : withNodeLogger(spec.opts, nodeId)
+  // PER-NODE STREAM ROUTING (F8) — FIX-MARKER: a node today runs a PLAIN forward (resilientNode →
+  // node() → forward, a settled string; no per-chunk drain). The MOMENT a node forwards with
+  // stream:true it MUST drain via drainWithWatchdog(stream, aborter, emit, nodeId) — passing THIS
+  // node's id — so its replyDelta/thinkingDelta tag with nodeId and atoms routes them to the node's
+  // transient text (node.liveText), NOT the main transcript. The activity/run/atoms seam is already
+  // wired for the tag (W2); a streaming node that DROPS the nodeId would silently corrupt the main
+  // reply (the latent-critical seam). Do NOT add node streaming without threading nodeId here.
   onEvent({ type: "start", nodeId, parentId, phase })
   try {
     // TRANSIENT RESILIENCE on the node path: per-node timeout (abort a hang) + retry-with-

@@ -178,6 +178,46 @@ export const MOCK_DIFF_TOOL: AxFunction = {
   },
 }
 
+// ── CANNED PER-NODE STREAM FEED (W2/F8 frame gate) — proves a streaming sub-agent's deltas route
+// to ITS node (node.liveText), NOT the main transcript. A root fan-out + one child LEFT RUNNING; the
+// child's streamed reply arrives as nodeId-TAGGED replyDelta/thinkingDelta activities (the exact
+// shape drainWithWatchdog emits when a node forwards with stream:true). The node-stream text is a
+// recognizable sentinel ("NODE-STREAM-LEAK-SENTINEL") so the frame gate can assert it NEVER appears
+// in the main transcript reply (the F8 corruption) yet DOES grow the node (its detail pane shows it).
+// The node stays RUNNING (no done) so its transient liveText is still live for the snapshot. NOT in
+// production — replayed only by scripts/tui/node-stream.test.ts under RLM_MOCK.
+const NODE_STREAM_SENTINEL = "NODE-STREAM-LEAK-SENTINEL"
+const NODE_STREAM_PIECES = [`${NODE_STREAM_SENTINEL} `, "sub-agent ", "live ", "tokens"] as const
+const feedNodeStreamNodes = (emit: ActivitySink): void => {
+  const push = (a: Activity): void => emit(a)
+  push({ kind: "node", nodeId: "orchestrate", event: "start", detail: "fan-out" })
+  push({ kind: "node", nodeId: "writer", parentId: "orchestrate", event: "start", detail: "stream answer" })
+  // The child's reasoning + reply STREAM — every delta TAGGED with its nodeId. Without the tag (the
+  // pre-W2 seam) these would grow the MAIN turn's reply; tagged, atoms.growNode routes them to the
+  // `writer` node's transient text (node.liveText), isolated from the transcript.
+  push({ kind: "thinkingDelta", text: "node reasoning… ", nodeId: "writer" })
+  for (const piece of NODE_STREAM_PIECES) push({ kind: "replyDelta", text: piece, nodeId: "writer" })
+  // The writer node is LEFT RUNNING so its TRANSIENT liveText stays live — a running node's tree
+  // one-liner shows "running…" (NO output, the render-target rule), so the streamed text is visible
+  // ONLY in the node detail pane (node-detail.tsx renders node.liveText while running), never inline
+  // in the tree and never in the main transcript. On a real `done` reduceNode would reconcile
+  // liveText onto the authoritative result (F9, the same transient→committed split the main reply
+  // uses in finalize()); here we hold the running state so the live routing is the captured proof.
+}
+
+// TEST-ONLY per-node-stream tool — replays a node-tagged streamed reply so the node-stream frame gate
+// (scripts/tui/node-stream.test.ts) asserts the sub-agent's stream lands UNDER its node, never in the
+// main transcript. Off in production (registered only under RLM_MOCK).
+export const MOCK_NODESTREAM_TOOL: AxFunction = {
+  name: "mock_nodestream",
+  description: "TEST ONLY: replay a node-tagged streamed reply (per-node stream routing) for the headless TUI harness.",
+  parameters: { type: "object", properties: {}, required: [] },
+  func: async (_args: unknown, extra?: Readonly<{ sessionId?: string; abortSignal?: AbortSignal }>) => {
+    feedNodeStreamNodes(getTurnEmit(extra?.sessionId))
+    return "streamed a sub-agent node (text routed under the node, not the transcript)"
+  },
+}
+
 // ── CANNED RATE-LIMIT RETRY FEED (rate-limit-visible frame gate) — a child node that hits a 429,
 // emits the `retry` NodeEvent (so it shows "⏳ rate-limited · retry 2/3 · 4s" WHILE backing off),
 // HOLDS (RLM_MOCK_DELAY_MS) so the frame gate captures the live retry state, then RECOVERS (done ✓).

@@ -19,10 +19,16 @@ export type TurnMeta = { readonly model: string; readonly ms: number; readonly t
 export type Msg =
   | { readonly kind: "you"; readonly text: string }
   // STREAMING: `thinking` holds the live/settled reasoning_content (rendered as a collapsible
-  // block that auto-folds once `text` starts). `streaming` marks the in-flight reply (drives
-  // the cursor + tells sendAtom to FINALIZE this message in place with the authoritative
-  // res.reply rather than append a duplicate). Both absent on a plain non-streaming reply.
-  | { readonly kind: "agent"; readonly text: string; readonly meta?: TurnMeta; readonly thinking?: string; readonly streaming?: boolean }
+  // block that auto-folds once `liveText`/`text` starts). `streaming` marks the in-flight reply
+  // (drives the cursor + tells sendAtom to FINALIZE this message with the authoritative res.reply
+  // rather than append a duplicate).
+  // LIVE/COMMITTED SPLIT (F9): `liveText` is the TRANSIENT in-flight streamed reply buffer — grow()
+  // appends each replyDelta HERE, never to `text`. The render shows `liveText ?? text` while
+  // streaming, so a coarse/wrong live stream is shown ONLY transiently. finalize() builds the
+  // canonical message FRESH (writes the authoritative reply to `text`, CLEARS liveText + streaming)
+  // — the committed message is never an in-place overwrite of stale stream text. `text` stays the
+  // canonical/committed field; on a settled non-streaming reply liveText is absent.
+  | { readonly kind: "agent"; readonly text: string; readonly meta?: TurnMeta; readonly thinking?: string; readonly streaming?: boolean; readonly liveText?: string | undefined }
   | {
       readonly kind: "tool"
       readonly id: string
@@ -59,6 +65,13 @@ export type OrchNode = {
   // in the transcript). The DETAIL pane (node-detail.tsx) renders these as Activity call
   // one-liners; the tree itself shows only the COUNT (cost meter), never the tools.
   readonly tools?: ReadonlyArray<Extract<Msg, { kind: "tool" }>>
+  // PER-NODE STREAM ROUTING + LIVE/COMMITTED SPLIT (F8/F9): the node's TRANSIENT streamed text —
+  // grow() appends a node-tagged replyDelta HERE (never to `result` or the main transcript), so a
+  // sub-agent that forwards with stream:true shows its live output under ITS node, isolated from the
+  // main reply. Reconciled to the authoritative `result` at the node's `done` event (reduceNode
+  // clears liveText), the SAME transient→committed shape the main reply uses (Msg.liveText). The
+  // node detail pane renders liveText while running; absent once the node settles.
+  readonly liveText?: string | undefined
   // ERROR BUBBLING (F5): how many of this node's OWN tools FAILED (a tool_result with isError).
   // Bubbled to the node one-liner (✗ N failed) + the row color so a running node with failed
   // child tools reads as warning, not healthy-muted, BEFORE the detail pane is opened. 0/absent
@@ -168,18 +181,37 @@ const patchNodeTools = (
   return { ...t, nodes: { ...t.nodes, [nodeId]: node }, roots }
 }
 
-// STREAMING: grow the in-flight streaming agent message in place (append to its reply text
-// or its thinking), or start one if the trailing message isn't a live stream. Thinking
-// arrives first (model reasons, then answers), so the first thinking_delta mints the message
-// with empty text; reply_delta then grows text and chat.tsx auto-folds the thinking block.
+// STREAMING (MAIN turn): grow the in-flight streaming agent message in place, or start one if the
+// trailing message isn't a live stream. Thinking arrives first (model reasons, then answers), so
+// the first thinking_delta mints the message; reply_delta then grows it and chat.tsx auto-folds the
+// thinking block.
+// LIVE/COMMITTED SPLIT (F9): a reply delta grows the TRANSIENT `liveText` buffer, NOT the canonical
+// `text` — so the in-flight stream and the committed message are SEPARATE fields. finalize() writes
+// the authoritative reply to `text` + clears liveText, building the committed message fresh (never
+// an in-place overwrite of stale stream text). The render shows `liveText ?? text` while streaming.
 const grow = (m: ReadonlyArray<Msg>, field: "reply" | "thinking", text: string): ReadonlyArray<Msg> => {
   const last = m[m.length - 1]
   if (last?.kind === "agent" && last.streaming === true) {
-    const next: Msg = field === "reply" ? { ...last, text: last.text + text } : { ...last, thinking: (last.thinking ?? "") + text }
+    const next: Msg = field === "reply" ? { ...last, liveText: (last.liveText ?? "") + text } : { ...last, thinking: (last.thinking ?? "") + text }
     return [...m.slice(0, -1), next]
   }
-  const fresh: Msg = field === "reply" ? { kind: "agent", text, streaming: true } : { kind: "agent", text: "", thinking: text, streaming: true }
+  const fresh: Msg = field === "reply" ? { kind: "agent", text: "", liveText: text, streaming: true } : { kind: "agent", text: "", thinking: text, streaming: true }
   return [...m, fresh]
+}
+
+// STREAMING (PER-NODE, F8): grow a NODE's TRANSIENT streamed text within the OrchTree. A node-tagged
+// replyDelta appends to node.liveText; a thinkingDelta is folded into the same transient buffer (a
+// node has no separate reasoning block in the tree — its detail pane shows the live text tail). This
+// is the routing that keeps a streaming sub-agent's output OFF the main transcript: it lands under
+// THAT node, reconciled to the authoritative `result` at the node's `done` event (reduceNode). The
+// node's `start` always precedes its stream; a stray pre-start delta synthesizes a running node so
+// the text is never dropped (mirrors patchNodeTools). Pure/immutable.
+const growNode = (t: OrchTree, nodeId: string, text: string): OrchTree => {
+  const prev = t.nodes[nodeId]
+  const base: OrchNode = prev ?? { id: nodeId, label: nodeId, phase: "", status: "running" }
+  const node: OrchNode = { ...base, liveText: (base.liveText ?? "") + text }
+  const roots = prev === undefined && node.parentId === undefined && !t.roots.includes(nodeId) ? [...t.roots, nodeId] : t.roots
+  return { ...t, nodes: { ...t.nodes, [nodeId]: node }, roots }
 }
 
 // Fold ONE non-terminal TurnEvent into the live transcript / orch tree. Mirrors the old
@@ -197,10 +229,14 @@ const applyEvent = (
       patch((m) => [...m, { kind: "agent", text: ev.text }])
       break
     case "reply_delta":
-      patch((m) => grow(m, "reply", ev.text))
+      // PER-NODE STREAM ROUTING (F8): a tagged delta (nodeId set) is a sub-agent NODE's stream —
+      // grow THAT node's transient text, NEVER the main transcript. Untagged ⇒ the main reply.
+      if (ev.nodeId !== undefined) orchPatch((t) => growNode(t, ev.nodeId!, ev.text))
+      else patch((m) => grow(m, "reply", ev.text))
       break
     case "thinking_delta":
-      patch((m) => grow(m, "thinking", ev.text))
+      if (ev.nodeId !== undefined) orchPatch((t) => growNode(t, ev.nodeId!, ev.text))
+      else patch((m) => grow(m, "thinking", ev.text))
       break
     case "tool_call": {
       const step: Msg = { kind: "tool", id: ev.id, name: ev.name, args: ev.args, status: "running", result: "", startedAt: Date.now() }
@@ -239,6 +275,9 @@ const mintNode = (prev: OrchNode | undefined, ev: Extract<TurnEvent, { type: "no
   ...(prev?.tokens !== undefined ? { tokens: prev.tokens } : {}),
   ...(prev?.tools !== undefined ? { tools: prev.tools } : {}),
   ...(prev?.failedTools !== undefined ? { failedTools: prev.failedTools } : {}),
+  // PER-NODE STREAM (F8): carry the transient streamed text across a re-start (it survives until the
+  // node settles, then reduceNode clears it onto the authoritative result).
+  ...(prev?.liveText !== undefined ? { liveText: prev.liveText } : {}),
 })
 
 // The OrchTree node reducer (start mints, delta/done/error update in place), unchanged from the
@@ -269,11 +308,15 @@ const reduceNode = (t: OrchTree, ev: Extract<TurnEvent, { type: "node" }>): Orch
   }
   const resultPatch = ev.detail !== undefined ? { result: ev.detail } : {}
   const tokensPatch = ev.event === "done" && ev.tokens !== undefined ? { tokens: ev.tokens } : {}
+  // LIVE/COMMITTED SPLIT (F9, per-node): on done/error the node SETTLES — clear the transient
+  // streamed text (liveText) onto the authoritative `result` (resultPatch), so a coarse live stream
+  // is never the committed node payload (the same transient→committed reconcile the main reply does
+  // in finalize()). A `delta` event leaves liveText intact (the stream is still in flight).
   const next: OrchNode =
     ev.event === "done"
-      ? { ...prev, ...parentPatch, status: "done", retry: undefined, ...resultPatch, ...tokensPatch }
+      ? { ...prev, ...parentPatch, status: "done", retry: undefined, liveText: undefined, ...resultPatch, ...tokensPatch }
       : ev.event === "error"
-        ? { ...prev, ...parentPatch, status: "error", retry: undefined, ...resultPatch }
+        ? { ...prev, ...parentPatch, status: "error", retry: undefined, liveText: undefined, ...resultPatch }
         : { ...prev, ...parentPatch, retry: undefined }
   const nodes = { ...t.nodes, [ev.nodeId]: next }
   const totalTokens = Object.values(nodes).reduce((sum, n) => sum + (n.tokens ?? 0), 0)
@@ -342,12 +385,15 @@ export const sendAtom = appRuntime.fn((message: string, get) =>
         finishReason: undefined,
         budget: result?.stopReason === "max_steps",
       }
-      // FINALIZE: reconcile a live-streamed message to the AUTHORITATIVE reply (correct even if
-      // the deltas were coarse/absent), stamp meta, clear `streaming`. Otherwise append a fresh row.
+      // FINALIZE (F9 live/committed split): build the committed message FRESH from the AUTHORITATIVE
+      // reply — write it to the canonical `text`, stamp meta, CLEAR `streaming` AND the transient
+      // `liveText` buffer. The committed message is never an in-place overwrite of stale stream text;
+      // the live buffer that grew during the turn is discarded in favor of the authoritative reply
+      // (correct even if the deltas were coarse/absent). Otherwise append a fresh row.
       patch((m) => {
         const last = m[m.length - 1]
         if (last?.kind === "agent" && last.streaming === true) {
-          return [...m.slice(0, -1), { ...last, text: reply, meta, streaming: false }]
+          return [...m.slice(0, -1), { ...last, text: reply, meta, streaming: false, liveText: undefined }]
         }
         return [...m, { kind: "agent", text: reply, meta }]
       })

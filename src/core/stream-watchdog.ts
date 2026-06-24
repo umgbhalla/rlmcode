@@ -70,11 +70,17 @@ type Pull = { readonly done: true } | { readonly value: unknown }
 // settle the same dead in-flight request); awaiting it would re-hang the turn. So cleanup is a
 // best-effort fire-and-forget `Effect.sync` finalizer (rejection swallowed). The control-flow exit
 // is the race alone. Returns the accumulated reply prose on a clean end.
+// PER-NODE STREAM ROUTING (F8): `nodeId` tags every replyDelta/thinkingDelta this drain emits with
+// the orchestration NODE that owns the stream. UNDEFINED (the main-turn default) ⇒ untagged deltas
+// grow the transcript reply; SET (a node forwarding with stream:true, threaded from runNode) ⇒ the
+// deltas carry the node id so atoms grows THAT node's transient text instead of corrupting the main
+// reply. The drain logic is identical either way — the tag just rides the emit.
 export const drainWithWatchdogEffect = (
   stream: AsyncIterable<unknown>,
   aborter: AbortController,
   emit: ActivitySink,
   limits: WatchdogLimits = DEFAULT_LIMITS,
+  nodeId?: string,
 ): Effect.Effect<string, Error> =>
   Effect.suspend(() => {
     const it = stream[Symbol.asyncIterator]()
@@ -125,10 +131,10 @@ export const drainWithWatchdogEffect = (
       if ("done" in next) return Effect.succeed(reply)
       firstStep = false // a chunk arrived → switch the idle guard from firstTokenMs to stallMs
       const delta = (next.value as StreamDelta).delta ?? {}
-      if (delta.thought) emit({ kind: "thinkingDelta", text: delta.thought })
+      if (delta.thought) emit({ kind: "thinkingDelta", text: delta.thought, nodeId })
       if (delta.reply) {
         reply += delta.reply
-        emit({ kind: "replyDelta", text: delta.reply })
+        emit({ kind: "replyDelta", text: delta.reply, nodeId })
       }
       return loop
     })
@@ -152,4 +158,5 @@ export const drainWithWatchdog = (
   stream: AsyncIterable<unknown>,
   aborter: AbortController,
   emit: ActivitySink,
-): Promise<string> => Effect.runPromise(drainWithWatchdogEffect(stream, aborter, emit))
+  nodeId?: string,
+): Promise<string> => Effect.runPromise(drainWithWatchdogEffect(stream, aborter, emit, DEFAULT_LIMITS, nodeId))

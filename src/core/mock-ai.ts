@@ -104,6 +104,21 @@ const wantsRateLimit = (req: Readonly<AxChatRequest<unknown>>): boolean => {
   return last !== undefined && typeof last.content === "string" && /rate.?limit/i.test(last.content)
 }
 
+// NODE-STREAM variant (W2/F8): when the user asks to stream a node, the mock calls the test-only
+// `mock_nodestream` tool (mock.ts) — it replays a node-TAGGED streamed reply, so the node-stream
+// frame gate (scripts/tui/node-stream.test.ts) asserts the sub-agent's stream routes UNDER its node
+// (node.liveText), NEVER into the main transcript reply (the F8 corruption). Keyed off the prompt.
+const MOCK_NODESTREAM_TOOL = {
+  id: "call_mock_nodestream",
+  type: "function" as const,
+  function: { name: "mock_nodestream", params: JSON.stringify({}) },
+}
+const wantsNodeStream = (req: Readonly<AxChatRequest<unknown>>): boolean => {
+  const users = req.chatPrompt.filter((m) => m.role === "user")
+  const last = users[users.length - 1]
+  return last !== undefined && typeof last.content === "string" && /node.?stream/i.test(last.content)
+}
+
 // GROUP variant: when the user message asks to explore, the mock scripts THREE CONSECUTIVE
 // explore tool calls (read_file → glob → grep) in ONE tool-loop step. ax executes all three,
 // appends their results to memory, then calls again → the final reply. These land as three
@@ -188,7 +203,9 @@ const scriptedChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResp
           ? [MOCK_DIFF_TOOL]
           : wantsRateLimit(req)
             ? [MOCK_RATELIMIT_TOOL]
-            : [MOCK_TOOL]
+            : wantsNodeStream(req)
+              ? [MOCK_NODESTREAM_TOOL]
+              : [MOCK_TOOL]
   // On the tool-call step of an explore turn, surface the cluster's calls to the activity bus
   // (the mock service doesn't, see emitGroupCalls) so the three explore steps render + group.
   if (!hasToolResult && wantsGroup(req)) emitGroupCalls()
@@ -246,7 +263,7 @@ const streamReply = (): ReadableStream<AxChatResponse> => {
 // streams; the tool-call step and orch/rate-limit turns stay plain (their reply is the orch tree,
 // not streamed prose). Returns a ReadableStream only where the live render is under test.
 const scriptedStreamChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResponse | ReadableStream<AxChatResponse>> =>
-  hasCurrentTurnToolResult(req) && !wantsOrch(req) && !wantsGroup(req) && !wantsRateLimit(req) && !wantsDiff(req)
+  hasCurrentTurnToolResult(req) && !wantsOrch(req) && !wantsGroup(req) && !wantsRateLimit(req) && !wantsDiff(req) && !wantsNodeStream(req)
     ? Promise.resolve(streamReply())
     : scriptedChat(req)
 

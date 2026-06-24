@@ -16,15 +16,22 @@ export type Activity =
   | { readonly kind: "tool"; readonly id: string; readonly name: string; readonly args: string; readonly nodeId?: string | undefined } // call, in-flight
   | { readonly kind: "result"; readonly id: string; readonly result: string; readonly isError: boolean; readonly nodeId?: string | undefined } // updates the call in place
   | { readonly kind: "node"; readonly nodeId: string; readonly event: string; readonly parentId?: string | undefined; readonly detail?: string | undefined; readonly tokens?: number | undefined } // orchestration node lifecycle (orch.emit) — `tokens` is the cost-meter per-node usage on a done event
-  // STREAMING (stream:true): live deltas of the MAIN turn's final reply + reasoning, fed from
-  // ax's per-chunk logger (ChatResponseResults / …StreamingDoneResult). `text` is the chunk
-  // piece; atoms appends it to the in-flight agent message (reply grows / thinking fills). Only
-  // the MAIN turn emits these (the per-node logger carries a nodeId and does NOT) so a node's
-  // streamed text never leaks into the transcript. The final reply is reconciled to the
-  // authoritative turn() result at turn end, so a coarse/absent live stream degrades to
-  // "reply appears at the end" — never wrong, just less live.
-  | { readonly kind: "replyDelta"; readonly text: string } // a piece of the streamed final reply
-  | { readonly kind: "thinkingDelta"; readonly text: string } // a piece of the streamed reasoning_content
+  // STREAMING (stream:true): live deltas of a turn's final reply + reasoning, fed from ax's
+  // per-chunk logger (ChatResponseResults / …StreamingDoneResult). `text` is the chunk piece;
+  // atoms appends it to the in-flight message (reply grows / thinking fills).
+  //
+  // PER-NODE STREAM ROUTING (F8): the OPTIONAL `nodeId` tags a delta with the orchestration NODE
+  // that produced it — the SAME routing seam tool/result already carry. UNSET ⇒ the MAIN turn (the
+  // unchanged default; deltas grow the transcript's in-flight reply). SET ⇒ a sub-agent node's own
+  // stream: atoms grows THAT node's TRANSIENT streamed text (node.liveText), reconciled to the
+  // authoritative node result at its `done` event — so a node's streamed text NEVER leaks into the
+  // main transcript. The tag is supplied by drainWithWatchdog's nodeId param (threaded from runNode
+  // when a node forwards with stream:true). Without the tag, a streaming node would corrupt the main
+  // reply (the latent-critical F8 seam) — this is the routing that closes it. The final reply is
+  // reconciled to the authoritative turn() result at turn end, so a coarse/absent live stream
+  // degrades to "reply appears at the end" — never wrong, just less live.
+  | { readonly kind: "replyDelta"; readonly text: string; readonly nodeId?: string | undefined } // a piece of a streamed final reply
+  | { readonly kind: "thinkingDelta"; readonly text: string; readonly nodeId?: string | undefined } // a piece of streamed reasoning_content
 
 // Tool-call args as a string for the UI. ax hands params as a string or object; we
 // stringify the object case. (Same logic the main-turn liveLogger uses — kept here so

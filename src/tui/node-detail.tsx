@@ -89,6 +89,12 @@ export function NodeDetail({ node, frame }: { node: OrchNode; frame: string }) {
       <text fg={theme.accent} selectable={false}>{node.label}</text>
       <StatusLine node={node} frame={frame} />
       <CostLine tokens={node.tokens} total={total} failed={node.failedTools ?? 0} />
+      {/* LIVE STREAM (F8 per-node): while a node forwards with stream:true, its transient streamed
+          text grows here (atoms growNode) and shows as a live tail — isolated from the main
+          transcript. Cleared to `result` once the node settles, so it only renders WHILE running. */}
+      {node.status === "running" && node.liveText ? (
+        <text fg={theme.subtext} selectable={false}>{oneLine(node.liveText, 80)}</text>
+      ) : null}
       {/* RESULT (settled, non-error): a single muted line — the node's human payload, clamped. */}
       {showResult ? <text fg={theme.subtext} selectable={false}>{oneLine(node.result!, 80)}</text> : null}
       {/* ACTIVITY: "last N of M tool calls" header + the windowed tail of CALL one-liners. */}
