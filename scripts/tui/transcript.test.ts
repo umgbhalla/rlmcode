@@ -2,10 +2,11 @@
 // FRAME GATE — TRANSCRIPT MATURITY (the matured tool render + reasoning-collapse).
 //
 // Drives the TRANSCRIPT variant of the mock (mock-ai.ts wantsTranscript → the mock calls the
-// test-only `mock_transcript` tool, which replays a per-tool cluster owned by ONE still-running
-// `worker` subagent NODE): a SETTLED multi-line bash, a SETTLED read_file, a SETTLED FAILED bash,
-// and a RUNNING grep (a tool CALL with no result). Through the REAL turn loop + activity bus +
-// atoms node-routing, these render via the MATURED tool-view.tsx, so the CAPTURED settled FRAME
+// test-only `mock_transcript` tool, which replays a per-tool cluster as the MAIN TURN's own steps):
+// a SETTLED multi-line bash, a SETTLED read_file, a SETTLED FAILED bash, and a RUNNING grep (a
+// tool CALL with no result). The W1 render overhaul moved a NODE's tools out of the tree into its
+// detail pane, so the matured block/collapse/✗-card render is now the MAIN-TURN surface — these
+// land as turn STEPS. Expanding the turn (Enter on the steps header) reveals them via the MATURED
 // proves the three render MODES + the output-collapse + the reasoning-collapse the SPEC asks for:
 //   (1) INLINE — the running grep is a dim one-line "Search(TODO)  running…" with NO body; a
 //       SETTLED read_file is likewise inline ("Read(src/big.ts)  12 lines") — its summary says
@@ -28,8 +29,12 @@ await report("transcript.test", async (a) => {
     await d.type("n")
     await d.waitFor((f) => /message kimi/.test(f), { label: "composer" })
 
-    // ── drive the TRANSCRIPT variant: the per-tool cluster under the running `worker` node ──
+    // ── drive the TRANSCRIPT variant: the per-tool cluster as the main turn's STEPS ──────────
     await d.type("show the transcript demo")
+    await d.key("Enter")
+    // The matured tool rows live under the COLLAPSED "▸ N steps" header — expand it first. The
+    // focus ring starts on turn:0 (the steps header), so Enter on the settled turn opens it.
+    await d.waitFor((f) => /❯ ▸ \d+ steps/.test(f), { label: "settled turn steps header focused", timeoutMs: 40000 })
     await d.key("Enter")
     // Gate on a fully-settled frame carrying EVERY mode at once: the bash collapse footer (+2
     // more), the inline read row, the settled error row, AND the still-running inline grep. A
@@ -68,7 +73,7 @@ await report("transcript.test", async (a) => {
     // header (the body hidden by default); the duration summary proves it settled.
     a.has(settled, /▸ Thought · \d/, "the settled reasoning folds to a collapsed 'Thought · <duration>' header")
 
-    // EXPANDABLE — Tab rings focus onto the bash row (node:worker, then its owned tools), then
+    // EXPANDABLE — Tab rings focus onto the bash row (turn:0 then its tool steps), then
     // Enter toggles it OPEN, revealing the hidden lines 11-12. waitFor (a STABLE frame) gates each
     // step so Enter acts on the committed focus state (no read-then-act race).
     let tabs = 0

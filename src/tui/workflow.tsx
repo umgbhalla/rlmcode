@@ -11,6 +11,7 @@
 // injected renderRow so the per-node ToolView wiring stays in chat.tsx.
 import type { OrchTree } from "./atoms.ts"
 import { flatten, type Row as OrchRow } from "./orch-tree.ts"
+import { NodeDetail } from "./node-detail.tsx"
 import { theme } from "./theme.ts"
 
 // VELOCITY CAP — max fan-out children shown per node at once (running + most-recent
@@ -58,17 +59,14 @@ export const orchSigma = (orch: OrchTree, fmtTokens: FmtTokens): string => {
   return parts.join(" · ")
 }
 
-// Orchestration rows that join the Tab focus ring, in render order. A collapsible node
-// (hasDetail) exposes a `node:<id>` key so it can be collapsed/expanded from the keyboard;
-// each EXPANDED node's owned tools then expose a `tool:<id>` key (same key as transcript
-// tools). Collapsed nodes are absent from `rows` (flatten omits their subtree) so their
-// tools stay out of the ring. Empty for a non-workflow turn (computeShowOrch gates the call).
+// Orchestration rows that join the Tab focus ring, in render order. Each selectable node
+// (hasDetail) exposes a `node:<id>` key — arrow/Tab drill-down SELECTS it, Enter opens its detail
+// pane (render-target tier 2). A node's OWNED TOOLS are NO LONGER focusable tree rows (they don't
+// render inline anymore — they live in the detail pane), so they no longer join the ring; that's
+// what stranded the focus cursor on invisible tool rows. Empty for a non-workflow turn.
 export const orchFocusables = (rows: ReadonlyArray<OrchRow>): Array<string> => {
   const out: Array<string> = []
-  for (const r of rows) {
-    if (r.hasDetail) out.push(`node:${r.id}`)
-    if (r.expanded) for (const m of r.tools) out.push(`tool:${m.id}`)
-  }
+  for (const r of rows) if (r.hasDetail) out.push(`node:${r.id}`)
   return out
 }
 
@@ -86,24 +84,34 @@ export function WorkflowPart({
   rows,
   fmtTokens,
   indent,
+  detailKey,
+  frame,
   renderRow,
 }: {
   orch: OrchTree
   rows: ReadonlyArray<OrchRow>
   fmtTokens: FmtTokens
   indent: number
+  // DETAIL PANE (render-target tier 2): the id of the node whose detail pane is OPEN (null = none).
+  // When set AND the node lives in this tree, the NodeDetail pane renders under the Σ footer.
+  detailKey: string | null
+  frame: string
   renderRow: (row: OrchRow) => React.ReactNode
 }) {
+  const detailNode = detailKey !== null ? orch.nodes[detailKey] : undefined
   return (
     <box flexDirection="column" style={{ marginTop: 1, paddingLeft: 1 }}>
       <text fg={theme.muted}>orchestration</text>
-      {/* VELOCITY UNICODE TREE: one flat <text> per flattened Row, connectors precomputed
-          by flatten() — no nested padding boxes. */}
+      {/* COMPACT NODE TREE: one one-liner per flattened Row (status dot + label + RIGHT-ALIGNED
+          cost meter), connectors precomputed by flatten() — NO tool output inline (tier 1). */}
       <box flexDirection="column" style={{ paddingLeft: indent }}>
         {rows.map((row) => renderRow(row))}
         {/* Σ footer: live run total — tokens · nodes · errors (COST-METER total preserved). */}
         <text fg={theme.dim}>{orchSigma(orch, fmtTokens)}</text>
       </box>
+      {/* DETAIL PANE (tier 2): status + cost + Activity (last-N tool CALLS, no output) for the
+          selected+Entered node. Renders ONLY when a node in THIS tree is open. */}
+      {detailNode ? <NodeDetail node={detailNode} frame={frame} /> : null}
     </box>
   )
 }

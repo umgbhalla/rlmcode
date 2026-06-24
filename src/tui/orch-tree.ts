@@ -9,10 +9,13 @@
 // glyph/color, and the ▾/▸ expander state. The owning chat.tsx renders the tools
 // under the node, indented by `bodyPrefix` so they hang inside the tree.
 import type { Msg, OrchNode, OrchTree } from "./atoms.ts"
-import { getIconShape } from "./icons.ts"
 import { theme } from "./theme.ts"
 
 type ToolMsg = Extract<Msg, { kind: "tool" }>
+
+// COST-METER token formatter for a node's RIGHT-ALIGNED cost meter ("30.1k tok" / "742 tok").
+// Kept local (a copy of chat-model.fmtTokens) so orch-tree stays a pure leaf with no UI imports.
+const fmtTok = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k tok` : `${n} tok`)
 
 // One flattened tree row = one orchestration node. `prefix` is the precomputed
 // connector string (├─ / └─ / │ continuation / blanks); `bodyPrefix` is the
@@ -28,19 +31,34 @@ export type Row = {
   readonly label: string
   readonly summary: string
   readonly tokens: number | undefined
-  readonly tools: ReadonlyArray<ToolMsg> // PER-NODE TOOL ROUTING: this node's OWN tool steps
-  readonly toolsLabel: string // collapsed-only "N tools" summary (empty when none)
+  readonly tools: ReadonlyArray<ToolMsg> // PER-NODE TOOL ROUTING: this node's OWN tool steps (DETAIL pane only)
+  readonly cost: string // RIGHT-ALIGNED cost meter: "30.1k tok · 22 tools" (empty when no cost yet)
+  readonly failed: number // ERROR BUBBLING (F5): count of this node's FAILED child tools (0 = none)
+  readonly phase: string // the node's agentType/phase descriptor (detail-pane status line)
+  readonly status: OrchNode["status"]
   readonly hasKids: boolean
-  readonly hasDetail: boolean // expandable = owns tools OR has child nodes
+  readonly hasDetail: boolean // selectable = owns tools OR has child nodes (drill-down)
   readonly expanded: boolean
 }
 
-const glyphOf = (s: OrchNode["status"]) => getIconShape(s === "running" ? "running" : s === "error" ? "error" : "done")
-// RATE-LIMIT VISIBILITY: a node currently backing off (running + a `retry` status) reads in the
-// WARNING color (yellow), not the muted running color — so the whole row + its "⏳ rate-limited…"
-// summary stand out as throttled/waiting, distinct from a node that's actively working.
+// STATUS DOT (render-target): a node is a sub-agent, so its status reads as a single dot —
+// `●` running (animated to the spinner frame in chat.tsx, like a live agent), `✓` done, `✗`
+// error. (`○` pending exists in the union space but the engine starts a node `running`.) The
+// RUNNING dot is the sentinel chat.tsx's NodeHeader swaps for the live spinner frame.
+export const RUNNING_DOT = "●"
+const glyphOf = (s: OrchNode["status"]) => (s === "error" ? "✗" : s === "done" ? "✓" : RUNNING_DOT)
+// RATE-LIMIT VISIBILITY + ERROR BUBBLING (F5): error status → red; done → ok; a node currently
+// backing off (running + a `retry` status) OR with FAILED child tools reads WARNING (yellow), not
+// the muted running color — so a node that's throttled or has failing tools stands out BEFORE its
+// detail pane is opened. A clean running node stays muted.
 const colorOf = (n: OrchNode) =>
-  n.status === "error" ? theme.error : n.status === "done" ? theme.ok : n.retry ? theme.warning : theme.muted
+  n.status === "error"
+    ? theme.error
+    : n.status === "done"
+      ? theme.ok
+      : n.retry || (n.failedTools ?? 0) > 0
+        ? theme.warning
+        : theme.muted
 
 // A node's settled payload is often a serialized object ({"thought":"…","reply":"…"})
 // that, dumped raw into the summary cell, leaks `{"` braces and JSON noise into the
@@ -73,10 +91,17 @@ const summaryOf = (n: OrchNode): string => {
   return humanText(n.result ?? n.phase ?? "")
 }
 
-// Collapsed-only per-node meta: owned-tool count (this node OWNS its tools).
-const toolsLabelOf = (n: OrchNode): string => {
+// RIGHT-ALIGNED COST METER (render-target): the node's "Nk tok · N tools" — its OWN token spend
+// and the count of tool calls it OWNS (a node IS a sub-agent). Either part is dropped when zero,
+// so a tokenless node with tools shows "3 tools" and a tool-less settled node shows "1.2k tok".
+// Empty when the node has neither (a fresh running node). This is the ONLY per-node meta the
+// compact tree shows — the tools themselves live in the detail pane, never inline.
+const costMeterOf = (n: OrchNode): string => {
+  const parts: Array<string> = []
+  if (typeof n.tokens === "number" && n.tokens > 0) parts.push(fmtTok(n.tokens))
   const c = n.tools?.length ?? 0
-  return c > 0 ? `${c} tool${c > 1 ? "s" : ""}` : ""
+  if (c > 0) parts.push(`${c} tool${c === 1 ? "" : "s"}`)
+  return parts.join(" · ")
 }
 
 // parent->children index in first-seen (insertion) order; only edges whose parent
@@ -113,13 +138,16 @@ const moreRow = (id: string, prefix: string, hidden: number): Row => ({
   id,
   prefix,
   bodyPrefix: "",
-  glyph: getIconShape("more"),
+  glyph: "┄",
   color: theme.faint,
   label: `+${hidden} earlier`,
   summary: "",
   tokens: undefined,
   tools: [],
-  toolsLabel: "",
+  cost: "",
+  failed: 0,
+  phase: "",
+  status: "running",
   hasKids: false,
   hasDetail: false,
   expanded: true,
@@ -153,8 +181,13 @@ export const flatten = (orch: OrchTree, expNodes: ReadonlySet<string>, maxChildr
     const children = kids[id] ?? []
     const hasKids = children.length > 0
     const tools = (n.tools ?? []) as ReadonlyArray<ToolMsg>
-    const hasDetail = hasKids || tools.length > 0
-    const expanded = n.status === "running" || expNodes.has(id) || !hasDetail
+    // TREE EXPANSION now gates ONLY the child subtree (tools no longer render inline — they live
+    // in the detail pane). A childless node is trivially "expanded" (nothing to fold). A running
+    // node auto-expands so the live fan-out shows; a settled parent collapses via expNodes.
+    // hasDetail = the node is SELECTABLE for a drill-down detail pane (owns tools OR has children
+    // OR carries phase/result worth a pane) — every real node qualifies.
+    const hasDetail = hasKids || tools.length > 0 || n.phase.length > 0 || n.result !== undefined
+    const expanded = n.status === "running" || expNodes.has(id) || !hasKids
     // The stem children/body hang under: a root adds no column; a non-root extends the
     // ancestor stem by its own "│  "/"   " cell (open vs closed branch).
     const childAncestors = isRoot ? ancestors : [...ancestors, isLast]
@@ -168,7 +201,10 @@ export const flatten = (orch: OrchTree, expNodes: ReadonlySet<string>, maxChildr
       summary: summaryOf(n),
       tokens: n.tokens,
       tools,
-      toolsLabel: toolsLabelOf(n),
+      cost: costMeterOf(n),
+      failed: n.failedTools ?? 0,
+      phase: n.phase,
+      status: n.status,
       hasKids,
       hasDetail,
       expanded,

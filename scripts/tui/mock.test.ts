@@ -70,9 +70,9 @@ await (async () => {
     const rows = flatten(tree, new Set(tree.roots)) // expand all so the full tree shows
     const frame = rows.map((r) => `${r.prefix}${r.glyph} ${r.label}`).join("\n")
     const want = [
-      "◌ orchestrate",
+      "● orchestrate",
       "├─ ✓ plan",
-      "├─ ◌ research",
+      "├─ ● research",
       "│  ├─ ✓ auth",
       "│  ├─ ✓ db",
       "│  └─ ✗ api",

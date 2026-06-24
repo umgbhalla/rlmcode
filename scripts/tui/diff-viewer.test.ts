@@ -32,6 +32,11 @@ const driveDiff = async (d: Driver): Promise<string> => {
   await d.waitFor((f) => /message kimi/.test(f), { label: "composer" })
   await d.type("show me a diff please")
   await d.key("Enter")
+  // The matured diff rows live under the COLLAPSED "▸ N steps" header (the W1 overhaul made a node's
+  // tools render in its detail pane, so the main turn's own STEPS carry the native <diff>). The focus
+  // ring starts on turn:0 (the steps header), so Enter on the settled turn opens it.
+  await d.waitFor((f) => /❯ ▸ \d+ steps/.test(f), { label: "settled turn steps header focused", timeoutMs: 40000 })
+  await d.key("Enter")
   // Gate on a fully-settled frame carrying the WHOLE diff render at once: the edit row header, BOTH
   // of the edit's native -/+ lines (line-number + sign + stripped content), the edit's trailing
   // context, the write header, AND BOTH of the write's all-add lines. A native <diff> lays its lines

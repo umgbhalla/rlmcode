@@ -34,6 +34,10 @@ const driveDiff = async (d: Driver): Promise<string> => {
   await d.waitFor((f) => /message kimi/.test(f), { label: "composer" })
   await d.type("show me a diff please")
   await d.key("Enter")
+  // Expand the turn STEPS (W1 overhaul: a node's tools moved to its detail pane, so the native
+  // <diff> now rides the main turn's own steps under the collapsed "▸ N steps" header).
+  await d.waitFor((f) => /❯ ▸ \d+ steps/.test(f), { label: "settled turn steps header focused", timeoutMs: 40000 })
+  await d.key("Enter")
   return d.waitFor(
     (f) =>
       /Update\(src\/greet\.py\)/.test(f) &&

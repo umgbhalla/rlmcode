@@ -94,6 +94,7 @@ export const interactionSig = (
   expTools: ReadonlySet<string>,
   expNodes: ReadonlySet<string>,
   focusedKey: string | undefined,
+  detailKey: string | null,
 ): string => {
   const keys = turnRowKeys(t, expNodes)
   const keySet = new Set(keys)
@@ -101,7 +102,10 @@ export const interactionSig = (
   const openNodes = keys.filter((k) => k.startsWith("node:") && expNodes.has(k.slice(5))).toSorted()
   // Focus only matters if it lands on one of THIS turn's rows; otherwise it's "" for every such turn.
   const focus = focusedKey !== undefined && keySet.has(focusedKey) ? focusedKey : ""
-  return `${expanded ? 1 : 0}|${openTools.join(",")}|${openNodes.join(",")}|${focus}`
+  // DETAIL PANE: an OPEN node detail pane belongs to THIS turn iff its node:<id> is one of this
+  // turn's keys; opening/closing it then repaints this turn (and only it), so the pane appears.
+  const detail = detailKey !== null && keySet.has(`node:${detailKey}`) ? detailKey : ""
+  return `${expanded ? 1 : 0}|${openTools.join(",")}|${openNodes.join(",")}|${focus}|${detail}`
 }
 
 // The props the comparator inspects (a subset of TurnView's props — the callbacks are excluded
@@ -112,6 +116,7 @@ export type MemoProps = {
   readonly expanded: boolean
   readonly expTools: ReadonlySet<string>
   readonly expNodes: ReadonlySet<string>
+  readonly detailKey: string | null
   readonly focusedKey: string | undefined
   readonly cols: number
   // The shared SyntaxStyle identity. App rebuilds it ONLY on a theme switch (useMemo keyed on the
@@ -133,7 +138,7 @@ export const turnPropsEqual = (prev: MemoProps, next: MemoProps): boolean => {
   if (prev.syntaxStyle !== next.syntaxStyle) return false
   if (contentKey(prev.t) !== contentKey(next.t)) return false
   return (
-    interactionSig(prev.t, prev.expanded, prev.expTools, prev.expNodes, prev.focusedKey) ===
-    interactionSig(next.t, next.expanded, next.expTools, next.expNodes, next.focusedKey)
+    interactionSig(prev.t, prev.expanded, prev.expTools, prev.expNodes, prev.focusedKey, prev.detailKey) ===
+    interactionSig(next.t, next.expanded, next.expTools, next.expNodes, next.focusedKey, next.detailKey)
   )
 }

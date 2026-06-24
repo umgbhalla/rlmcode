@@ -18,7 +18,7 @@ import { history } from "./history.ts"
 import { makeSyntaxStyle, resolveTheme, theme } from "./theme.ts"
 import { ThemeProvider, useTheme, useThemeSwitcher } from "./theme-context.tsx"
 import { focusGutter, ToolView } from "./tool-view.tsx"
-import type { Row as OrchRow } from "./orch-tree.ts"
+import { type Row as OrchRow, RUNNING_DOT } from "./orch-tree.ts"
 import { ActionBar, shortCwd } from "./shell.tsx"
 import { Composer, useComposerFocus } from "./composer.tsx"
 import { AssistantReply, ErrorCard, QueuedCard, ThinkingPart, UserCard } from "./messages.tsx"
@@ -82,6 +82,7 @@ function TurnViewImpl({
   expanded,
   expTools,
   expNodes,
+  detailKey,
   focusedKey,
   cols,
   frame,
@@ -95,6 +96,7 @@ function TurnViewImpl({
   expanded: boolean
   expTools: Set<string>
   expNodes: ReadonlySet<string>
+  detailKey: string | null
   focusedKey: string | undefined
   cols: number
   frame: string
@@ -179,6 +181,8 @@ function TurnViewImpl({
           rows={workflowRows(t.workflow, expNodes)}
           fmtTokens={fmtTokens}
           indent={INDENT}
+          detailKey={detailKey}
+          frame={frame}
           renderRow={renderNode}
         />
       )}
@@ -199,30 +203,20 @@ const TurnView = memo(TurnViewImpl, turnPropsEqual)
 // steps hung under its continuation stem. Collapsible — running nodes auto-expand so
 // you watch the fan-out live; settled subtrees collapse on click (omitted by flatten).
 
-// COST-METER per-node token badge — its own component so the guard/format logic lives
-// outside NodeRow (keeps NodeRow under the cyclomatic budget). Renders nothing for an
-// unsettled / untracked node.
-function NodeTokens({ tokens, hot }: { tokens: number | undefined; hot: boolean }) {
-  if (typeof tokens !== "number" || tokens <= 0) return null
-  return <span fg={hot ? theme.muted : theme.faint}>{`  ${fmtTokens(tokens)}`}</span>
-}
-
-// Shared props for NodeRow + its owned-tool body.
+// Shared props for the compact NodeRow one-liner. The detail pane (owned tools, activity) is a
+// SEPARATE surface keyed off selection+Enter, so NodeRow no longer threads tool/cols/style props.
 type NodeRowProps = {
   row: OrchRow
-  expTools: Set<string>
   onToggle: (id: string) => void
-  onToggleTool: (id: string) => void
   focusedKey: string | undefined
-  cols: number
   frame: string
-  syntaxStyle: unknown // the shared SyntaxStyle (rebuilt on a theme switch) for the node's owned-tool diffs
 }
 
-// One flattened node header line: connector prefix + glyph + label + summary + token
-// badge + collapsed-only tool-count + ▾/▸. The prefix (├─/└─/│/blanks) renders in a
-// muted guide color so the tree structure reads at a glance. Clickable/hoverable when
-// the node has detail (owns tools or has children) — toggles its collapse state.
+// COMPACT NODE ONE-LINER (render-target tier 1): connector prefix + status dot + label +
+// summary, with the cost meter "Nk tok · N tools" RIGHT-ALIGNED in its own flexed cell, plus a
+// ✗ N failed badge when child tools failed (F5). NO tool output, NO body — a node IS a sub-agent,
+// so the tree shows only its STRUCTURE + STATUS; its tools live in the DETAIL pane. Clickable
+// (mouse) toggles the child subtree; keyboard Enter opens the detail pane (chat.tsx focus ring).
 function NodeHeader({ row, hot, focused, frame, setHover, onToggle }: {
   row: OrchRow
   hot: boolean
@@ -231,56 +225,41 @@ function NodeHeader({ row, hot, focused, frame, setHover, onToggle }: {
   setHover: (v: boolean) => void
   onToggle: () => void
 }) {
-  const { prefix, color, glyph, label, summary, tokens, toolsLabel, hasDetail, expanded } = row
-  const mark = glyph === "◌" ? frame : glyph // running nodes animate (was a motionless ◌)
+  const { prefix, color, glyph, label, summary, cost, failed, hasKids, expanded } = row
+  const mark = glyph === RUNNING_DOT ? frame : glyph // running nodes animate the live dot
   return (
-    <text
-      fg={color}
-      selectable={false}
-      onMouseDown={(hasDetail ? onToggle : undefined) as any}
-      onMouseOver={(hasDetail ? (() => setHover(true)) : undefined) as any}
-      onMouseOut={(() => setHover(false)) as any}
-    >
-      {focusGutter(focused)}
-      {prefix ? <span fg={hot ? theme.muted : theme.dim}>{prefix}</span> : null}
-      <span fg={hot ? theme.white : color}>{`${mark} `}</span>
-      <span fg={hot ? theme.white : theme.text}>{label}</span>
-      {summary ? <span fg={hot ? theme.subtext : theme.muted}>{`  ${oneLine(summary)}`}</span> : null}
-      <NodeTokens tokens={tokens} hot={hot} />
-      {/* collapsed-only: show the owned-tool count so a node's work is visible without expanding */}
-      {!expanded && toolsLabel ? <span fg={hot ? theme.subtext : theme.muted}>{`  ${toolsLabel}`}</span> : null}
-      {hasDetail ? <span fg={hot ? theme.text : theme.muted}>{expanded ? "  ▾" : "  ▸"}</span> : null}
-    </text>
+    <box flexDirection="row">
+      {/* LEFT COLUMN — the clean readable label: gutter + connector + dot + label + summary. */}
+      <text
+        fg={color}
+        selectable={false}
+        style={{ flexGrow: 1, flexShrink: 1 }}
+        onMouseDown={(hasKids ? onToggle : undefined) as any}
+        onMouseOver={(() => setHover(true)) as any}
+        onMouseOut={(() => setHover(false)) as any}
+      >
+        {focusGutter(focused)}
+        {prefix ? <span fg={hot ? theme.muted : theme.dim}>{prefix}</span> : null}
+        <span fg={hot ? theme.white : color}>{`${mark} `}</span>
+        <span fg={hot ? theme.white : theme.text}>{label}</span>
+        {summary ? <span fg={hot ? theme.subtext : theme.muted}>{`  ${oneLine(summary)}`}</span> : null}
+        {failed > 0 ? <span fg={theme.error}>{`  ✗ ${failed} failed`}</span> : null}
+        {hasKids ? <span fg={hot ? theme.text : theme.muted}>{expanded ? "  ▾" : "  ▸"}</span> : null}
+      </text>
+      {/* RIGHT-ALIGNED COST METER — "Nk tok · N tools" so the left label column stays clean. */}
+      {cost ? <text fg={hot ? theme.muted : theme.faint} selectable={false}>{cost}</text> : null}
+    </box>
   )
 }
 
-// Render one flattened tree row: its header line, then (when expanded) its OWNED tool
-// steps, each reusing ToolView and indented under the node's continuation stem so the
-// per-node tool ring hangs INSIDE the tree. Child nodes are NOT rendered here — flatten
-// already emitted them as their own rows; this keeps the tree a flat <text> list.
+// Render one flattened tree row as a COMPACT one-liner. Child nodes are their own rows (flatten
+// emitted them); owned tools do NOT render here (they live in the detail pane, opened on Enter).
 function NodeRow(p: NodeRowProps) {
   const [hover, setHover] = useState(false)
   const { row } = p
   const hot = row.hasDetail && hover
   const focused = p.focusedKey === `node:${row.id}`
-  return (
-    <box flexDirection="column">
-      <NodeHeader row={row} hot={hot} focused={focused} frame={p.frame} setHover={setHover} onToggle={() => p.onToggle(row.id)} />
-      {row.expanded && row.tools.length > 0 && (
-        <box flexDirection="column">
-          {row.tools.map((m) => (
-            <box key={m.id} flexDirection="row">
-              {/* align owned tools under their node: the 2-cell focus gutter + body stem + connector */}
-              <text fg={theme.dim} selectable={false}>{`  ${row.bodyPrefix}   `}</text>
-              <box style={{ flexGrow: 1, flexShrink: 1 }}>
-                <ToolView m={m} expanded={p.expTools.has(m.id)} focused={p.focusedKey === `tool:${m.id}`} cols={p.cols} frame={p.frame} syntaxStyle={p.syntaxStyle} onToggle={() => p.onToggleTool(m.id)} />
-              </box>
-            </box>
-          ))}
-        </box>
-      )}
-    </box>
-  )
+  return <NodeHeader row={row} hot={hot} focused={focused} frame={p.frame} setHover={setHover} onToggle={() => p.onToggle(row.id)} />
 }
 
 // Wrap the focus cursor over the focusable-row ring (empty ring ⇒ none). Pure; extracted
@@ -333,6 +312,10 @@ function App() {
 
   const [expTurns, setExpTurns] = useState<Set<number>>(new Set())
   const [expTools, setExpTools] = useState<Set<string>>(new Set())
+  // DETAIL PANE (render-target tier 2): the id of the node whose detail pane is OPEN (null = none).
+  // Enter on a focused node:<id> OPENS its pane (status + Activity = last-N tool CALLS, no output);
+  // Esc / Enter-again CLOSES it. The pane renders inline under the tree (node-detail.tsx).
+  const [detailKey, setDetailKey] = useState<string | null>(null)
   const { expNodes, toggleNode } = useNodeExpansion(state.activeId)
   const [focus, setFocus] = useState(0) // keyboard focus cursor over expandable rows (Tab cycles)
   // prompt history cursor + the live draft stashed when we start recalling
@@ -390,6 +373,7 @@ function App() {
     setExpTools(new Set())
     setHistIdx(null)
     setFocus(0)
+    setDetailKey(null) // a freshly-switched session has no open detail pane
     toBottom() // a freshly-switched/opened session lands pinned at its newest row
   }, [state.activeId])
 
@@ -452,11 +436,13 @@ function App() {
     if (turn.workflow) focusables.push(...orchFocusables(workflowRows(turn.workflow, expNodes)))
   }
   const focusedKey = pickFocused(focusables, focus)
+  // ENTER on a focused row: a TURN-steps header toggles the steps; a TOOL toggles its body; a NODE
+  // OPENS (or, if already open, closes) its detail pane — the arrow-drill-down → Enter → detail flow.
   const toggleFocused = () => {
     if (!focusedKey) return
     const [kind, val] = [focusedKey.slice(0, focusedKey.indexOf(":")), focusedKey.slice(focusedKey.indexOf(":") + 1)]
     if (kind === "turn") toggleTurn(Number(val))
-    else if (kind === "node") toggleNode(val)
+    else if (kind === "node") setDetailKey((d) => (d === val ? null : val))
     else toggleTool(val)
   }
 
@@ -483,17 +469,7 @@ function App() {
   // ToolView + the node/tool expansion + focus wiring). Injected into TurnView so the inline
   // tree hangs under the turn that produced it, reusing the SAME NodeRow as the old footer.
   const renderNode = (row: OrchRow) => (
-    <NodeRow
-      key={row.id}
-      row={row}
-      expTools={expTools}
-      onToggle={toggleNode}
-      onToggleTool={toggleTool}
-      focusedKey={focusedKey}
-      cols={width || 80}
-      frame={work.frame}
-      syntaxStyle={mdStyle}
-    />
+    <NodeRow key={row.id} row={row} onToggle={toggleNode} focusedKey={focusedKey} frame={work.frame} />
   )
 
   const submit = () => {
@@ -623,8 +599,11 @@ function App() {
     setInput("")
     setApp((s) => ({ ...s, view: "list" }))
   }
-  // Esc: when busy, first press arms, second interrupts; when idle, back to list.
+  // Esc: a CLOSE for the detail pane first (the pane is the topmost in-transcript surface), then
+  // the usual busy-arm/interrupt or back-to-list. So Esc dismisses an open node detail before it
+  // leaves the chat.
   const handleEscape = () => {
+    if (detailKey !== null) return setDetailKey(null)
     if (!busy) return goToList()
     if (armed && state.activeId) return void (abortTurn(state.activeId), setArmed(false))
     setArmed(true)
@@ -905,6 +884,7 @@ function App() {
             expanded={isExpanded(turn)}
             expTools={expTools}
             expNodes={expNodes}
+            detailKey={detailKey}
             focusedKey={focusedKey}
             cols={width || 80}
             frame={work.frame}

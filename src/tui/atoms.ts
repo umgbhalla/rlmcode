@@ -56,8 +56,14 @@ export type OrchNode = {
   // it OWNS the bash/read/grep it loops). Each step is a tool Msg (call → result, updated in
   // place by id). Populated only for nodes whose forward ran a nodeId-tagged logger
   // (makeNodeLogger). undefined for nodes that ran no tools / the main turn (whose tools live
-  // in the transcript). NodeView renders these under the node, reusing ToolView.
+  // in the transcript). The DETAIL pane (node-detail.tsx) renders these as Activity call
+  // one-liners; the tree itself shows only the COUNT (cost meter), never the tools.
   readonly tools?: ReadonlyArray<Extract<Msg, { kind: "tool" }>>
+  // ERROR BUBBLING (F5): how many of this node's OWN tools FAILED (a tool_result with isError).
+  // Bubbled to the node one-liner (✗ N failed) + the row color so a running node with failed
+  // child tools reads as warning, not healthy-muted, BEFORE the detail pane is opened. 0/absent
+  // ⇒ no failures. Recomputed from the tools list on each tool_result so it stays exact.
+  readonly failedTools?: number | undefined
 }
 // COST-METER: `totalTokens` is the live RUN TOTAL — the sum of every node's `tokens` as
 // done events land. Rendered in the tree footer; never decreases (recompute from nodes).
@@ -153,7 +159,11 @@ const patchNodeTools = (
 ): OrchTree => {
   const prev = t.nodes[nodeId]
   const base: OrchNode = prev ?? { id: nodeId, label: nodeId, phase: "", status: "running" }
-  const node: OrchNode = { ...base, tools: fn(base.tools ?? []) }
+  const tools = fn(base.tools ?? [])
+  // ERROR BUBBLING (F5): recompute the failed-tool count from the (just-updated) tools list so a
+  // node-tagged tool_result(isError) bubbles a ✗ N failed badge + warning color to the node row.
+  const failedTools = tools.reduce((n, m) => n + (m.status === "error" ? 1 : 0), 0)
+  const node: OrchNode = { ...base, tools, failedTools }
   const roots = prev === undefined && node.parentId === undefined && !t.roots.includes(nodeId) ? [...t.roots, nodeId] : t.roots
   return { ...t, nodes: { ...t.nodes, [nodeId]: node }, roots }
 }
@@ -217,6 +227,20 @@ const applyEvent = (
   }
 }
 
+// START-mint a node, carrying forward any already-known per-node state (tools/tokens/result/
+// failedTools survive a re-start). Extracted so reduceNode stays under its cyclomatic budget.
+const mintNode = (prev: OrchNode | undefined, ev: Extract<TurnEvent, { type: "node" }>, parentId: string | undefined): OrchNode => ({
+  id: ev.nodeId,
+  ...(parentId !== undefined ? { parentId } : {}),
+  label: ev.detail ?? ev.nodeId,
+  phase: ev.detail ?? "",
+  status: prev?.status ?? "running",
+  ...(prev?.result !== undefined ? { result: prev.result } : {}),
+  ...(prev?.tokens !== undefined ? { tokens: prev.tokens } : {}),
+  ...(prev?.tools !== undefined ? { tools: prev.tools } : {}),
+  ...(prev?.failedTools !== undefined ? { failedTools: prev.failedTools } : {}),
+})
+
 // The OrchTree node reducer (start mints, delta/done/error update in place), unchanged from the
 // old activity sink — just sourced from the flat node TurnEvent. parentId travels on start; on
 // delta/done/error it's undefined, so ALWAYS keep the previously-known parentId.
@@ -224,16 +248,7 @@ const reduceNode = (t: OrchTree, ev: Extract<TurnEvent, { type: "node" }>): Orch
   const prev = t.nodes[ev.nodeId]
   const parentId = ev.parentId ?? prev?.parentId
   if (ev.event === "start") {
-    const node: OrchNode = {
-      id: ev.nodeId,
-      ...(parentId !== undefined ? { parentId } : {}),
-      label: ev.detail ?? ev.nodeId,
-      phase: ev.detail ?? "",
-      status: prev?.status ?? "running",
-      ...(prev?.result !== undefined ? { result: prev.result } : {}),
-      ...(prev?.tokens !== undefined ? { tokens: prev.tokens } : {}),
-      ...(prev?.tools !== undefined ? { tools: prev.tools } : {}),
-    }
+    const node = mintNode(prev, ev, parentId)
     const isRoot = parentId === undefined
     return {
       nodes: { ...t.nodes, [ev.nodeId]: node },

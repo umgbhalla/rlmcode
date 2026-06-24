@@ -39,6 +39,7 @@ const props = (t: MemoProps["t"], over: Partial<Omit<MemoProps, "t">> = {}): Mem
   expanded: false,
   expTools: EMPTY,
   expNodes: EMPTY,
+  detailKey: null,
   focusedKey: undefined,
   cols: 80,
   syntaxStyle: STYLE,
@@ -77,6 +78,10 @@ it.effect("never skip an in-flight turn; re-render on render-relevant input chan
     expect(turnPropsEqual(props(settled), props(settled, { expanded: true })), "this turn's steps toggle ⇒ re-render").toBe(false)
     expect(turnPropsEqual(props(settled), props(settled, { expTools: new Set(["a1"]) })), "expanding one of THIS turn's tool rows ⇒ re-render").toBe(false)
     expect(turnPropsEqual(props(settled), props(settled, { focusedKey: "tool:a1" })), "Tab focus on one of THIS turn's rows ⇒ re-render").toBe(false)
+    // DETAIL PANE: opening the detail pane for one of THIS turn's workflow nodes ⇒ re-render (the
+    // pane appears under this turn's tree); an unrelated node's detailKey leaves this turn alone.
+    expect(turnPropsEqual(props(settledWf), props(settledWf, { detailKey: "n1" })), "opening THIS turn's node detail pane ⇒ re-render").toBe(false)
+    expect(turnPropsEqual(props(settledWf, { detailKey: "other" }), props(settledWf, { detailKey: "elsewhere" })), "an UNRELATED node's detail pane ⇒ SKIP re-render").toBe(true)
     expect(turnPropsEqual(props(settled), props({ ...settled, final: "different reply" })), "a different reply ⇒ re-render").toBe(false)
     expect(turnPropsEqual(props(settled), props({ ...settled, steps: [tool("a1", "ok")] })), "a different step set ⇒ re-render").toBe(false)
   }),

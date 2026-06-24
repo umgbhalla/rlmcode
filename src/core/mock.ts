@@ -107,11 +107,13 @@ const MOCK_TRANSCRIPT_TOOLS: ReadonlyArray<{ id: string; name: string; args: str
 ]
 const feedTranscriptNodes = (emit: ActivitySink): void => {
   const push = (a: Activity): void => emit(a)
-  // one running subagent node owns the tools (start, never done ⇒ stays expanded).
-  push({ kind: "node", nodeId: "worker", event: "start", detail: "subagent" })
+  // MAIN-TURN tools (NO nodeId) — they land as the TURN's own steps, which is where the matured
+  // ToolView render modes (inline / block + collapse / ✗ error card) live (the W1 render overhaul
+  // moved a NODE's tools out of the tree into its detail pane, so the block/collapse render is the
+  // main-turn surface). The transcript frame gate expands the turn steps to assert these modes.
   for (const t of MOCK_TRANSCRIPT_TOOLS) {
-    push({ kind: "tool", id: t.id, name: t.name, args: t.args, nodeId: "worker" })
-    if (t.settle) push({ kind: "result", id: t.id, result: t.result, isError: t.isError, nodeId: "worker" })
+    push({ kind: "tool", id: t.id, name: t.name, args: t.args })
+    if (t.settle) push({ kind: "result", id: t.id, result: t.result, isError: t.isError })
   }
 }
 
@@ -154,11 +156,12 @@ const MOCK_DIFF_TOOLS: ReadonlyArray<{ id: string; name: string; args: string; r
 ]
 const feedDiffNodes = (emit: ActivitySink): void => {
   const push = (a: Activity): void => emit(a)
-  // one running subagent node owns the file-mutation tools (start, never done ⇒ stays expanded).
-  push({ kind: "node", nodeId: "editor", event: "start", detail: "subagent" })
+  // MAIN-TURN file-mutation tools (NO nodeId) — they land as the TURN's own steps, where the
+  // matured native <diff> render lives (the W1 render overhaul moved a NODE's tools into its detail
+  // pane, so the diff render is the main-turn surface). The diff-viewer frame gate expands the turn.
   for (const t of MOCK_DIFF_TOOLS) {
-    push({ kind: "tool", id: t.id, name: t.name, args: t.args, nodeId: "editor" })
-    push({ kind: "result", id: t.id, result: t.result, isError: t.isError, nodeId: "editor" })
+    push({ kind: "tool", id: t.id, name: t.name, args: t.args })
+    push({ kind: "result", id: t.id, result: t.result, isError: t.isError })
   }
 }
 

@@ -1,7 +1,7 @@
 // @effect/vitest port of scripts/orch-tree-render.test.ts — golden test for the VELOCITY
 // UNICODE TREE flatten() (src/tui/orch-tree.ts). Builds known trees and asserts the EXACT
-// connector prefixes (├─ │ └─ blanks), render order, and per-node payload (glyph, tools ring,
-// collapsed tool-count label, expansion) the renderer depends on. Pure logic — it.effect/sync.
+// connector prefixes (├─ │ └─ blanks), render order, and per-node payload (status-dot glyph, the
+// right-aligned cost meter, the owned-tool ring, expansion) the renderer depends on. Pure logic.
 import { effect, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import type { Msg, OrchNode, OrchTree } from "../src/tui/atoms.ts"
@@ -37,28 +37,31 @@ it.effect("expanded walk: render order, connectors, glyphs, summaries, tool ring
     expect(byId("db").prefix, "middle nested child under a non-last branch").toBe("│  ├─ ")
     expect(byId("api").prefix, "last nested child under a non-last branch").toBe("│  └─ ")
 
-    expect(byId("orchestrate").glyph, "running glyph").toBe("◌")
+    // STATUS DOTS (render-target): ● running / ✓ done / ✗ error (the compact one-liner glyphs).
+    expect(byId("orchestrate").glyph, "running glyph (status dot)").toBe("●")
     expect(byId("plan").glyph, "done glyph").toBe("✓")
     expect(byId("api").glyph, "error glyph").toBe("✗")
 
     expect(byId("plan").summary, "settled summary = result").toBe("decomposed into 3 subtasks")
     expect(byId("db").summary, "running summary = phase").toBe("reading models.ts")
 
-    expect(byId("research").tools.length, "owned tools carried on the row").toBe(2)
-    expect(byId("research").toolsLabel, "collapsed tool-count label").toBe("2 tools")
-    expect(byId("research").bodyPrefix, "owned-tool body stem (under a non-last root child)").toBe("│  ")
-    expect(byId("research").hasDetail, "node with tools+kids is expandable").toBe(true)
-    expect(byId("research").expanded, "running node auto-expands").toBe(true)
+    // COST METER (render-target): the RIGHT-ALIGNED "Nk tok · N tools" — research owns 2 tools, no
+    // tokens, so its cost meter is "2 tools"; plan has 1.2k tokens, no tools, so it's "1.2k tok".
+    expect(byId("research").tools.length, "owned tools carried on the row (for the detail pane)").toBe(2)
+    expect(byId("research").cost, "cost meter = tool count when no tokens").toBe("2 tools")
+    expect(byId("plan").cost, "cost meter = token spend when no tools").toBe("1.2k tok")
+    expect(byId("research").hasDetail, "node with tools+kids is selectable for the detail pane").toBe(true)
+    expect(byId("research").expanded, "running node auto-expands its subtree").toBe(true)
 
     const ascii = rows.map((r) => `${r.prefix}${r.glyph} ${r.label}`).join("\n")
     const wantAscii = [
-      "◌ orchestrate",
+      "● orchestrate",
       "├─ ✓ plan",
-      "├─ ◌ research (parallel ×3)",
+      "├─ ● research (parallel ×3)",
       "│  ├─ ✓ agent:auth-flow",
-      "│  ├─ ◌ agent:db-schema",
+      "│  ├─ ● agent:db-schema",
       "│  └─ ✗ agent:api-routes",
-      "└─ ◌ judge",
+      "└─ ● judge",
     ].join("\n")
     expect(ascii, "full unicode-tree ascii render").toBe(wantAscii)
   }),
