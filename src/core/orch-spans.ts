@@ -47,28 +47,18 @@ export const setNodeSpanTracer = (tracer: Tracer | undefined): void => {
   state.tracer = tracer
 }
 
-// The live chat.turn OTel Context, keyed by sessionId. WHY this exists: ax does NOT forward
-// the turn's traceContext into a tool func's `extra` (dsp/functions.ts passes only
-// {sessionId, traceId, ai, step, abortSignal} — a traceId STRING, not the Context), AND the
-// turn drains ax via `for await` on a STREAMING generator, across whose yields
-// AsyncLocalStorage drops the active context. So a tool handler (workflow / RLM) that read
-// otelContext.active() got the ROOT context and fragmented its node spans into a NEW trace.
-// turn() stashes its traceContext here by sessionId; the workflow handler reads it (via the
-// extra.sessionId ax DOES pass) and runs the script under it, so node + RLM spans nest under
-// the live chat.turn — one trace per session. ponytail: module Map keyed by sessionId —
-// turns are serialized per session (busyAtom) so no cross-turn race; set per turn. LEAK FIX
-// (D3): keyed by a never-reused sessionId, so it accumulates one dead OtelContext per session
-// without an explicit drop — deleteSession (sessions.ts) calls clearTurnContext alongside the
-// sessionsRT drop. Upgrade: drop this if ax forwards traceContext into a tool func's extra.
-const turnCtx = new Map<string, OtelContext>()
-export const setTurnContext = (sessionId: string, ctx: OtelContext): void => {
-  turnCtx.set(sessionId, ctx)
-}
-export const getTurnContext = (sessionId: string | undefined): OtelContext | undefined =>
-  sessionId !== undefined ? turnCtx.get(sessionId) : undefined
-// LEAK FIX (D3): drop a closed session's stashed trace context. Called from deleteSession so the
-// turn-context registry never accumulates dead sessions. Returns whether an entry existed.
-export const clearTurnContext = (sessionId: string): boolean => turnCtx.delete(sessionId)
+// The live chat.turn OTel Context, formerly a turnCtx Map keyed by sessionId, NOW a field on the
+// single SessionState cell (sessions.ts) — re-exported here so existing importers (workflow.ts)
+// keep their orch-spans import path. WHY it exists at all: ax does NOT forward the turn's
+// traceContext into a tool func's `extra` (dsp/functions.ts passes only {sessionId, traceId, ai,
+// step, abortSignal} — a traceId STRING, not the Context), AND the turn drains ax via `for await`
+// on a STREAMING generator, across whose yields AsyncLocalStorage drops the active context. So a
+// tool handler (workflow / RLM) that read otelContext.active() got the ROOT context and fragmented
+// its node spans into a NEW trace. turn() stashes its traceContext on the cell by sessionId; the
+// workflow handler reads it (via the extra.sessionId ax DOES pass) and runs the script under it,
+// so node + RLM spans nest under the live chat.turn — one trace per session. No more leak: the
+// cell is owned by SessionServices (auto-released on idle), not a standalone never-cleaned Map.
+export { getTurnContext, setTurnContext } from "./sessions.ts"
 
 // Start a child span mirroring a node 'start' NodeEvent. Parents under the parent node's
 // span (by parentId) when that node is open, else under the ambient active span (the live

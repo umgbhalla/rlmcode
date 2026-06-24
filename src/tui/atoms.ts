@@ -1,11 +1,10 @@
 // Effect "interface" for the opentui UI. Serializable view state lives in one
 // atom; effectful actions (new session, send turn) run on the tracing runtime,
 // so calling them from React both updates the UI and emits traces/logs/metrics.
-import { AxMemory } from "@ax-llm/ax"
 import * as Effect from "effect/Effect"
 import * as Tracer from "effect/Tracer"
 import * as Atom from "effect/unstable/reactivity/Atom"
-import { abortTurn, deleteSession, runTurn, sessionsRT } from "../app/default-agent.ts"
+import { abortTurn, deleteSession, runTurn, seedSession, sessionsRT } from "../app/default-agent.ts"
 import type { TurnEvent, TurnResult } from "../core/sdk.ts"
 import { appRuntime } from "../otel.ts"
 
@@ -101,7 +100,7 @@ export const newSessionAtom = appRuntime.fn((_: void, get) =>
       { kind: "server", attributes: { "session.id": id, "gen_ai.request.model": MODEL } },
       (span) => Effect.succeed(Tracer.externalSpan({ traceId: span.traceId, spanId: span.spanId, sampled: true })),
     )
-    sessionsRT.set(id, { mem: new AxMemory(), parent })
+    seedSession(id, parent) // build the session cell with the richer chat.session root span
     const s = get(appAtom)
     const view: SessionView = { id, title: `session ${s.sessions.length + 1}`, messages: [] }
     get.set(appAtom, {

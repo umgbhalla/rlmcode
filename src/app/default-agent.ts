@@ -20,7 +20,7 @@ import { makeRunTurn } from "../core/run.ts"
 import { makeMockAI, MOCK_MODEL } from "../core/mock-ai.ts"
 import { MOCK_DIFF_TOOL, MOCK_ORCH_TOOL, MOCK_RATELIMIT_TOOL, MOCK_TRANSCRIPT_TOOL } from "../core/mock.ts"
 import { llm, MODEL } from "../core/runtime.ts"
-import { deleteSession, sessionsRT } from "../core/sessions.ts"
+import { deleteSession, seedSession, sessionsRT } from "../core/sessions.ts"
 
 // The DEFAULT app agent — constructed ONCE over the CF-Kimi `llm` (runtime.ts) at the app's
 // default model, or the canned mock AI under RLM_MOCK. This is the single construction site the
@@ -45,7 +45,7 @@ export { projectDocLoaded }
 // Per-session runtime store (the non-serializable AxMemory + root-span Map) the TUI drives
 // directly: newSessionAtom sets a richer chat.session root span, deleteSessionAtom releases it.
 // App-internal plumbing — re-exported here so src/tui/* never deep-imports src/core/sessions.ts.
-export { deleteSession, sessionsRT }
+export { deleteSession, seedSession, sessionsRT }
 
 // The model POOL (the two routable thinking models) + its name type — surfaced for the TUI's model
 // picker (dialogs.tsx). App-display only; re-exported through this composition layer so src/tui/*

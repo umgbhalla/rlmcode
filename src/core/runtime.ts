@@ -222,27 +222,10 @@ export const makeOnEvent =
   (event: NodeEvent): void =>
     Effect.runSync(emit(event, sink))
 
-// PER-TURN emit registry, keyed by sessionId. ax forwards a FIXED extra to a tool handler
-// (sessionId/ai/abortSignal/…) — NOT arbitrary forward opts — so a workflow/mock tool cannot
-// read the turn's `emit` off `extra`. turn() stashes THIS turn's emit here by sessionId; the tool
-// handler recovers it via getTurnEmit(extra.sessionId). This is the SAME sessionId-keyed per-turn
-// store pattern as orch-spans' setTurnContext (also needed because ax drops the traceContext).
-// Concurrency-correct: each session has its own entry; serialized turns (busyAtom) never collide.
-// LEAK FIX (D3): this Map is keyed by a never-reused sessionId, so without an explicit drop on
-// session close it accumulates one dead ActivitySink closure per session for the process lifetime.
-// deleteSession (sessions.ts) calls clearTurnEmit alongside the sessionsRT drop so a closed
-// session frees its entry — turns are serialized (busyAtom), so the entry is never live at close.
-// ponytail: module Map keyed by sessionId. Upgrade: a context object threaded end-to-end if ax
-// ever forwards arbitrary tool extras. Absent ⇒ no-op (a standalone tool call with no turn).
-const turnEmits = new Map<string, ActivitySink>()
-export const setTurnEmit = (sessionId: string, sink: ActivitySink): void => {
-  turnEmits.set(sessionId, sink)
-}
-export const getTurnEmit = (sessionId: string | undefined): ActivitySink =>
-  (sessionId !== undefined ? turnEmits.get(sessionId) : undefined) ?? (() => {})
-// LEAK FIX (D3): drop a closed session's emit closure. Called from deleteSession so the per-turn
-// emit registry never accumulates dead sessions. Returns whether an entry existed (for the test).
-export const clearTurnEmit = (sessionId: string): boolean => turnEmits.delete(sessionId)
+// PER-TURN emit / context / aborter accessors moved to sessions.ts — they are now FIELDS on the
+// single SessionState cell owned by the SessionServices LayerMap (no more separate turn-keyed
+// module Maps to leak). Importers (agent.ts/workflow.ts/mock.ts) read getTurnEmit/setTurnEmit from
+// sessions.ts directly. runtime.ts keeps only makeOnEvent (a pure sink factory, below).
 
 // Generic usage reader: a getUsage() probe over any AxGen the orchestration drivers
 // forward. Exported so a sub-run charges the shared Budget from each node's usage,

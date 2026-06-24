@@ -26,7 +26,8 @@
 // traceContext), so node emits nest under the live chat.turn span in the SAME OrchTree.
 import type { AxAIService, AxFunction } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { clip, estimatedCostOf, getTurnEmit, llm, makeOnEvent } from "./runtime.ts"
+import { clip, estimatedCostOf, llm, makeOnEvent } from "./runtime.ts"
+import { getTurnEmit } from "./sessions.ts"
 import { choiceFromArgs } from "./models.ts"
 import { allocate, BudgetExhaustedError } from "./orch.ts"
 import { NodeTimeoutError, withTimeout } from "./orch-recipes.ts"

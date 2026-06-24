@@ -1,11 +1,12 @@
-// @effect/vitest port of scripts/session-leak.test.ts — D3: the per-session module-Map LEAK.
-// NO network (RLM_MOCK=1 swaps the canned mock AI). Drives the REAL code: populates turnEmits +
-// turnCtx via their public setters, populates turnAborters by driving a REAL mock turn through
-// createAgent/makeRunTurn, then asserts deleteSession drops the session's entry from EVERY Map.
+// SESSION LEAK (adoption #9 + #10 + #14): the FOUR leak-prone per-session module Maps (sessionsRT,
+// turnEmits, turnCtx, turnAborters + the aborterClearers Set) are now ONE SessionState cell owned by
+// the SessionServices LayerMap. This proves: (a) the single store holds the per-turn emit/ctx/aborter
+// that used to live in four Maps, populated by driving a REAL mock turn; (b) deleteSession frees the
+// cell from the one store — no per-Map fan-out, no leak. (The idle auto-release is proven separately
+// in session-memo.test.ts with TestClock.)
 //
-// RLM_MOCK is set BEFORE the dynamic engine imports (read at module load). it.live so the REAL
-// mock turn loop runs on the real runtime. (No process.exit needed — the vitest worker tears down
-// even though the eager otel SDK holds live exporters/timers.)
+// NO network (RLM_MOCK=1 swaps the canned mock AI, read at module load before the dynamic imports).
+// it.live so the REAL mock turn loop runs on the real runtime.
 import { context as otelContext } from "@opentelemetry/api"
 import { expect, it } from "@effect/vitest"
 import { Effect } from "effect"
@@ -14,20 +15,21 @@ process.env.RLM_MOCK = "1"
 
 const { makeMockAI, MOCK_MODEL } = await import("../src/core/mock-ai.ts")
 const { BASE_TOOLS } = await import("../src/core/tools.ts")
-const { clearTurnAborter, createAgent } = await import("../src/core/agent.ts")
-const { clearTurnContext, setTurnContext } = await import("../src/core/orch-spans.ts")
-const { clearTurnEmit, setTurnEmit } = await import("../src/core/runtime.ts")
-const { deleteSession, ensureSession, sessionsRT } = await import("../src/core/sessions.ts")
+const { createAgent } = await import("../src/core/agent.ts")
+const { setTurnContext } = await import("../src/core/orch-spans.ts")
+const { deleteSession, ensureSession, getTurnEmit, getTurnContext, sessionsRT, setTurnEmit } = await import(
+  "../src/core/sessions.ts"
+)
 const { makeRunTurn } = await import("../src/core/run.ts")
 
 const drive = async (runTurn: ReturnType<typeof makeRunTurn>, sessionId: string): Promise<void> => {
   for await (const _ of runTurn(sessionId, "hi")) {
-    /* drain — the side effect (turnAborters.set inside turn()) is what we assert on */
+    /* drain — the side effect (the cell's aborter/emit set inside turn()) is what we assert on */
     void _
   }
 }
 
-it.live("deleteSession frees the session's entry from ALL FOUR per-session Maps (D3)", () =>
+it.live("ONE SessionState cell unifies the four old Maps, and deleteSession frees it (no leak)", () =>
   Effect.promise(async () => {
     const N = 5
     const ids = Array.from({ length: N }, (_, i) => `leak-sess-${i}`)
@@ -41,29 +43,30 @@ it.live("deleteSession frees the session's entry from ALL FOUR per-session Maps 
       await drive(runTurn, id)
     }
 
-    expect(sessionsRT.has(ids[0]!), "(setup) sessionsRT holds the session before delete").toBe(true)
-    expect(agent.abortTurn(ids[0]!), "(setup) turnAborters holds a live controller after a turn ran").toBe(true)
+    // SINGLE STORE: the emit + ctx + aborter that used to be three separate Maps now all read off
+    // the one cell. A turn ran, so its controller settled (auto-cleared by the turn-exit finalizer).
+    expect(sessionsRT.has(ids[0]!), "(setup) the single store holds the session before delete").toBe(true)
+    expect(typeof getTurnEmit(ids[0]!), "(single store) the cell carries the per-turn emit").toBe("function")
+    expect(getTurnContext(ids[0]!) !== undefined, "(single store) the cell carries the per-turn ctx").toBe(true)
+    expect(
+      agent.abortTurn(ids[0]!),
+      "(#14) the controller auto-finalized on turn exit — abort is a no-op on a settled turn",
+    ).toBe(false)
 
     const sizeBefore = sessionsRT.size
-    expect(sizeBefore, `(setup) sessionsRT has >= ${N} sessions`).toBeGreaterThanOrEqual(N)
+    expect(sizeBefore, `(setup) the store has >= ${N} sessions`).toBeGreaterThanOrEqual(N)
 
     for (const id of ids) deleteSession(id)
 
-    expect(sessionsRT.size, `(D3) sessionsRT shrank by ${N} after deleteSession`).toBe(sizeBefore - N)
-    expect(sessionsRT.has(ids[0]!), "(D3) sessionsRT no longer holds a deleted session").toBe(false)
-
-    let emitLeak = 0
-    let ctxLeak = 0
-    let aborterLeak = 0
+    // LEAK FIX: one deleteSession frees the whole cell — all four old Maps at once.
+    expect(sessionsRT.size, `(#9) the store shrank by ${N} after deleteSession`).toBe(sizeBefore - N)
+    expect(sessionsRT.has(ids[0]!), "(#9) the store no longer holds a deleted session").toBe(false)
+    let leaked = 0
     for (const id of ids) {
-      if (clearTurnEmit(id)) emitLeak += 1
-      if (clearTurnContext(id)) ctxLeak += 1
-      if (clearTurnAborter(id)) aborterLeak += 1
+      if (sessionsRT.has(id)) leaked += 1
+      if (getTurnContext(id) !== undefined) leaked += 1
     }
-    expect(emitLeak, "(D3) turnEmits dropped on deleteSession").toBe(0)
-    expect(ctxLeak, "(D3) turnCtx dropped on deleteSession").toBe(0)
-    expect(aborterLeak, "(D3) turnAborters dropped on deleteSession").toBe(0)
-
-    expect(agent.abortTurn(ids[0]!), "(D3) abortTurn on a deleted session is a no-op (controller freed)").toBe(false)
+    expect(leaked, "(#9) NO session leaks any cell/ctx after deleteSession").toBe(0)
+    expect(agent.abortTurn(ids[0]!), "(#9) abortTurn on a deleted session is a no-op (cell freed)").toBe(false)
   }),
 )

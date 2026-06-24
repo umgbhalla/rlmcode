@@ -18,8 +18,9 @@ import type { AnySpan } from "effect/Tracer"
 import * as Telemetry from "effect/unstable/ai/Telemetry"
 import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
-import { setNodeSpanTracer, setTurnContext } from "./orch-spans.ts"
-import { BASE_PROMPT, limits, makeOnEvent, rateLimiter, readUsageOf, setTurnEmit } from "./runtime.ts"
+import { setNodeSpanTracer } from "./orch-spans.ts"
+import { BASE_PROMPT, limits, makeOnEvent, rateLimiter, readUsageOf } from "./runtime.ts"
+import { abortSession, acquireSession, clearTurnAborter, setTurnAborter, setTurnContext, setTurnEmit } from "./sessions.ts"
 import { setMockEmit } from "./mock-ai.ts"
 import { drainWithWatchdog } from "./stream-watchdog.ts"
 import { WORKFLOW_TOOLS } from "./workflow.ts"
@@ -110,21 +111,13 @@ const clipSpan = (s: string, n = 4000): string => (s.length > n ? `${s.slice(0, 
 // `cause` carries the original thrown value (an ax status error, a BudgetExhaustedError, etc.).
 class ChatError extends Data.TaggedError("ChatError")<{ readonly cause: unknown }> {}
 
-// LEAK FIX (D3): a module-level registry of per-agent `turnAborters` clearers. `turnAborters` is
-// closed over INSIDE createAgent (one Map per agent, so two agents never collide on a sessionId),
-// so the module-level deleteSession (sessions.ts) cannot reach it directly. Each createAgent
-// registers its own clearer here; clearTurnAborter(sessionId) fans the drop out across every live
-// agent, so closing a session frees its AbortController in all of them. Without this, the
-// per-session AbortController accumulates forever (sessionIds are never reused). A Set (not a Map)
-// because there is no key to dedupe agents on — each createAgent owns one distinct clearer.
-const aborterClearers = new Set<(sessionId: string) => boolean>()
-// Drop a closed session's AbortController across every agent. Called from deleteSession. Returns
-// whether any agent held an entry for the session (for the leak unit test).
-export const clearTurnAborter = (sessionId: string): boolean => {
-  let existed = false
-  for (const clear of aborterClearers) if (clear(sessionId)) existed = true
-  return existed
-}
+// LEAK FIX (adoption #9): the per-agent `turnAborters` Map + the `aborterClearers` Set workaround
+// are GONE. The in-flight AbortController is now a FIELD on the single per-session SessionState cell
+// (sessions.ts), set on turn start (setTurnAborter) and CLEARED on turn exit by the turn's
+// Effect.scoped finalizer (clearTurnAborter, #14). abortTurn signals it via abortSession — reachable
+// from ANY agent (one shared store), so the closed-over-per-agent unreachability that forced the Set
+// no longer exists. deleteSession frees it as part of releasing the cell.
+export { clearTurnAborter } from "./sessions.ts"
 
 // The token budget (orch.allocate) throws BudgetExhaustedError, wrapped by
 // runForward into a ChatError. Unwrap one level to surface it on the span.
@@ -216,24 +209,6 @@ export const createAgent = (config: AxAgentConfig) => {
   // setOptions reassigns every field.
   service.setOptions({ debug: true, rateLimiter })
 
-  // One in-flight AbortController per session (overwritten each turn), scoped to THIS
-  // agent so two agents never collide on a sessionId. abortTurn() lets the UI cancel a
-  // running turn: ax honors abortSignal in forward() and throws AxAIServiceAbortedError,
-  // which surfaces as a normal turn failure.
-  const turnAborters = new Map<string, AbortController>()
-  const abortTurn = (sessionId: string): boolean => {
-    const c = turnAborters.get(sessionId)
-    if (!c || c.signal.aborted) return false
-    c.abort()
-    return true
-  }
-  // LEAK FIX (D3): register THIS agent's turnAborters clearer in the module-level registry so
-  // deleteSession (via clearTurnAborter, fanning out across agents) frees this session's
-  // AbortController on close — turnAborters is closed over here, unreachable from the module sink
-  // otherwise. Returns whether an entry existed. (Never deregistered: an agent lives for the
-  // process; the registry holds at most one clearer per createAgent call.)
-  aborterClearers.add((sessionId: string): boolean => turnAborters.delete(sessionId))
-
   /**
    * Build a traced turn for a session. `chat.turn` (our Effect.fn span, kind=client,
    * gen_ai semconv) parents the ax gen_ai child; the whole thing parents the
@@ -278,9 +253,20 @@ export const createAgent = (config: AxAgentConfig) => {
         // (serialized by busyAtom, so no cross-feed).
         setTurnEmit(sessionId, emit)
         setTurnContext(sessionId, traceContext)
+        // The live chat.turn OTel context is recovered by tool handlers (workflow/RLM) via the cell
+        // (getTurnContext) — ax calls handlers OUTSIDE this fiber, so a fiber-local is invisible and
+        // the cell is the single source of truth. forward() itself runs under otelContext.with(
+        // traceContext) (runForward below), so ax's own tracer nests its gen_ai span correctly.
 
+        // TURN-SCOPED session hold (#9 + #14): acquire THIS session's cell for the turn's Scope so a
+        // settled turn releases its hold → an idle session auto-releases (its finalizer drops the
+        // index cell — the leak fix). Effect.fn gives this body a Scope; the acquire ties the cell's
+        // refcount to the turn. We also register the per-turn AbortController + its turn-exit
+        // finalizer (clearTurnAborter) on the SAME scope so the controller auto-finalizes on exit.
+        yield* acquireSession(sessionId)
         const aborter = new AbortController()
-      turnAborters.set(sessionId, aborter)
+        setTurnAborter(sessionId, aborter)
+        yield* Effect.addFinalizer(() => Effect.sync(() => void clearTurnAborter(sessionId)))
       // One ADVISORY token budget for the whole turn. runNode() charges it from the forward
       // result's usage; crossing the SOFT ceiling only nudges (a delta in the tree) — it NEVER
       // discards the turn. The hard per-turn stop is MAX_STEPS (now handled GRACEFULLY in-loop
@@ -470,9 +456,18 @@ export const createAgent = (config: AxAgentConfig) => {
             ),
           ),
         ),
+      // TURN LIFETIME (#14): close the turn's Scope at turn end (success/error/abort) — the
+      // acquireSession hold drops (→ idle TTL auto-release), and the AbortController finalizer
+      // clears the cell's controller. Outermost so it brackets the whole turn. The Scope is
+      // discharged HERE, so the turn's R channel stays OtelTracerProvider (run.ts's runPromise
+      // supplies it) — Scope never escapes to the SDK seam.
+      Effect.scoped,
     )
 
-  return { turn, abortTurn }
+  // abortTurn delegates to the shared per-session cell (sessions.ts): the in-flight AbortController
+  // lives on the SessionState cell now (no per-agent Map), so a single shared signaler reaches it
+  // from any agent. ax honors abortSignal in forward() → AxAIServiceAbortedError → a normal failure.
+  return { turn, abortTurn: abortSession }
 }
 
 // The injectable agent surface. turn() STAYS Effect-returning (the Effect.fn span +
