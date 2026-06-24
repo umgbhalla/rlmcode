@@ -11,6 +11,7 @@ import { finalizeOnMaxSteps } from "./orch-recipes.ts"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
 import * as Cause from "effect/Cause"
+import * as Data from "effect/Data"
 import * as Effect from "effect/Effect"
 import * as Metric from "effect/Metric"
 import type { AnySpan } from "effect/Tracer"
@@ -102,13 +103,12 @@ export const SYSTEM_PROMPT_CHARS = buildSystemPrompt().length
 
 const clipSpan = (s: string, n = 4000): string => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
 
-class ChatError {
-  readonly _tag = "ChatError"
-  readonly cause: unknown
-  constructor(cause: unknown) {
-    this.cause = cause
-  }
-}
+// TYPED ERROR (adoption #1): the turn boundary's E channel. Data.TaggedError gives the `_tag`
+// discriminator for free (was hand-written) + Cause.YieldableError, so runForward's
+// `Effect.tryPromise({ catch: e => new ChatError({ cause: e }) })` fails with a TAGGED error —
+// run.ts then recovers it with Effect.catchTag (typed) instead of Cause.squash + duck-typing.
+// `cause` carries the original thrown value (an ax status error, a BudgetExhaustedError, etc.).
+class ChatError extends Data.TaggedError("ChatError")<{ readonly cause: unknown }> {}
 
 // LEAK FIX (D3): a module-level registry of per-agent `turnAborters` clearers. `turnAborters` is
 // closed over INSIDE createAgent (one Map per agent, so two agents never collide on a sessionId),
@@ -357,7 +357,7 @@ export const createAgent = (config: AxAgentConfig) => {
               budget.charge(readUsageOf(chat))
               return { reply }
             }),
-          catch: (e) => new ChatError(e),
+          catch: (e) => new ChatError({ cause: e }),
         })
 
       // TIMING BREAKDOWN (telemetry 3): bracket the model fetch with span events — 'forward.sent'

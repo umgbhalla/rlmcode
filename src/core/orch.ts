@@ -10,6 +10,7 @@
 // the unit — they are all the SAME thing = a node. NodeEvent/NodeView already use it.
 import type { AxGen, AxAIService, AxGenIn, AxGenOut, AxLoggerFunction, AxModelConfig, AxProgramForwardOptions, AxMemory, AxRateLimiterFunction, AxStepHooks } from "@ax-llm/ax"
 import { type Context as OtelContext, type Tracer, trace as otelTrace } from "@opentelemetry/api"
+import * as Data from "effect/Data"
 import * as Effect from "effect/Effect"
 import type { Activity } from "./activity.ts"
 import { endNodeSpan, errorNodeSpan, startNodeSpan } from "./orch-spans.ts"
@@ -139,17 +140,21 @@ export type Budget = {
 // tally crosses the HARD ceiling (a genuine runaway). Crossing the SOFT ceiling does
 // NOT throw — it nudges. Carries the reason and the spent/total numbers so a boundary
 // catch can annotate a span or surface a partial.
-export class BudgetExhaustedError extends Error {
-  readonly _tag = "BudgetExhaustedError"
+//
+// TYPED ERROR (adoption #8): a Data.TaggedError — the v4 idiom replacing the hand-written
+// `_tag`. Data.TaggedError("…") gives the `_tag` discriminator + Cause.YieldableError
+// (extends Error, so `instanceof BudgetExhaustedError`, `.message`, and a thrown-Promise
+// rejection all still work BYTE-FOR-BYTE), and makes the error catchable by Effect.catchTag.
+// We keep the POSITIONAL constructor (reason, spent, total) so every throw site is unchanged —
+// the subclass ctor formats the message and forwards an args object to the tagged base.
+export class BudgetExhaustedError extends Data.TaggedError("BudgetExhaustedError")<{
+  readonly message: string
   readonly reason: string
   readonly spent: number
   readonly total: number
+}> {
   constructor(reason: string, spent: number, total: number) {
-    super(`budget exhausted (${reason}): spent ${spent} of ${total} tokens`)
-    this.reason = reason
-    this.spent = spent
-    this.total = total
-    this.name = "BudgetExhaustedError"
+    super({ message: `budget exhausted (${reason}): spent ${spent} of ${total} tokens`, reason, spent, total })
   }
 }
 

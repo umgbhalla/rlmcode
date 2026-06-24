@@ -156,20 +156,34 @@ const okResult = (raw: RawTurnResult): TurnResult => ({
   aborted: false,
 })
 
-// Build the final reply EVENT for a failed/aborted turn. The '⚠ ...' text mapping moved here
-// from atoms.ts: an abort reads as 'Interrupted.', anything else as the first clean error line.
-const errorResult = (cause: Cause.Cause<unknown>): TurnResult => {
-  const e = Cause.squash(cause) as { cause?: { message?: string; status?: unknown }; message?: string; _tag?: string; status?: unknown }
-  const raw = e?.cause?.message ?? e?.message ?? String(e)
-  const aborted = /abort/i.test(raw)
-  const budget = /budget/i.test(raw) || e?._tag === "BudgetExhaustedError"
+// The internal-error shape the serializer reads. The turn boundary (agent.ts) ALWAYS fails with a
+// tagged `ChatError` whose `.cause` is the ORIGINAL thrown value — one of OUR typed Data.TaggedErrors
+// (BudgetExhaustedError, NodeTimeoutError, _tag-discriminated) or an UNTYPED ax wire error (a status
+// error / abort error — ax owns those classes, we can't catchTag them, so they stay duck-typed by
+// shape). `cause.cause` is the inner cause ax sometimes nests a status under.
+type RawError = { _tag?: string; message?: string; status?: unknown; cause?: { message?: string; status?: unknown } }
+
+// ── TYPED-ERROR SERIALIZER (adoption #6/#8) — the ONE map-to-serializable point at the SDK seam.
+// run.ts is the sole place internal Effect/Cause/Data error types collapse into the SERIALIZABLE
+// public TurnError (no Effect/Data crosses sdk.ts). `chatErrorCause` is `ChatError.cause` (the
+// original thrown value), recovered by Effect.catchTag below — NOT a Cause.squash duck-type chase.
+// Our own errors are classified by their `_tag` (BudgetExhaustedError → budget_exhausted); ax's
+// untyped wire errors keep the status/abort shape-match (429 → a clear rate-limit line; abort →
+// "Interrupted."). The output TurnError is byte-for-byte the prior contract.
+const serializeError = (chatErrorCause: unknown): TurnResult => {
+  const e = (chatErrorCause ?? {}) as RawError
+  const raw = e.cause?.message ?? e.message ?? String(chatErrorCause)
+  // TAGGED (our Data.TaggedError) first — exact, no string-match. Then the duck-typed fall-throughs
+  // for ax's own untyped errors (abort / status), which we cannot tag.
+  const budget = e._tag === "BudgetExhaustedError" || /budget/i.test(raw)
+  const aborted = !budget && /abort/i.test(raw)
   // RATE-LIMIT VISIBILITY (main-turn 429): unlike a node, the main turn does NOT retry — a 429
   // mid-stream fails the turn. ax surfaces it as a status error (429 on the error or its inner
   // cause) and/or a "429"/"rate limit"/"too many requests" message. Detect it and word the
   // ErrorCard CLEARLY ("Rate limited (429) …") instead of dumping ax's raw status-error line, so
   // the user knows it's throttling — not an opaque provider fault. kind:"provider" (it IS one).
   const rateLimited =
-    !aborted && !budget && (isStatus429(e?.status) || isStatus429(e?.cause?.status) || /\b429\b|rate.?limit|too many requests/i.test(raw))
+    !aborted && !budget && (isStatus429(e.status) || isStatus429(e.cause?.status) || /\b429\b|rate.?limit|too many requests/i.test(raw))
   const msg = aborted
     ? "Interrupted."
     : rateLimited
@@ -183,6 +197,14 @@ const errorResult = (cause: Cause.Cause<unknown>): TurnResult => {
     aborted,
     error: { kind, message: msg },
   }
+}
+
+// A non-ChatError failure (a defect/interrupt that escaped the typed channel — should not happen,
+// but final-reply-once is an INVARIANT). Squash the Cause to a value and serialize it the same way,
+// so the terminal {type:'reply'} is ALWAYS produced even on an unexpected defect.
+const defectResult = (cause: Cause.Cause<unknown>): TurnResult => {
+  const squashed = Cause.squash(cause)
+  return serializeError(squashed)
 }
 
 // True when a squashed-error `status` field is HTTP 429 (the duck-typed ax status shape, same
@@ -275,11 +297,16 @@ async function* drive(
   let settled = false
   const program = driver.turn(rt.mem, rt.parent, sessionId, emit)(text).pipe(
     Effect.map(okResult),
-    Effect.catchCause((c) => Effect.succeed(errorResult(c))),
+    // TYPED RECOVERY (adoption #6): the turn's E channel is the tagged `ChatError` — recover it by
+    // TAG (not Cause.squash) and serialize `e.cause` into the public TurnResult. The trailing
+    // catchCause is the final-reply-once backstop for any defect/interrupt that escaped the typed
+    // channel (shouldn't happen, but the terminal reply is an INVARIANT).
+    Effect.catchTag("ChatError", (e) => Effect.succeed(serializeError(e.cause))),
+    Effect.catchCause((c) => Effect.succeed(c.pipe(Cause.squash, serializeError))),
   )
   const replyPromise: Promise<TurnResult> = coreRuntime
     .runPromise(program)
-    .catch((e: unknown) => errorResult(Cause.fail(e)))
+    .catch((e: unknown) => defectResult(Cause.fail(e)))
     .finally(() => {
       settled = true
       if (opts?.signal !== undefined) opts.signal.removeEventListener("abort", onAbort)

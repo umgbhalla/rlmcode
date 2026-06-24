@@ -15,6 +15,7 @@
 //     retried — re-running yields the same error and burns tokens/time.
 // Default = NOT transient (fail fast). Only the known-transient shapes opt INTO a retry.
 import { AxFunctionError, type AxAIService, type AxGen, type AxGenIn, type AxGenOut } from "@ax-llm/ax"
+import * as Data from "effect/Data"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import { BudgetExhaustedError, type NodeOpts, node, type RetryCause } from "./orch.ts"
@@ -48,15 +49,18 @@ export const LEAF_TIMEOUT_MS = (() => {
 // boundary catch can tell "hung node" apart from "ran out of budget". A node timeout is
 // a FAILURE (the slot → null in fanOut), never a retry target (the node was making no
 // progress; re-running the same hang wastes the same wall-clock).
-export class NodeTimeoutError extends Error {
-  readonly _tag = "NodeTimeoutError"
+//
+// TYPED ERROR (adoption #8): a Data.TaggedError (extends Error via Cause.YieldableError) —
+// the `_tag`/`instanceof`/`.message` behaviour is byte-for-byte the prior plain class, and it
+// is now catchable by Effect.catchTag at the turn boundary. Positional ctor kept so the single
+// throw site (withTimeout) is unchanged; the subclass forwards an args object to the base.
+export class NodeTimeoutError extends Data.TaggedError("NodeTimeoutError")<{
+  readonly message: string
   readonly nodeId: string
   readonly timeoutMs: number
+}> {
   constructor(nodeId: string, timeoutMs: number) {
-    super(`node ${nodeId} timed out after ${timeoutMs}ms`)
-    this.nodeId = nodeId
-    this.timeoutMs = timeoutMs
-    this.name = "NodeTimeoutError"
+    super({ message: `node ${nodeId} timed out after ${timeoutMs}ms`, nodeId, timeoutMs })
   }
 }
 
