@@ -31,7 +31,7 @@ const ICON_MAP: Record<string, string> = {
   reply: "⏺", // the agent reply row marker
   node: "▣", // a node / box badge (orchestration node, opencode "▣ mode" footer)
   more: "┄", // velocity-cap "+N earlier" collapsed-sibling marker
-  focus: "❯", // keyboard-focus gutter (FocusGutter)
+  focus: "❯", // keyboard-focus gutter (focusGutter)
   // ── expander chevrons (turn / tool drill-down) ─────────────────────────────────────
   expanded: "▾",
   collapsed: "▸",

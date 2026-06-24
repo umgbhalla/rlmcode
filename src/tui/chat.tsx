@@ -17,7 +17,7 @@ import { copyToClipboard } from "./clipboard.ts"
 import { history } from "./history.ts"
 import { makeSyntaxStyle, resolveTheme, theme } from "./theme.ts"
 import { ThemeProvider, useTheme, useThemeSwitcher } from "./theme-context.tsx"
-import { FocusGutter, ToolView } from "./tool-view.tsx"
+import { focusGutter, ToolView } from "./tool-view.tsx"
 import type { Row as OrchRow } from "./orch-tree.ts"
 import { ActionBar, shortCwd } from "./shell.tsx"
 import { Composer, useComposerFocus } from "./composer.tsx"
@@ -68,7 +68,7 @@ function useWorking(busy: boolean): { frame: string; elapsed: number } {
   return { frame: SPIN_FRAMES[tick % SPIN_FRAMES.length]!, elapsed: busy ? Math.floor((Date.now() - startRef.current) / 1000) : 0 }
 }
 
-// The keyboard-focus gutter (FocusGutter) + the per-tool row (ToolView, with the matured
+// The keyboard-focus gutter (focusGutter) + the per-tool row (ToolView, with the matured
 // inline-vs-block + per-tool detail + output-collapse) live in tool-view.tsx, imported above —
 // TurnView + NodeRow render the SAME ToolView for the main turn's steps and a node's owned tools.
 
@@ -124,7 +124,7 @@ function TurnViewImpl({
             onMouseOver={(() => setHoverSteps(true)) as any}
             onMouseOut={(() => setHoverSteps(false)) as any}
           >
-            <FocusGutter focused={stepsFocused} />
+            {focusGutter(stepsFocused)}
             {`${expanded ? "▾" : "▸"} ${t.steps.length} step${t.steps.length > 1 ? "s" : ""}`}
             {!expanded ? `   ${toolsUsed(t.steps)}` : ""}
           </text>
@@ -241,7 +241,7 @@ function NodeHeader({ row, hot, focused, frame, setHover, onToggle }: {
       onMouseOver={(hasDetail ? (() => setHover(true)) : undefined) as any}
       onMouseOut={(() => setHover(false)) as any}
     >
-      <FocusGutter focused={focused} />
+      {focusGutter(focused)}
       {prefix ? <span fg={hot ? theme.muted : theme.dim}>{prefix}</span> : null}
       <span fg={hot ? theme.white : color}>{`${mark} `}</span>
       <span fg={hot ? theme.white : theme.text}>{label}</span>

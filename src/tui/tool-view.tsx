@@ -47,9 +47,8 @@ const previewSign = (tone: PreviewLine["tone"]): string => (tone === "add" ? "+"
 
 // Keyboard-focus gutter: a leading "❯ " ONLY when this row is the Tab-ring focus (never on mere
 // hover) — keyboard focus visually distinct from a mouse-over. Two cells wide so focused/unfocused
-// rows stay column-aligned.
-// ponytail: exported but used only in this file. Upgrade: unexport / inline at the ToolHeader+NodeHeader call sites.
-export const FocusGutter = ({ focused }: { focused: boolean }) =>
+// rows stay column-aligned. Shared with chat.tsx's turn-steps + node headers (wired, not dead).
+export const focusGutter = (focused: boolean) =>
   focused ? <span fg={theme.focus}>{"❯ "}</span> : <span fg={theme.faint}>{"  "}</span>
 
 // The header line — glyph + label + per-tool summary + (settled) per-tool DETAIL + ▾/▸. A running
@@ -75,7 +74,7 @@ function ToolHeader({ m, expanded, canExpand, focused, frame, onToggle }: { m: T
       onMouseOver={(canExpand ? (() => setHover(true)) : undefined) as any}
       onMouseOut={(() => setHover(false)) as any}
     >
-      <FocusGutter focused={focused} />
+      {focusGutter(focused)}
       <span fg={hot ? theme.white : color}>{`${mark} `}</span>
       <span fg={hot ? theme.white : theme.text}>{toolLabel(m.name, m.args)}</span>
       <span fg={hot ? theme.subtext : theme.faint}>{`  ${summary}`}</span>

@@ -17,13 +17,15 @@
 //       (base binding restored after the pop).
 import { launchDriver } from "./driver.ts"
 import { report } from "./assert.ts"
-import { activeBindings, type Bind, dispatch, matchesChord, parseChord } from "../../src/tui/keys.ts"
+import { activeBindings, type Bind, dispatch, matchesChord } from "../../src/tui/keys.ts"
 
 await report("keys", async (a) => {
   // ── (1) PURE: chord matcher ─────────────────────────────────────────────────────────────────
-  a.ok(parseChord("ctrl+k").ctrl && parseChord("ctrl+k").key === "k", "parseChord splits mods + key")
-  a.ok(parseChord("shift+tab").shift && parseChord("shift+tab").key === "tab", "parseChord reads shift+tab")
-  a.ok(parseChord("esc").key === "escape", "parseChord normalizes the esc alias to opentui's 'escape'")
+  // parseChord is module-private; its mod/key split + alias normalization is exercised through the
+  // public matchesChord (which parses the chord internally).
+  a.ok(matchesChord({ name: "k", ctrl: true }, "ctrl+k") && !matchesChord({ name: "k", ctrl: true }, "ctrl+j"), "parses mods + key (ctrl+k splits to {ctrl, key:'k'})")
+  a.ok(matchesChord({ name: "tab", shift: true }, "shift+tab"), "reads shift+tab")
+  a.ok(matchesChord({ name: "escape" }, "esc"), "normalizes the esc alias to opentui's 'escape'")
   a.ok(matchesChord({ name: "k", ctrl: true }, "ctrl+k"), "matchesChord matches Ctrl+K")
   a.ok(!matchesChord({ name: "k" }, "ctrl+k"), "matchesChord requires the ctrl modifier (plain k ≠ ctrl+k)")
   a.ok(!matchesChord({ name: "tab" }, "shift+tab") && matchesChord({ name: "tab", shift: true }, "shift+tab"), "shift is matched exactly (tab ≠ shift+tab)")

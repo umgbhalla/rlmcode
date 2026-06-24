@@ -86,8 +86,7 @@ const KEY_ALIASES: Record<string, string> = {
 type ParsedChord = { readonly ctrl: boolean; readonly shift: boolean; readonly meta: boolean; readonly key: string }
 
 // parseChord("ctrl+k") → {ctrl, key:"k"}. Pure; the matcher caches nothing (chords are few).
-// ponytail: exported but internal-only. Upgrade: drop the export (make module-private) once no external caller appears.
-export const parseChord = (chord: string): ParsedChord => {
+const parseChord = (chord: string): ParsedChord => {
   const parts = chord.split("+")
   const rawKey = parts[parts.length - 1]!.toLowerCase()
   const key = KEY_ALIASES[rawKey] ?? rawKey
