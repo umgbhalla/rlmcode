@@ -130,6 +130,33 @@ export const MOCK_TRANSCRIPT_TOOL: AxFunction = {
   },
 }
 
+// ── CANNED BIG-BODY FEED (row-budget frame gate, W4/F6) — a SINGLE settled bash whose stdout is
+// HUGE (400 lines). Drives the turn-aware bodyBudget: expanding this one bash must NOT dump all 400
+// lines inline (the pre-F6 Number.MAX_SAFE_INTEGER splatter that blew the viewport); the expanded
+// body stays BOUNDED to the per-turn row budget + keeps a "… +N more" footer. The line tokens are
+// "BIG line N" so the frame gate can assert an early line shows but a late one (line 399) is bounded
+// out. NOT in production — replayed only by scripts/tui/row-budget.test.ts under RLM_MOCK.
+const BIG_BODY = Array.from({ length: 400 }, (_, i) => `BIG line ${i + 1}`).join("\n")
+const feedBigBodyNodes = (emit: ActivitySink): void => {
+  const push = (a: Activity): void => emit(a)
+  // MAIN-TURN bash (NO nodeId) → a turn step, where the matured block/collapse render lives.
+  push({ kind: "tool", id: "bb_run", name: "bash", args: JSON.stringify({ command: "cat huge.log" }) })
+  push({ kind: "result", id: "bb_run", result: BIG_BODY, isError: false })
+}
+
+// TEST-ONLY big-body tool — replays one bash with a 400-line stdout so the row-budget frame gate
+// (scripts/tui/row-budget.test.ts) can assert the EXPANDED body stays bounded by the per-turn
+// bodyBudget (F6), never the full 400-line dump. Off in production (registered only under RLM_MOCK).
+export const MOCK_BIGBODY_TOOL: AxFunction = {
+  name: "mock_bigbody",
+  description: "TEST ONLY: replay one bash with a huge (400-line) stdout for the row-budget frame gate.",
+  parameters: { type: "object", properties: {}, required: [] },
+  func: async (_args: unknown, extra?: Readonly<{ sessionId?: string; abortSignal?: AbortSignal }>) => {
+    feedBigBodyNodes(getTurnEmit(extra?.sessionId))
+    return "ran one bash with a 400-line stdout"
+  },
+}
+
 // ── CANNED DIFF FEED (diff-viewer frame gate) — a settled edit_file + a settled write_file owned by
 // one still-running `editor` subagent NODE, so the MATURED diff render (tool-view.tsx ToolBody) draws
 // the native opentui <diff> from canned data. edit_file carries deterministic old/new strings whose

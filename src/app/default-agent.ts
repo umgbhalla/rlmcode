@@ -18,7 +18,7 @@ import { BASE_TOOLS } from "../core/tools.ts"
 import { createAgent, projectDocLoaded } from "../core/agent.ts"
 import { makeRunTurn } from "../core/run.ts"
 import { makeMockAI, MOCK_MODEL } from "../core/mock-ai.ts"
-import { MOCK_DIFF_TOOL, MOCK_NODESTREAM_TOOL, MOCK_ORCH_TOOL, MOCK_RATELIMIT_TOOL, MOCK_TRANSCRIPT_TOOL } from "../core/mock.ts"
+import { MOCK_BIGBODY_TOOL, MOCK_DIFF_TOOL, MOCK_NODESTREAM_TOOL, MOCK_ORCH_TOOL, MOCK_RATELIMIT_TOOL, MOCK_TRANSCRIPT_TOOL } from "../core/mock.ts"
 import { llm, MODEL } from "../core/runtime.ts"
 import { deleteSession, seedSession, sessionsRT } from "../core/sessions.ts"
 
@@ -27,7 +27,7 @@ import { deleteSession, seedSession, sessionsRT } from "../core/sessions.ts"
 // TUI pulls its turn boundary from.
 const defaultAgent =
   process.env.RLM_MOCK === "1"
-    ? createAgent({ ai: makeMockAI(process.env.RLM_MOCK_STREAM === "1"), model: MOCK_MODEL, tools: [...BASE_TOOLS, MOCK_ORCH_TOOL, MOCK_TRANSCRIPT_TOOL, MOCK_DIFF_TOOL, MOCK_RATELIMIT_TOOL, MOCK_NODESTREAM_TOOL] })
+    ? createAgent({ ai: makeMockAI(process.env.RLM_MOCK_STREAM === "1"), model: MOCK_MODEL, tools: [...BASE_TOOLS, MOCK_ORCH_TOOL, MOCK_TRANSCRIPT_TOOL, MOCK_DIFF_TOOL, MOCK_RATELIMIT_TOOL, MOCK_NODESTREAM_TOOL, MOCK_BIGBODY_TOOL] })
     : createAgent({ ai: llm, model: MODEL })
 
 // The DEFAULT-agent turn boundary used by the TUI's sendAtom: a serializable AsyncGenerator of

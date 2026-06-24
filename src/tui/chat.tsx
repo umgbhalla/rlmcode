@@ -77,11 +77,12 @@ function useWorking(busy: boolean): { frame: string; elapsed: number } {
 // narration line. The grouping authority (toolui.groupSteps) is run ONCE at assembly (toTurns →
 // t.items), so this component is pure presentation over the already-grouped unit; the SAME unit
 // shape is what the node Activity reuses, so a node's explore run renders identically to a turn's.
-function ToolGroupView({ it, expTools, focusedKey, cols, frame, syntaxStyle, onToggleTool }: {
+function ToolGroupView({ it, expTools, focusedKey, cols, bodyBudget, frame, syntaxStyle, onToggleTool }: {
   it: StepItem
   expTools: Set<string>
   focusedKey: string | undefined
   cols: number
+  bodyBudget: number
   frame: string
   syntaxStyle: unknown
   onToggleTool: (id: string) => void
@@ -95,6 +96,7 @@ function ToolGroupView({ it, expTools, focusedKey, cols, frame, syntaxStyle, onT
         expanded={expTools.has(s.id)}
         focused={focusedKey === `tool:${s.id}`}
         cols={cols}
+        bodyBudget={bodyBudget}
         frame={frame}
         syntaxStyle={syntaxStyle}
         onToggle={() => onToggleTool(s.id)}
@@ -115,6 +117,7 @@ function TurnViewImpl({
   detailKey,
   focusedKey,
   cols,
+  bodyBudget,
   frame,
   syntaxStyle,
   onToggleTurn,
@@ -132,6 +135,10 @@ function TurnViewImpl({
   detailKey: string | null
   focusedKey: string | undefined
   cols: number
+  // TURN-AWARE ROW BUDGET (W4/F6): the viewport-derived per-turn body-line allocation. TurnView
+  // divides it among THIS turn's currently-EXPANDED tools so the turn's total expanded body stays
+  // within one viewport — a single expanded bash can't blow the screen (replaces the unbounded cap).
+  bodyBudget: number
   frame: string
   // The shared SyntaxStyle (App rebuilds it on a theme switch); threaded in so a settled turn
   // recolors on a switch (a new identity flows through the memo comparator) but not on the busy tick.
@@ -144,6 +151,11 @@ function TurnViewImpl({
 }) {
   const [hoverSteps, setHoverSteps] = useState(false)
   const stepsFocused = focusedKey === `turn:${t.idx}`
+  // TURN-AWARE ROW BUDGET (W4/F6): split the viewport-derived bodyBudget among THIS turn's currently
+  // EXPANDED tools so the turn's TOTAL expanded body fits one viewport — two expanded bodies each get
+  // half, one gets it all; collapsed tools don't draw from it. Floored at 1 (never 0/NaN ÷ by zero).
+  const expandedCount = expanded ? t.steps.filter((s) => s.kind === "tool" && expTools.has(s.id)).length : 0
+  const perToolBudget = Math.floor(bodyBudget / Math.max(1, expandedCount))
   // An interrupted / errored turn surfaces as a "⚠ …" reply (atoms.ts catchCause). Carry
   // the tool-row red convention up to the final reply so failure isn't painted success-green.
   const failed = t.final !== null && t.final.startsWith("⚠")
@@ -176,6 +188,7 @@ function TurnViewImpl({
                   expTools={expTools}
                   focusedKey={focusedKey}
                   cols={cols}
+                  bodyBudget={perToolBudget}
                   frame={frame}
                   syntaxStyle={syntaxStyle}
                   onToggleTool={onToggleTool}
@@ -299,6 +312,12 @@ function NodeRow(p: NodeRowProps) {
 // from App so the cursor-wrap ternary doesn't count against App's complexity budget.
 const pickFocused = (keys: ReadonlyArray<string>, cursor: number): string | undefined =>
   keys.length ? keys[((cursor % keys.length) + keys.length) % keys.length] : undefined
+
+// TURN-AWARE ROW BUDGET (W4/F6): the viewport-derived per-turn body-line allocation an expanded
+// tool's body is bounded to — terminal height minus a fixed chrome reserve (header + composer +
+// footer + the steps/reply rows), floored generous so even a tiny viewport reveals meaningfully more
+// than the collapsed cap. Extracted (pure) so the `|| 24` fallback doesn't count against App's CC.
+const rowBudgetOf = (height: number | undefined): number => Math.max(24, (height ?? 24) - 10)
 
 // Per-id expansion toggle set (orch nodes). Encapsulates the Set + reset-on-session.
 const useNodeExpansion = (resetKey: unknown) => {
@@ -450,6 +469,10 @@ function App() {
   // into the ONE stable Row[] (t.rows) per (orch, expNodes) — so the grouping + the flatten run
   // ONCE here, not 3× per busy tick across TurnView / the focus ring / the memo comparator.
   const turns = active ? toTurns(active.messages, orch, expNodes) : []
+  // TURN-AWARE ROW BUDGET (W4/F6, motel SpanDetailPane bodyLines): the viewport-derived per-turn
+  // body-line allocation (rowBudgetOf). TurnView divides it among its expanded tools so the turn's
+  // TOTAL expanded body fits one screen — one giant bash can no longer blow the viewport.
+  const bodyBudget = rowBudgetOf(height)
   const isExpanded = (turn: Turn) => expTurns.has(turn.idx) || turn.final === null // in-progress auto-expands
 
   // FOCUS MODEL (captureFocus) — the composer is the DEFAULT focus owner and RECLAIMS focus the
@@ -923,6 +946,7 @@ function App() {
             detailKey={detailKey}
             focusedKey={focusedKey}
             cols={width || 80}
+            bodyBudget={bodyBudget}
             frame={work.frame}
             syntaxStyle={mdStyle}
             onToggleTurn={() => toggleTurn(turn.idx)}

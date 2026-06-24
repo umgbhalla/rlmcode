@@ -20,6 +20,7 @@ import { theme } from "./theme.ts"
 import type { Msg } from "./atoms.ts"
 import {
   collapseMax,
+  expandedMax,
   type PreviewLine,
   toolDetail,
   toolDiff,
@@ -89,7 +90,7 @@ function ToolHeader({ m, expanded, canExpand, focused, frame, onToggle }: { m: T
 // the row's expander then reveals the full output. A file mutation (edit/write) renders the
 // synthesized unified diff through opentui's native <diff> (split when wide, else unified) — a
 // diff is already minimal, so it's never line-collapsed.
-function ToolBody({ m, isError, expanded, cols, syntaxStyle }: { m: ToolMsg; isError: boolean; expanded: boolean; cols: number; syntaxStyle: unknown }) {
+function ToolBody({ m, isError, expanded, cols, bodyBudget, syntaxStyle }: { m: ToolMsg; isError: boolean; expanded: boolean; cols: number; bodyBudget?: number | undefined; syntaxStyle: unknown }) {
   const diff = toolDiff(m.name, m.args, isError)
   if (diff) {
     return (
@@ -99,8 +100,11 @@ function ToolBody({ m, isError, expanded, cols, syntaxStyle }: { m: ToolMsg; isE
     )
   }
   // COLLAPSE (single authority): collapsed → cap to collapseMax(name) lines; toolPreview's
-  // headLines appends the "… +M more" line itself. Expanded → a large cap shows the full body.
-  const max = expanded ? Number.MAX_SAFE_INTEGER : collapseMax(m.name)
+  // headLines appends the "… +M more" line itself. Expanded → a BUDGET-AWARE cap (W4/F6): the
+  // per-turn bodyBudget bounds even a fully-expanded body so one giant bash can't blow the viewport
+  // (was Number.MAX_SAFE_INTEGER — the F6 expanded-tier splatter); headLines still appends "… +N
+  // more" when the body exceeds the bounded cap, so the drill-down affordance survives.
+  const max = expanded ? expandedMax(m.name, bodyBudget) : collapseMax(m.name)
   const preview = toolPreview(m.name, m.args, m.result, isError, Math.max(20, cols - 10), max)
   return (
     <box flexDirection="column" style={{ paddingLeft: INDENT }}>
@@ -126,11 +130,15 @@ const bodyOverflows = (m: ToolMsg, isError: boolean, cols: number): boolean => {
 //   - inline → a dim one-line header, NO body (a RUNNING or no-output tool);
 //   - block  → header + a COLLAPSED body (first N lines + "… +M more"), expandable to full;
 //   - error  → a RED left-border card: header + the (collapsed) error body.
-export function ToolView({ m, expanded, focused, cols, frame, syntaxStyle, onToggle }: {
+export function ToolView({ m, expanded, focused, cols, bodyBudget, frame, syntaxStyle, onToggle }: {
   m: ToolMsg
   expanded: boolean
   focused: boolean
   cols: number
+  // TURN-AWARE ROW BUDGET (W4/F6): the per-turn body-line allocation (chat.tsx derives it from the
+  // viewport height, divided among the turn's expanded tools). Bounds the EXPANDED body so one
+  // expanded bash can't blow the viewport. undefined ⇒ the static EXPANDED_FALLBACK ceiling.
+  bodyBudget?: number | undefined
   frame: string
   // the shared SyntaxStyle for the native <diff> (chat.tsx mdStyle), passed in so this file stays
   // free of the theme.makeSyntaxStyle wiring (same seam messages.tsx uses for renderBody).
@@ -145,7 +153,7 @@ export function ToolView({ m, expanded, focused, cols, frame, syntaxStyle, onTog
   const body = (
     <>
       {header}
-      {showBody ? <ToolBody m={m} isError={isError} expanded={expanded} cols={cols} syntaxStyle={syntaxStyle} /> : null}
+      {showBody ? <ToolBody m={m} isError={isError} expanded={expanded} cols={cols} bodyBudget={bodyBudget} syntaxStyle={syntaxStyle} /> : null}
     </>
   )
   // ERROR CARD: a failed tool gets a RED left-border card (not a dim one-liner) so a failure is

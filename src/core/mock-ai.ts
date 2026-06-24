@@ -119,6 +119,21 @@ const wantsNodeStream = (req: Readonly<AxChatRequest<unknown>>): boolean => {
   return last !== undefined && typeof last.content === "string" && /node.?stream/i.test(last.content)
 }
 
+// BIG-BODY variant (W4/F6): when the user asks for a big output, the mock calls the test-only
+// `mock_bigbody` tool (mock.ts) — it replays one bash with a 400-line stdout, so the row-budget
+// frame gate (scripts/tui/row-budget.test.ts) asserts the EXPANDED body stays bounded by the
+// per-turn bodyBudget, never the full 400-line splatter. Keyed off the prompt like the others.
+const MOCK_BIGBODY_TOOL = {
+  id: "call_mock_bigbody",
+  type: "function" as const,
+  function: { name: "mock_bigbody", params: JSON.stringify({}) },
+}
+const wantsBigBody = (req: Readonly<AxChatRequest<unknown>>): boolean => {
+  const users = req.chatPrompt.filter((m) => m.role === "user")
+  const last = users[users.length - 1]
+  return last !== undefined && typeof last.content === "string" && /big output/i.test(last.content)
+}
+
 // GROUP variant: when the user message asks to explore, the mock scripts THREE CONSECUTIVE
 // explore tool calls (read_file → glob → grep) in ONE tool-loop step. ax executes all three,
 // appends their results to memory, then calls again → the final reply. These land as three
@@ -205,7 +220,9 @@ const scriptedChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResp
             ? [MOCK_RATELIMIT_TOOL]
             : wantsNodeStream(req)
               ? [MOCK_NODESTREAM_TOOL]
-              : [MOCK_TOOL]
+              : wantsBigBody(req)
+                ? [MOCK_BIGBODY_TOOL]
+                : [MOCK_TOOL]
   // On the tool-call step of an explore turn, surface the cluster's calls to the activity bus
   // (the mock service doesn't, see emitGroupCalls) so the three explore steps render + group.
   if (!hasToolResult && wantsGroup(req)) emitGroupCalls()
@@ -263,7 +280,7 @@ const streamReply = (): ReadableStream<AxChatResponse> => {
 // streams; the tool-call step and orch/rate-limit turns stay plain (their reply is the orch tree,
 // not streamed prose). Returns a ReadableStream only where the live render is under test.
 const scriptedStreamChat = (req: Readonly<AxChatRequest<unknown>>): Promise<AxChatResponse | ReadableStream<AxChatResponse>> =>
-  hasCurrentTurnToolResult(req) && !wantsOrch(req) && !wantsGroup(req) && !wantsRateLimit(req) && !wantsDiff(req) && !wantsNodeStream(req)
+  hasCurrentTurnToolResult(req) && !wantsOrch(req) && !wantsGroup(req) && !wantsRateLimit(req) && !wantsDiff(req) && !wantsNodeStream(req) && !wantsBigBody(req)
     ? Promise.resolve(streamReply())
     : scriptedChat(req)
 

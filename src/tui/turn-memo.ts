@@ -125,6 +125,11 @@ export type MemoProps = {
   readonly detailKey: string | null
   readonly focusedKey: string | undefined
   readonly cols: number
+  // TURN-AWARE ROW BUDGET (W4/F6): the viewport-derived per-turn body-line allocation an expanded
+  // tool's body is bounded to. A layout input like `cols` — it changes on a viewport (height) resize,
+  // so a settled turn with an EXPANDED bounded body must repaint when it changes (else the body would
+  // stay capped at the stale budget after a resize).
+  readonly bodyBudget: number
   // The shared SyntaxStyle identity. App rebuilds it ONLY on a theme switch (useMemo keyed on the
   // active theme name), so it is STABLE across the busy tick (no settled-turn repaint) but CHANGES
   // on a switch — forcing every settled turn to recolor its diffs/markdown in the new palette.
@@ -138,7 +143,7 @@ export type MemoProps = {
 export const turnPropsEqual = (prev: MemoProps, next: MemoProps): boolean => {
   // An in-flight turn (either render) always re-renders — never memo a growing/animating turn.
   if (!isSettled(prev.t) || !isSettled(next.t)) return false
-  if (prev.first !== next.first || prev.cols !== next.cols) return false
+  if (prev.first !== next.first || prev.cols !== next.cols || prev.bodyBudget !== next.bodyBudget) return false
   // A theme switch swaps the SyntaxStyle identity (stable across busy ticks) — repaint so the
   // settled turn's diffs/markdown recolor in the new palette. Same identity ⇒ no tick repaint.
   if (prev.syntaxStyle !== next.syntaxStyle) return false

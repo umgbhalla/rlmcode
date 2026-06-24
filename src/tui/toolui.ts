@@ -131,6 +131,22 @@ export const toolRenderMode = (name: string, status: "running" | "ok" | "error",
 // at this cap so the collapse layers cleanly over the existing per-tool toolPreview output.
 export const collapseMax = (name: string): number => (name === "bash" ? 10 : 3)
 
+// ── TURN-AWARE EXPANDED CAP (W4/F6, motel SpanDetailPane bodyLines) ────────────────────────────
+// When a tool row is EXPANDED, its body USED to cap at Number.MAX_SAFE_INTEGER — a single expanded
+// 500-line bash dumped all 500 lines inline and blew the viewport off-screen (the F6 splatter at
+// the expanded tier). The cap is now BUDGET-AWARE: `bodyBudget` is the per-turn row allocation
+// (chat.tsx derives it from the viewport height, then divides it among the turn's expanded tools),
+// so the expanded body is bounded to a finite, viewport-fitting cap + keeps its "… +N more" footer
+// (headLines appends it). Floored so the expand still reveals MEANINGFULLY more than the collapsed
+// cap (else expanding a huge body under a tiny viewport would show no extra lines). A 0/undefined
+// budget (no viewport info) falls back to a generous static ceiling so non-budget callers are sane.
+const EXPANDED_FALLBACK = 200 // generous static ceiling when no viewport budget is threaded
+export const expandedMax = (name: string, bodyBudget?: number): number => {
+  const floor = collapseMax(name) * 2 // expanding always reveals at least ~2× the collapsed cap
+  if (bodyBudget === undefined || bodyBudget <= 0) return Math.max(floor, EXPANDED_FALLBACK)
+  return Math.max(floor, Math.floor(bodyBudget))
+}
+
 // ── PER-TOOL HEADER DETAIL (opencode Shell workdir/exit) ──────────────────────────────────
 // A short, Shell-specific suffix appended to a settled bash header — the high-signal fact
 // opencode's Shell renderer surfaces (the workdir it ran in + a non-zero exit). Empty string ⇒
