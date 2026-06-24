@@ -25,10 +25,12 @@
 //   `frame` is intentionally absent: a settled turn has no running glyph (its tools/nodes are all
 //   settled), so the spinner tick can't change its output — that's the whole perf win.
 import type { Msg, OrchTree } from "./atoms.ts"
-import { flatten } from "./orch-tree.ts"
+import type { Row as OrchRow } from "./orch-tree.ts"
 
 // The TurnView render shape this module reasons about (kept in sync with chat.tsx's Turn). Only
 // the fields that affect the render are listed; `steps` carry the tool/narration parts.
+// FLATTEN MEMO (W3.2, F4): `rows` is the assembly-flattened workflow Row[] (toTurns → t.rows); the
+// comparator reads it instead of re-flattening, so the tree is walked ONCE per render, not 3×.
 export type MemoTurn = {
   readonly idx: number
   readonly user: string
@@ -38,6 +40,7 @@ export type MemoTurn = {
   readonly thinking?: string | undefined
   readonly streaming?: boolean | undefined
   readonly workflow?: OrchTree | undefined
+  readonly rows?: ReadonlyArray<OrchRow> | undefined
 }
 
 // SETTLED = the turn is done AND nothing in it still animates: a final reply exists, it is not the
@@ -71,11 +74,14 @@ export const contentKey = (t: MemoTurn): string => {
 // and — when it carries a workflow — each flattened node + that node's owned tools. Mirrors the
 // focusables chat.tsx builds, scoped to one turn. `expNodes` gates which workflow rows exist
 // (a collapsed node hides its subtree), so the key set tracks the live tree exactly.
-export const turnRowKeys = (t: MemoTurn, expNodes: ReadonlySet<string>): Array<string> => {
+export const turnRowKeys = (t: MemoTurn, _expNodes: ReadonlySet<string>): Array<string> => {
   const keys: Array<string> = [`turn:${t.idx}`]
   for (const s of t.steps) if (s.kind === "tool") keys.push(`tool:${s.id}`)
-  if (t.workflow) {
-    for (const row of flatten(t.workflow, expNodes)) {
+  // FLATTEN MEMO (W3.2): read the assembly-flattened Row[] (t.rows) instead of re-flattening the
+  // tree here — it already reflects expNodes (toTurns flattened it with the same set), so the key
+  // set tracks the live tree exactly without a third walk per render.
+  if (t.rows) {
+    for (const row of t.rows) {
       keys.push(`node:${row.id}`)
       for (const m of row.tools) keys.push(`tool:${m.id}`)
     }

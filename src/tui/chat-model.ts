@@ -5,20 +5,34 @@
 // here — chat.tsx imports these and feeds them into the components. Total functions over the
 // immutable Msg/OrchTree shapes, so they're trivially testable and free of UI concerns.
 import type { Msg, OrchTree, TurnMeta } from "./atoms.ts"
+import type { Row as OrchRow } from "./orch-tree.ts"
 import { theme } from "./theme.ts"
-import { toolLabel } from "./toolui.ts"
-import { computeShowOrch } from "./workflow.tsx"
+import { groupSteps, groupSummary, type StepItem, toolLabel } from "./toolui.ts"
+import { computeShowOrch, workflowRows } from "./workflow.tsx"
 
 export const INDENT = 2 // single source of truth for transcript nesting
 export const SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 type ToolMsg = Extract<Msg, { kind: "tool" }>
 
+// TOOL GROUPING is now a single assembly-time authority in toolui.ts (W3.1) — re-exported here so
+// existing importers (chat.tsx) keep their `from "./chat-model.ts"` path while the logic lives in
+// the pure leaf both the transcript AND the node detail pane share.
+export { groupSteps, groupSummary, type StepItem }
+
 // INLINE NODE-TREE (opencode-ux-blueprint Option B): a turn that produced an orchestration
 // fan-out carries its OrchTree as `workflow`, so TurnView renders the node-tree right after
 // that turn's reply (vs the old session-level block pinned below ALL turns). undefined on a
 // plain turn ⇒ no orchestration block. toTurns attaches it (computeShowOrch-gated).
-export type Turn = { idx: number; user: string; steps: Array<Msg>; final: string | null; meta?: TurnMeta | undefined; thinking?: string | undefined; streaming?: boolean; workflow?: OrchTree | undefined }
+// ASSEMBLY-TIME STRUCTURE (W3, fixes F2/F3/F4): a Turn carries its render-ready shape, computed
+// ONCE per toTurns pass (NOT re-derived on every 12×/s busy-tick render):
+//   - `items` — the grouped step stream (groupSteps applied at assembly): the explore-tool runs are
+//     already collapsed into `{kind:'group'}` units, so TurnView just maps `items` (it no longer
+//     re-groups per render, and the grouped shape is now a first-class, exportable assembly product).
+//   - `rows` — the flattened+velocity-capped workflow Row[] (flatten() applied at assembly): the ONE
+//     stable Row[] per (orch, expNodes) shared by TurnView, the focus ring, and the memo comparator,
+//     replacing the old 3× flatten() per render. undefined when the turn carries no workflow.
+export type Turn = { idx: number; user: string; steps: Array<Msg>; items: Array<StepItem>; final: string | null; meta?: TurnMeta | undefined; thinking?: string | undefined; streaming?: boolean; workflow?: OrchTree | undefined; rows?: ReadonlyArray<OrchRow> | undefined }
 
 export const oneLine = (s: string, n = 90): string => {
   const t = s.replace(/\s+/g, " ").trim()
@@ -70,10 +84,10 @@ export const statusBar = (busy: boolean, armed: boolean, note: string | null, wo
   return { right: "", tone: theme.muted, live: false }
 }
 
-export function toTurns(messages: ReadonlyArray<Msg>, orch?: OrchTree): Array<Turn> {
+export function toTurns(messages: ReadonlyArray<Msg>, orch?: OrchTree, expNodes: ReadonlySet<string> = EMPTY_SET): Array<Turn> {
   const turns: Array<Turn> = []
   for (const m of messages) {
-    if (m.kind === "you") turns.push({ idx: turns.length, user: m.text, steps: [], final: null })
+    if (m.kind === "you") turns.push({ idx: turns.length, user: m.text, steps: [], items: [], final: null })
     else if (turns.length > 0) turns[turns.length - 1]!.steps.push(m)
   }
   // INLINE NODE-TREE: the session holds ONE OrchTree (the live fan-out). Attach it to the turn
@@ -105,36 +119,18 @@ export function toTurns(messages: ReadonlyArray<Msg>, orch?: OrchTree): Array<Tu
         break
       }
     }
+    // ASSEMBLY-TIME GROUPING + FLATTEN (W3, F2/F3/F4): the reply has been promoted out, so `steps`
+    // is the final tool/narration stream — group it ONCE here (was a render-time groupSteps in
+    // TurnView, re-run every tick). And flatten the workflow ONCE into the stable Row[] the render +
+    // focus ring + memo comparator all share (was 3× flatten() per render). Both are now first-class
+    // products of assembly, identical no matter which surface consumes them — no out-of-order flicker.
+    t.items = groupSteps(t.steps)
+    if (t.workflow) t.rows = workflowRows(t.workflow, expNodes)
   }
   return turns
 }
 
-// TOOL GROUPING (P1): a run of consecutive read/glob/grep ("explore") tool steps collapses
-// into ONE "explored N" row instead of N near-identical lines (the flat-rendering fix). A lone
-// explore tool, an error, or any other tool renders normally. Presentational only — Msg is
-// unchanged; this groups at render time.
-const EXPLORE_TOOLS = new Set(["read_file", "glob", "grep"])
-export type StepItem = { readonly kind: "one"; readonly m: Msg } | { readonly kind: "group"; readonly tools: Array<ToolMsg> }
-export const groupSteps = (steps: Array<Msg>): Array<StepItem> => {
-  const out: Array<StepItem> = []
-  for (const s of steps) {
-    if (s.kind === "tool" && EXPLORE_TOOLS.has(s.name) && s.status !== "error") {
-      const last = out[out.length - 1]
-      if (last?.kind === "group") last.tools.push(s)
-      else out.push({ kind: "group", tools: [s] })
-    } else out.push({ kind: "one", m: s })
-  }
-  // a "group" of one isn't worth collapsing — unwrap so a single read still renders in full.
-  return out.map((it) => (it.kind === "group" && it.tools.length === 1 ? { kind: "one", m: it.tools[0]! } : it))
-}
-// One-line summary for a collapsed explore group: "explored 5 (3 read · 2 grep)".
-export const groupSummary = (tools: ReadonlyArray<ToolMsg>): string => {
-  const by: Record<string, number> = {}
-  for (const t of tools) by[t.name] = (by[t.name] ?? 0) + 1
-  const verb: Record<string, string> = { read_file: "read", glob: "glob", grep: "grep" }
-  const parts = Object.entries(by).map(([n, c]) => `${c} ${verb[n] ?? n}`)
-  return `explored ${tools.length} (${parts.join(" · ")})`
-}
+const EMPTY_SET: ReadonlySet<string> = new Set()
 
 export const toolsUsed = (steps: Array<Msg>): string =>
   [...new Set(steps.filter((s): s is ToolMsg => s.kind === "tool").map((s) => toolLabel(s.name, s.args).split("(")[0]!))].join(", ")

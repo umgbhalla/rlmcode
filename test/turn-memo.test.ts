@@ -5,6 +5,7 @@ import { effect, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import type { Msg, OrchTree } from "../src/tui/atoms.ts"
 import { contentKey, interactionSig, isSettled, type MemoProps, turnPropsEqual, turnRowKeys } from "../src/tui/turn-memo.ts"
+import { workflowRows } from "../src/tui/workflow.tsx"
 
 const EMPTY: ReadonlySet<string> = new Set()
 const tool = (id: string, status: "running" | "ok" | "error"): Msg => ({ kind: "tool", id, name: "bash", args: "{}", status, result: "out" })
@@ -30,7 +31,9 @@ const orch: OrchTree = {
   totalTokens: 500,
   nodes: { n1: { id: "n1", label: "scan", phase: "", status: "done", tokens: 500, tools: [tool("nt1", "ok")] } },
 }
-const settledWf = { ...settled, idx: 2, workflow: orch }
+// FLATTEN MEMO (W3.2): a workflow turn now carries its assembly-flattened Row[] on `rows` (toTurns
+// → t.rows); turnRowKeys reads it instead of re-flattening, so the fixture supplies it the same way.
+const settledWf = { ...settled, idx: 2, workflow: orch, rows: workflowRows(orch, EMPTY) }
 
 const STYLE = { style: "default" }
 const props = (t: MemoProps["t"], over: Partial<Omit<MemoProps, "t">> = {}): MemoProps => ({

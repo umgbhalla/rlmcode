@@ -29,10 +29,10 @@ import { type Command, Palette } from "./palette.tsx"
 import { DialogOverlays, printableChar, useDialogs } from "./dialogs.tsx"
 import { WhichKey } from "./which-key.tsx"
 import { activeBindings, type Bind, dispatch, type KeyEventLike, matchesChord, useModeStack } from "./keys.ts"
-import { activeRetry, orchFocusables, WorkflowPart, workflowRows } from "./workflow.tsx"
+import { activeRetry, orchFocusables, WorkflowPart } from "./workflow.tsx"
 import { turnPropsEqual } from "./turn-memo.ts"
 import { List, NewPill, SessionHeader } from "./header.tsx"
-import { fmtTokens, groupSummary, groupSteps, INDENT, navKeyName, oneLine, sessionTokens, SPIN_FRAMES, statusBar, toTurns, toolsUsed, type Turn } from "./chat-model.ts"
+import { fmtTokens, groupSummary, INDENT, navKeyName, oneLine, sessionTokens, SPIN_FRAMES, statusBar, type StepItem, toTurns, toolsUsed, type Turn } from "./chat-model.ts"
 
 // The shared syntax style for the reply <markdown> + the tool <diff> is built INSIDE App via
 // useMemo keyed on the active theme name (theme.ts makeSyntaxStyle over the LIVE palette), so a
@@ -72,6 +72,37 @@ function useWorking(busy: boolean): { frame: string; elapsed: number } {
 // inline-vs-block + per-tool detail + output-collapse) live in tool-view.tsx, imported above —
 // TurnView + NodeRow render the SAME ToolView for the main turn's steps and a node's owned tools.
 
+// TOOL-GROUP UNIT (W3.1, fixes F2/F3): renders ONE assembly-time StepItem — a collapsed explore
+// GROUP as the single "⊙ explored N (…)" summary row, a TOOL step as the bounded ToolView, or a
+// narration line. The grouping authority (toolui.groupSteps) is run ONCE at assembly (toTurns →
+// t.items), so this component is pure presentation over the already-grouped unit; the SAME unit
+// shape is what the node Activity reuses, so a node's explore run renders identically to a turn's.
+function ToolGroupView({ it, expTools, focusedKey, cols, frame, syntaxStyle, onToggleTool }: {
+  it: StepItem
+  expTools: Set<string>
+  focusedKey: string | undefined
+  cols: number
+  frame: string
+  syntaxStyle: unknown
+  onToggleTool: (id: string) => void
+}) {
+  if (it.kind === "group") return <text fg={theme.dim}>{`⊙ ${groupSummary(it.tools)}`}</text>
+  const s = it.m
+  if (s.kind === "tool")
+    return (
+      <ToolView
+        m={s}
+        expanded={expTools.has(s.id)}
+        focused={focusedKey === `tool:${s.id}`}
+        cols={cols}
+        frame={frame}
+        syntaxStyle={syntaxStyle}
+        onToggle={() => onToggleTool(s.id)}
+      />
+    )
+  return <text fg={theme.subtext}>{`· ${oneLine(s.text)}`}</text>
+}
+
 // STATIC-COMMIT (claude_code): TurnView is wrapped in React.memo with the turnPropsEqual
 // comparator (turn-memo.ts) so a SETTLED turn does NOT repaint on the ~12×/s busy tick — only
 // the in-flight turn + the composer redraw. TurnViewImpl is the unchanged render; the memo is a
@@ -81,7 +112,6 @@ function TurnViewImpl({
   first,
   expanded,
   expTools,
-  expNodes,
   detailKey,
   focusedKey,
   cols,
@@ -95,6 +125,9 @@ function TurnViewImpl({
   first: boolean
   expanded: boolean
   expTools: Set<string>
+  // expNodes is consumed by the memo comparator (turnPropsEqual reads props.expNodes), not the
+  // render body — the workflow Row[] now arrives pre-flattened on `t.rows` (W3.2). Kept in the
+  // props type so the comparator still sees expNodes changes; absent from the destructure (unused here).
   expNodes: ReadonlySet<string>
   detailKey: string | null
   focusedKey: string | undefined
@@ -132,24 +165,22 @@ function TurnViewImpl({
           </text>
           {expanded && (
             <box flexDirection="column" style={{ paddingLeft: INDENT }}>
-              {groupSteps(t.steps).map((it) => {
-                if (it.kind === "group") return <text key={`g:${groupSummary(it.tools)}`} fg={theme.dim}>{`⊙ ${groupSummary(it.tools)}`}</text>
-                const s = it.m
-                if (s.kind === "tool")
-                  return (
-                    <ToolView
-                      key={s.id}
-                      m={s}
-                      expanded={expTools.has(s.id)}
-                      focused={focusedKey === `tool:${s.id}`}
-                      cols={cols}
-                      frame={frame}
-                      syntaxStyle={syntaxStyle}
-                      onToggle={() => onToggleTool(s.id)}
-                    />
-                  )
-                return <text key={`narr:${oneLine(s.text)}`} fg={theme.subtext}>{`· ${oneLine(s.text)}`}</text>
-              })}
+              {/* ASSEMBLY-TIME GROUPING (W3.1): the steps are PRE-GROUPED in toTurns (t.items), so
+                  TurnView just renders the units via the shared ToolGroupView — it no longer re-runs
+                  groupSteps on every busy tick, and the grouped shape is the same first-class unit the
+                  node Activity reuses (toolui.groupSteps), so a node's explore run reads identically. */}
+              {t.items.map((it) => (
+                <ToolGroupView
+                  key={it.kind === "group" ? `g:${groupSummary(it.tools)}` : it.m.kind === "tool" ? it.m.id : `narr:${oneLine(it.m.text)}`}
+                  it={it}
+                  expTools={expTools}
+                  focusedKey={focusedKey}
+                  cols={cols}
+                  frame={frame}
+                  syntaxStyle={syntaxStyle}
+                  onToggleTool={onToggleTool}
+                />
+              ))}
             </box>
           )}
         </box>
@@ -175,10 +206,12 @@ function TurnViewImpl({
       {/* INLINE NODE-TREE (opencode-ux-blueprint Option B): a workflow turn renders its
           orchestration node-tree HERE, right after the reply — so the fan-out reads as part
           of THIS turn's answer. A non-workflow turn carries no `workflow` ⇒ no block. */}
+      {/* FLATTEN MEMO (W3.2, F4): the Row[] is computed ONCE at assembly (toTurns → t.rows), shared
+          with the focus ring + the memo comparator — NOT re-flattened here on every busy tick. */}
       {t.workflow && (
         <WorkflowPart
           orch={t.workflow}
-          rows={workflowRows(t.workflow, expNodes)}
+          rows={t.rows ?? []}
           fmtTokens={fmtTokens}
           indent={INDENT}
           detailKey={detailKey}
@@ -413,7 +446,10 @@ function App() {
   // to the turn that produced it (computeShowOrch-gated), so the tree renders under THAT turn's
   // reply — not in a session-level footer. A non-workflow session has no `workflow` on any turn.
   const orch = active?.orch
-  const turns = active ? toTurns(active.messages, orch) : []
+  // ASSEMBLY (W3): toTurns now also groups each turn's steps (t.items) AND flattens the workflow
+  // into the ONE stable Row[] (t.rows) per (orch, expNodes) — so the grouping + the flatten run
+  // ONCE here, not 3× per busy tick across TurnView / the focus ring / the memo comparator.
+  const turns = active ? toTurns(active.messages, orch, expNodes) : []
   const isExpanded = (turn: Turn) => expTurns.has(turn.idx) || turn.final === null // in-progress auto-expands
 
   // FOCUS MODEL (captureFocus) — the composer is the DEFAULT focus owner and RECLAIMS focus the
@@ -433,7 +469,7 @@ function App() {
   for (const turn of turns) {
     if (turn.steps.length > 0) focusables.push(`turn:${turn.idx}`)
     if (isExpanded(turn)) for (const s of turn.steps) if (s.kind === "tool") focusables.push(`tool:${s.id}`)
-    if (turn.workflow) focusables.push(...orchFocusables(workflowRows(turn.workflow, expNodes)))
+    if (turn.rows) focusables.push(...orchFocusables(turn.rows)) // t.rows is set iff t.workflow (toTurns)
   }
   const focusedKey = pickFocused(focusables, focus)
   // ENTER on a focused row: a TURN-steps header toggles the steps; a TOOL toggles its body; a NODE

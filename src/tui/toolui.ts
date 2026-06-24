@@ -1,7 +1,41 @@
 // Claude-Code-style tool presentation: a human label (Bash(cmd), Read(path),
 // Search(pattern)) and a short result summary (6 files, 12 lines), instead of
 // raw function name + JSON params / raw output.
+import type { Msg } from "./atoms.ts"
 import { getIconShape } from "./icons.ts"
+
+type ToolMsg = Extract<Msg, { kind: "tool" }>
+
+// TOOL GROUPING — THE ONE assembly-time authority (W3.1, fixes F2/F3). A run of consecutive
+// read/glob/grep ("explore") tool steps collapses into ONE "explored N" unit instead of N
+// near-identical lines. This used to be a render-time pass duplicated per-surface (chat.tsx ran it
+// over a turn's steps; the node detail pane didn't group at all — the F2/F3 asymmetry). It now
+// lives HERE, a pure leaf both surfaces import, and is applied at ASSEMBLY (toTurns / the node
+// detail pane) ONCE, so the SAME sequence renders ONE way whether it's a main turn or a node's
+// Activity — no out-of-order flicker, no per-tick recompute. A lone explore tool, an error, or any
+// other tool stays its own row. The Msg type-only import is a pure type (atoms never imports here).
+const EXPLORE_TOOLS = new Set(["read_file", "glob", "grep"])
+export type StepItem = { readonly kind: "one"; readonly m: Msg } | { readonly kind: "group"; readonly tools: Array<ToolMsg> }
+export const groupSteps = (steps: ReadonlyArray<Msg>): Array<StepItem> => {
+  const out: Array<StepItem> = []
+  for (const s of steps) {
+    if (s.kind === "tool" && EXPLORE_TOOLS.has(s.name) && s.status !== "error") {
+      const last = out[out.length - 1]
+      if (last?.kind === "group") last.tools.push(s)
+      else out.push({ kind: "group", tools: [s] })
+    } else out.push({ kind: "one", m: s })
+  }
+  // a "group" of one isn't worth collapsing — unwrap so a single read still renders in full.
+  return out.map((it) => (it.kind === "group" && it.tools.length === 1 ? { kind: "one", m: it.tools[0]! } : it))
+}
+// One-line summary for a collapsed explore group: "explored 5 (3 read · 2 grep)".
+export const groupSummary = (tools: ReadonlyArray<ToolMsg>): string => {
+  const by: Record<string, number> = {}
+  for (const t of tools) by[t.name] = (by[t.name] ?? 0) + 1
+  const verb: Record<string, string> = { read_file: "read", glob: "glob", grep: "grep" }
+  const parts = Object.entries(by).map(([n, c]) => `${c} ${verb[n] ?? n}`)
+  return `explored ${tools.length} (${parts.join(" · ")})`
+}
 
 const field = (args: string, k: string): string => {
   try {
