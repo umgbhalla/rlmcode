@@ -40,8 +40,8 @@ import {
   AxMemory,
 } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { limits, nodeRateLimiter } from "./runtime.ts"
-import { allocate } from "./orch.ts"
+import { clip, limits, nodeRateLimiter, tokensOf } from "./runtime.ts"
+import { allocate, type BudgetUsage } from "./orch.ts"
 import { type EmitSink, withTimeout } from "./orch-recipes.ts"
 import { setNodeSpanTracer } from "./orch-spans.ts"
 import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
@@ -69,11 +69,12 @@ const RLM_TIMEOUT_MS = (() => {
   return Number.isFinite(v) && v > 0 ? Math.max(10_000, Math.floor(v)) : 600_000
 })()
 
-const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
-
-type RlmTok = { totalTokens?: number; promptTokens?: number; completionTokens?: number }
-const rlmTokensOf = (t: RlmTok | undefined): number =>
-  t === undefined ? 0 : typeof t.totalTokens === "number" ? t.totalTokens : (t.promptTokens ?? 0) + (t.completionTokens ?? 0)
+// RlmTok is the per-stage usage triple ax hands back; it is structurally a BudgetUsage, so the
+// shared tokensOf (orch.ts, via runtime.ts) reads its token count with the SAME fallback.
+type RlmTok = BudgetUsage
+// a.usage is the RLM's CUMULATIVE usage array (AxProgramUsage[]) — read the last element's tokens.
+const tokensFromTurn = (usage: ReadonlyArray<{ tokens?: RlmTok }> | undefined): number =>
+  tokensOf(usage?.[usage.length - 1]?.tokens)
 
 // Steer BOTH actor stages (distiller + executor) away from CommonJS AND away from giving up via
 // askClarification / a globalThis scan. The AxJSRuntime worker is a least-privilege ESM sandbox
@@ -144,9 +145,6 @@ export const runRlm = async (
   // a.usage is the RLM's CUMULATIVE usage array; we charge the per-turn DELTA so the soft
   // budget streams live (not once-after). Track the highest total already charged.
   let chargedTokens = 0
-  // a.usage is an AxProgramUsage[] (cumulative) — read the last element's tokens.
-  const tokensFromTurn = (usage: ReadonlyArray<{ tokens?: RlmTok }> | undefined): number =>
-    rlmTokensOf(usage?.[usage.length - 1]?.tokens)
   // getUsage() is AxProgramUsage[] | AxAgentUsage ({ actor, responder }) — SUM every
   // entry's tokens so the final reconcile captures the responder stage too.
   const tokensFromGetUsage = (u: unknown): number => {
@@ -156,7 +154,7 @@ export const runRlm = async (
           ...((u as { actor?: Array<{ tokens?: RlmTok }> })?.actor ?? []),
           ...((u as { responder?: Array<{ tokens?: RlmTok }> })?.responder ?? []),
         ]
-    return entries.reduce((sum, e) => sum + rlmTokensOf(e?.tokens), 0)
+    return entries.reduce((sum, e) => sum + tokensOf(e?.tokens), 0)
   }
 
   // The RLM, built EXACTLY per the proven standalone pattern (../ax/src/examples/rlm.ts):

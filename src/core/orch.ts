@@ -13,6 +13,10 @@ import { type Context as OtelContext, type Tracer, trace as otelTrace } from "@o
 import * as Effect from "effect/Effect"
 import type { Activity } from "./activity.ts"
 import { endNodeSpan, errorNodeSpan, startNodeSpan } from "./orch-spans.ts"
+// THE one clip lives in the leaf clip.ts (no cycle); re-exported here so orch.ts stays its
+// public home (and runtime.ts re-exports it onward for the orchestration drivers).
+import { clip } from "./clip.ts"
+export { clip } from "./clip.ts"
 
 // The real forward() opts bag threaded by turn() (agent.ts). This is a STRUCTURAL
 // SUPERSET of AxProgramForwardOptions, NOT an alias: sessionId/tracer/traceContext
@@ -261,12 +265,6 @@ export const emit = (event: NodeEvent, sink: ActivitySink, _opts?: EmitOpts): Ef
       })
     }
   })
-
-// Stringify an unknown payload for a span attribute / activity detail, bounded.
-const clip = (v: unknown, max = 256): string => {
-  const s = typeof v === "string" ? v : (() => { try { return JSON.stringify(v) ?? String(v) } catch { return String(v) } })()
-  return s.length > max ? `${s.slice(0, max)}…` : s
-}
 
 // HUMAN error text for an error NodeEvent — the message/tag, NOT the whole serialized
 // error object. JSON.stringify(cause) leaked `{"nodeId":…,"_tag":"NodeTimeoutError",…}`

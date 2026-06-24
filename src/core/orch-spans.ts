@@ -25,6 +25,9 @@ import {
   context as otelContext,
   trace as otelTrace,
 } from "@opentelemetry/api"
+// clip lives in the leaf clip.ts (no core-engine imports) — pulled straight from there so there
+// is no orch.ts ↔ orch-spans.ts cycle (orch.ts imports this module's span fns).
+import { clip } from "./clip.ts"
 
 // One open child span per live nodeId, plus the OTel Context that carries it (so a child
 // node started later can parent under it). Module-level + keyed by nodeId: turns are
@@ -66,11 +69,6 @@ export const getTurnContext = (sessionId: string | undefined): OtelContext | und
 // LEAK FIX (D3): drop a closed session's stashed trace context. Called from deleteSession so the
 // turn-context registry never accumulates dead sessions. Returns whether an entry existed.
 export const clearTurnContext = (sessionId: string): boolean => turnCtx.delete(sessionId)
-
-const clip = (v: unknown, max = 256): string => {
-  const s = typeof v === "string" ? v : (() => { try { return JSON.stringify(v) ?? String(v) } catch { return String(v) } })()
-  return s.length > max ? `${s.slice(0, max)}…` : s
-}
 
 // Start a child span mirroring a node 'start' NodeEvent. Parents under the parent node's
 // span (by parentId) when that node is open, else under the ambient active span (the live

@@ -26,7 +26,7 @@
 // traceContext), so node emits nest under the live chat.turn span in the SAME OrchTree.
 import type { AxAIService, AxFunction } from "@ax-llm/ax"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
-import { estimatedCostOf, getTurnEmit, llm, makeOnEvent } from "./runtime.ts"
+import { clip, estimatedCostOf, getTurnEmit, llm, makeOnEvent } from "./runtime.ts"
 import { choiceFromArgs } from "./models.ts"
 import { allocate, BudgetExhaustedError } from "./orch.ts"
 import { NodeTimeoutError, withTimeout } from "./orch-recipes.ts"
@@ -51,7 +51,6 @@ const WF_TIMEOUT_MS = (() => {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : 300_000
 })()
 
-const clip = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}…[+${s.length - n}]` : s)
 // Human seconds for the timeout partial: whole seconds at >=10s (e.g. "300s"), one decimal
 // below (e.g. "0.3s") so a small env-tuned ceiling never prints a misleading "0s".
 const fmtSecs = (ms: number): string => (ms >= 10_000 ? `${Math.round(ms / 1000)}s` : `${(ms / 1000).toFixed(1)}s`)
@@ -152,7 +151,7 @@ const workflowTool: AxFunction = {
       const reply = typeof result === "string" ? result : result === undefined ? "(workflow returned no value)" : (() => { try { return JSON.stringify(result) } catch { return String(result) } })()
       const spent = await budget.spent()
       onEvent({ type: "done", nodeId: rootId, result: clip(reply, 256) })
-      return clip(`${reply}\n\n${costFooter(spent)}`)
+      return clip(`${reply}\n\n${costFooter(spent)}`, 8000)
     } catch (e) {
       onEvent({ type: "error", nodeId: rootId, cause: e })
       // WALL-CLOCK timeout (D2/D5): the script body ran past WF_TIMEOUT_MS — return a partial,

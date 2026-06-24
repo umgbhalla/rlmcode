@@ -29,34 +29,11 @@ export const TURN_TIMEOUT_MS = (() => {
 // and a thinking model also fills `thought`. Both are incremental (appended per chunk).
 type StreamDelta = { delta?: { reply?: string; thought?: string } }
 
-// Race one iterator step against a deadline timer. If the timer wins: abort the turn (so a CF
-// stream that honors the signal cancels its live request) and REJECT with the typed stall/wall
-// message. `isWall` picks the message so the surfaced "⚠ …" partial is honest about which guard
-// fired. Cleared in finally so a fast chunk never leaves a dangling timer.
-// ponytail: single-caller timer-race helper. Upgrade: inline into drainWithWatchdog when the two-deadline logic is touched next.
-const raceDeadline = (
-  step: Promise<IteratorResult<unknown>>,
-  ms: number,
-  aborter: AbortController,
-  isWall: boolean,
-): Promise<IteratorResult<unknown>> => {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const watchdog = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      aborter.abort() // cancel the in-flight CF fetch, not just the JS race
-      reject(new Error(isWall ? `turn exceeded ${TURN_TIMEOUT_MS}ms` : `stream stalled >${STREAM_STALL_MS}ms`))
-    }, ms)
-  })
-  return Promise.race([step, watchdog]).finally(() => {
-    if (timer !== undefined) clearTimeout(timer)
-  })
-}
-
 // drainWithWatchdog — drain ax's streamingForward iterator under BOTH guards. On every delta we
 // push the thought/reply to the per-turn emit AND reset the per-chunk stall deadline; an absolute
 // wall-clock deadline is fixed once at entry. Each `it.next()` races a single timer set to whichever
-// deadline is SOONER; if the timer wins, raceDeadline aborts the turn (best-effort CF cancel) and
-// rejects with a TYPED message ("stream stalled"/"turn exceeded"), which propagates out here so
+// deadline is SOONER (the race is inlined in the loop below); if the timer wins, it aborts the turn
+// (best-effort CF cancel) and rejects with a TYPED message ("stream stalled"/"turn exceeded"), which propagates out here so
 // run.ts.errorResult maps it to a "⚠ …" partial (NOT the "Interrupted." user-abort text).
 //
 // CRITICAL (the hang must NOT depend on the generator cooperating): on exit we fire it.return() but
@@ -77,10 +54,28 @@ export const drainWithWatchdog = async (
       const stallDeadline = Date.now() + STREAM_STALL_MS // reset each chunk; Infinity ⇒ never
       const deadline = Math.min(stallDeadline, wallDeadline)
       const ms = deadline - Date.now()
-      // Both guards disabled (tests / both Infinity): plain await, no timer, no watchdog.
-      const next = Number.isFinite(ms)
-        ? await raceDeadline(it.next(), Math.max(0, ms), aborter, deadline === wallDeadline)
-        : await it.next()
+      const step = it.next()
+      // Race this iterator step against a deadline timer. If the timer wins: abort the turn (so a CF
+      // stream that honors the signal cancels its live request) and REJECT with the typed stall/wall
+      // message — `isWall` picks the wording so the surfaced "⚠ …" partial is honest about which guard
+      // fired. Cleared in finally so a fast chunk never leaves a dangling timer. Both guards disabled
+      // (tests / both Infinity ⇒ non-finite ms): plain await, no timer, no watchdog.
+      let next: IteratorResult<unknown>
+      if (Number.isFinite(ms)) {
+        const isWall = deadline === wallDeadline
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const watchdog = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            aborter.abort() // cancel the in-flight CF fetch, not just the JS race
+            reject(new Error(isWall ? `turn exceeded ${TURN_TIMEOUT_MS}ms` : `stream stalled >${STREAM_STALL_MS}ms`))
+          }, Math.max(0, ms))
+        })
+        next = await Promise.race([step, watchdog]).finally(() => {
+          if (timer !== undefined) clearTimeout(timer)
+        })
+      } else {
+        next = await step
+      }
       if (next.done === true) break
       const delta = (next.value as StreamDelta).delta ?? {}
       if (delta.thought) emit({ kind: "thinkingDelta", text: delta.thought })

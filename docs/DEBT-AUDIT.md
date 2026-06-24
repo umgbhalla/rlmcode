@@ -64,8 +64,8 @@ findings from the same pass live as `ponytail:` markers at their sites (`bun run
 
 | # | what | sites (file:line) | fix | ~lines |
 |---|------|-------------------|-----|--------|
-| 5 | `clip()` copy-pasted identically | `src/core/orch.ts:266`, `src/core/orch-spans.ts:70`, `src/core/workflow.ts:54`, `src/core/rlm-node.ts:72` | one exported `clip` in `orch.ts`, re-export via `runtime.ts` | ~9 |
-| 6 | usage-triple fallback reimplemented (`readUsage`/`readUsageOf`/`rlmTokensOf`) | `src/core/agent.ts:170`, `src/core/runtime.ts:188`, `src/core/rlm-node.ts:75` (`orch.ts:155` `tokensOf` already does it) | share one helper | ~6 |
+| 5 | ~~`clip()` copy-pasted identically~~ **RESOLVED** (core-dedup): one `clip` in the leaf `clip.ts` (no cycle), re-exported via `orch.ts` (its public home) and `runtime.ts`; `orch-spans.ts` imports the leaf directly, `workflow.ts`/`rlm-node.ts` via `runtime.ts`. (`workflow-prims.ts` keeps its own `(string,256,…)` copy — NOT in this step's scope.) | `src/core/orch.ts:266`, `src/core/orch-spans.ts:70`, `src/core/workflow.ts:54`, `src/core/rlm-node.ts:72` | one exported `clip` in `orch.ts`, re-export via `runtime.ts` | ~9 |
+| 6 | ~~usage-triple fallback reimplemented (`readUsage`/`readUsageOf`/`rlmTokensOf`)~~ **RESOLVED** (core-dedup): `rlmTokensOf`→shared `tokensOf` (orch.ts, via runtime.ts); `agent.ts readUsage` (a gen→usage-object extractor, NOT the number-from-triple `tokensOf`) folded into the identical `runtime.ts readUsageOf`. | `src/core/agent.ts:170`, `src/core/runtime.ts:188`, `src/core/rlm-node.ts:75` (`orch.ts:155` `tokensOf` already does it) | share one helper | ~6 |
 | 7 | BRANCH AST-node-kind `Set` duplicated | `scripts/design-check.ts:100`, `scripts/debt-audit.ts:45` | one shared const | ~22 |
 | 8 | `process.argv.includes` flag-parsing | `scripts/design-check.ts:385`, `scripts/oxlint-check.ts:90`, `scripts/ponytail-debt.ts:100` | `Bun.parseArgs()` | ~6 |
 | 9 | hermetic-test boilerplate (`let failed=0` + `assert`/`ok`, ~6-8 lines × ~18 files) | `scripts/*.test.ts` | a tiny shared `scripts/test-harness.ts` — judgment call vs AGENTS.md "no fixtures unless asked" | ~120 if taken |

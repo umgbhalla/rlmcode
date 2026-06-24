@@ -6,6 +6,10 @@
 import { ai, type AxAIService, type AxRateLimiterFunction } from "@ax-llm/ax"
 import * as Effect from "effect/Effect"
 import { type ActivitySink, type BudgetUsage, emit, type NodeEvent } from "./orch.ts"
+// CYCLE-BREAKER RE-EXPORT: clip + tokensOf are defined ONCE in orch.ts; runtime.ts re-exports
+// them so the orchestration drivers (workflow.ts / rlm-node.ts) — which already import runtime.ts
+// but must NOT deep-import orch internals across the layer boundary — share the single copy.
+export { clip, tokensOf } from "./orch.ts"
 import { makeMockAI } from "./mock-ai.ts"
 import { KIMI, MODEL_DOC } from "./models.ts"
 

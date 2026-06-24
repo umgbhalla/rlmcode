@@ -3,10 +3,10 @@
 // emits canonical gen_ai.* child spans (token usage, finish reasons, message
 // events). Effect's own Telemetry.addGenAIAnnotations stamps the semconv
 // attributes on our span. Metrics + correlated logs come along automatically.
-import { ax, type AxAIService, type AxFunction, type AxGen, type AxMemory } from "@ax-llm/ax"
+import { ax, type AxAIService, type AxFunction, type AxMemory } from "@ax-llm/ax"
 import { existsSync, readFileSync } from "node:fs"
 import { makeLiveLogger } from "./activity.ts"
-import { allocate, type ActivitySink, BudgetExhaustedError, type BudgetUsage } from "./orch.ts"
+import { allocate, type ActivitySink, BudgetExhaustedError } from "./orch.ts"
 import { finalizeOnMaxSteps } from "./orch-recipes.ts"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api"
@@ -18,7 +18,7 @@ import * as Telemetry from "effect/unstable/ai/Telemetry"
 import { SERVICE_NAME, SERVICE_VERSION } from "../otel.ts"
 import { BASE_TOOLS } from "./tools.ts"
 import { setNodeSpanTracer, setTurnContext } from "./orch-spans.ts"
-import { BASE_PROMPT, limits, makeOnEvent, rateLimiter, setTurnEmit } from "./runtime.ts"
+import { BASE_PROMPT, limits, makeOnEvent, rateLimiter, readUsageOf, setTurnEmit } from "./runtime.ts"
 import { setMockEmit } from "./mock-ai.ts"
 import { drainWithWatchdog } from "./stream-watchdog.ts"
 import { WORKFLOW_TOOLS } from "./workflow.ts"
@@ -158,21 +158,12 @@ type Usage = {
   thoughtsTokens?: number | undefined
 }
 
-// Token usage off AxProgram.getUsage() (AxGen extends AxProgram) — a real, if
-// lightly-documented, API returning AxProgramUsage[] with .tokens per call. It's
-// the source for gen_ai.usage.* + the token metric (ax's own span carries usage
-// only as an event). Guarded: yields nothing if ax changes the shape (non-fatal).
-// KEPT internal (never re-exported across src/core/sdk.ts): it feeds usage.* on the
-// normalized public TurnResult, not the wire.
-// ponytail: `(gen as any).getUsage?.()` casts past ax's public type. Upgrade: replace
-// with ax's public per-call usage API (AxProgramUsage) once it lands a stable typed
-// accessor, dropping the `any` cast and the shape-guard fallback below.
-const readUsage = (gen: AxGen): Usage | undefined => {
-  const u = (gen as any).getUsage?.()
-  const last = Array.isArray(u) ? u[u.length - 1] : u
-  return last?.tokens ?? last
-}
-
+// Token usage off AxProgram.getUsage() is read by the SHARED gen→usage extractor
+// readUsageOf (runtime.ts) — the same probe the orchestration drivers use to charge the
+// Budget — so this module no longer keeps a private copy. The returned object carries the
+// reasoning fields at runtime (reasoningOf reads them) even though the static type is the
+// narrower BudgetUsage.
+//
 // The reasoning-token count from a usage triple: prefer reasoningTokens (CF/openai
 // completion_tokens_details.reasoning_tokens), else thoughtsTokens (Gemini usageMetadata).
 // Undefined when neither is present (a non-thinking turn / provider that omits it).
@@ -296,7 +287,6 @@ export const createAgent = (config: AxAgentConfig) => {
       // by stepHooks below, not by a throw). The tapCause below stays for an explicit
       // freeze()/runaway, which is the only thing that throws BudgetExhaustedError.
       const budget = allocate(tokenBudget)
-      const usageOf = (gen: AxGen): BudgetUsage | undefined => readUsage(gen)
 
       yield* Effect.logInfo("turn.start").pipe(
         Effect.annotateLogs({ "session.id": sessionId, "message.chars": message.length }),
@@ -364,7 +354,7 @@ export const createAgent = (config: AxAgentConfig) => {
               const stream = chat.streamingForward(service, { message: msg }, opts as Parameters<typeof chat.streamingForward>[2])
               const reply = await drainWithWatchdog(stream, aborter, emit)
               // ADVISORY budget charge (runNode used to do this; the streaming drain bypasses it).
-              budget.charge(usageOf(chat))
+              budget.charge(readUsageOf(chat))
               return { reply }
             }),
           catch: (e) => new ChatError(e),
@@ -413,7 +403,7 @@ export const createAgent = (config: AxAgentConfig) => {
       })
       // Single gen now (the in-loop finalize answers on the SAME chat gen/mem), so usage is
       // just chat's — no separate answerGen to sum. sumUsage retained for orchestration paths.
-      const usage = readUsage(chat)
+      const usage = readUsageOf(chat)
       if (usage) {
         Telemetry.addGenAIAnnotations(span, {
           usage: { inputTokens: usage.promptTokens, outputTokens: usage.completionTokens },
