@@ -41,11 +41,18 @@ const scriptedStream = (chunks: ReadonlyArray<{ thought?: string; reply?: string
 
 // Drive the watchdog Effect on a forked fiber, advance virtual time by `adjustMs`, then join.
 // Returns the Exit so a test can assert success (clean reply) or failure (the typed stall/wall msg).
-const driveWatchdog = (stream: AsyncIterable<unknown>, aborter: AbortController, adjustMs: number, stallMs: number, turnMs: number) =>
+const driveWatchdog = (
+  stream: AsyncIterable<unknown>,
+  aborter: AbortController,
+  adjustMs: number,
+  stallMs: number,
+  turnMs: number,
+  firstTokenMs = 300_000,
+) =>
   Effect.gen(function* () {
     const events: Array<{ kind: string; text?: string }> = []
     const emit = (a: { kind: string; text?: string }) => void events.push(a)
-    const fiber = yield* Effect.forkChild(drainWithWatchdogEffect(stream, aborter, emit as never, { stallMs, turnMs }))
+    const fiber = yield* Effect.forkChild(drainWithWatchdogEffect(stream, aborter, emit as never, { stallMs, turnMs, firstTokenMs }))
     yield* TestClock.adjust(Duration.millis(adjustMs))
     const exit = yield* Effect.exit(Fiber.join(fiber))
     // The drain FAILS with a plain Error on a watchdog fire; squash flattens the Cause to it so the
@@ -62,6 +69,50 @@ it.effect("FIRES ON STALL: one chunk then dead air → 'stream stalled' after th
     expect(/stream stalled/i.test(msg), "the failure is the STALL message, not the wall cap").toBe(true)
     expect(aborter.signal.aborted, "the watchdog aborted the turn's controller (best-effort CF cancel)").toBe(true)
     expect(events.some((e) => e.kind === "thinkingDelta"), "the one real chunk was emitted before the stall").toBe(true)
+  }),
+)
+
+it.effect("FIRST-TOKEN BUDGET: a 90s gap BEFORE any chunk does NOT fire (under the 300s first-token budget)", () =>
+  Effect.gen(function* () {
+    // No chunk has arrived yet (reasoning model warming up). 90s of dead air is WELL under the
+    // generous firstTokenMs (300s) — the OLD single 60s stall would have false-aborted here. The
+    // fiber must still be suspended (no fire) after 90s of virtual time.
+    const aborter = new AbortController()
+    const events: Array<{ kind: string }> = []
+    const emit = (a: { kind: string }) => void events.push(a)
+    const fiber = yield* Effect.forkChild(
+      drainWithWatchdogEffect(scriptedStream([]), aborter, emit as never, { stallMs: 60_000, turnMs: 600_000, firstTokenMs: 300_000 }),
+    )
+    yield* TestClock.adjust(Duration.millis(90_000)) // 90s — past the 60s inter-chunk stall, under the 300s first-token budget
+    expect(fiber.pollUnsafe(), "still draining — the first-token budget (300s) did NOT fire at 90s").toBe(undefined)
+    expect(aborter.signal.aborted, "no abort — the warmup gap is within the first-token budget").toBe(false)
+    yield* Fiber.interrupt(fiber) // clean up the suspended fiber (it would hang forever otherwise)
+  }),
+)
+
+it.effect("INTER-CHUNK STALL: one chunk THEN a 90s gap DOES fire 'stream stalled' (the tight 60s guard is active after the first delta)", () =>
+  Effect.gen(function* () {
+    // The first delta landed → firstStep flips → the idle guard tightens to the 60s inter-chunk
+    // stall. A 90s gap now EXCEEDS it and fires the STALL message (NOT the first-token message),
+    // proving the two phases use distinct thresholds off the SAME stream shape.
+    const aborter = new AbortController()
+    const { exit, msg, events } = yield* driveWatchdog(scriptedStream([{ reply: "first " }]), aborter, 90_000, 60_000, 600_000, 300_000)
+    expect(exit._tag, "the inter-chunk stall FIRED after the first delta (90s > 60s)").toBe("Failure")
+    expect(/stream stalled/i.test(msg), "the cause is the INTER-CHUNK stall, not the first-token budget").toBe(true)
+    expect(/no first token/i.test(msg), "it is NOT the first-token message — a chunk had already arrived").toBe(false)
+    expect(events.some((e) => e.kind === "replyDelta"), "the first chunk was emitted before the stall").toBe(true)
+  }),
+)
+
+it.effect("WALL-CLOCK CAP still backstops a TRICKLE under the first-token budget (cap < firstTokenMs)", () =>
+  Effect.gen(function* () {
+    // No chunk + a wall cap (5s) SOONER than the first-token budget (300s): the wall guard wins from
+    // entry, so even a generous first-token budget can't let a turn trickle forever — the cap fires.
+    const aborter = new AbortController()
+    const { exit, msg } = yield* driveWatchdog(scriptedStream([]), aborter, 5_000, 60_000, 5_000, 300_000)
+    expect(exit._tag, "the wall-clock cap FIRED even before the first token").toBe("Failure")
+    expect(/turn exceeded/i.test(msg), "the cause is the WALL cap (cap < first-token budget)").toBe(true)
+    expect(aborter.signal.aborted, "the wall cap aborts the turn").toBe(true)
   }),
 )
 

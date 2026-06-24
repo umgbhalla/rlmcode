@@ -31,6 +31,14 @@ export const STREAM_STALL_MS = (() => {
   const v = Number(process.env.RLM_STREAM_STALL_MS ?? 60_000)
   return Number.isFinite(v) && v > 0 ? v : Number.POSITIVE_INFINITY
 })()
+// FIRST-TOKEN deadline (fixes F7): distinct from the inter-chunk stall — a reasoning model can
+// think/warm-up for minutes before the FIRST delta lands, so the first pull gets a generous budget
+// (~5min) while NO chunk has arrived. Once the first delta lands we switch to the tight inter-chunk
+// STREAM_STALL_MS. A single 60s threshold conflated the two → false-positive aborts on slow models.
+export const FIRST_TOKEN_MS = (() => {
+  const v = Number(process.env.RLM_FIRST_TOKEN_MS ?? 300_000)
+  return Number.isFinite(v) && v > 0 ? v : Number.POSITIVE_INFINITY
+})()
 export const TURN_TIMEOUT_MS = (() => {
   const v = Number(process.env.RLM_TURN_TIMEOUT_MS ?? 600_000)
   return Number.isFinite(v) && v > 0 ? v : Number.POSITIVE_INFINITY
@@ -42,8 +50,8 @@ type StreamDelta = { delta?: { reply?: string; thought?: string } }
 
 // Knobs the watchdog races against — injectable so a test can pin tiny deterministic deadlines
 // without poking module-load env. Production passes the module STREAM_STALL_MS / TURN_TIMEOUT_MS.
-export type WatchdogLimits = { readonly stallMs: number; readonly turnMs: number }
-const DEFAULT_LIMITS: WatchdogLimits = { stallMs: STREAM_STALL_MS, turnMs: TURN_TIMEOUT_MS }
+export type WatchdogLimits = { readonly stallMs: number; readonly turnMs: number; readonly firstTokenMs: number }
+const DEFAULT_LIMITS: WatchdogLimits = { stallMs: STREAM_STALL_MS, turnMs: TURN_TIMEOUT_MS, firstTokenMs: FIRST_TOKEN_MS }
 
 // A pending iterator step, or the watchdog firing. The watchdog branch carries WHICH guard tripped
 // so the surfaced "⚠ …" partial names the right cause; the step branch carries the next chunk.
@@ -72,13 +80,19 @@ export const drainWithWatchdogEffect = (
     const it = stream[Symbol.asyncIterator]()
     const wallStart = Date.now()
     let reply = ""
+    // FIRST-TOKEN vs INTER-CHUNK (fixes F7): true until the FIRST delta lands. While no chunk has
+    // arrived the idle guard is the generous firstTokenMs (reasoning/warmup budget); after the first
+    // delta it switches to the tight inter-chunk stallMs. The wall-clock cap backstops both phases.
+    let firstStep = true
 
-    // One iterator step raced against a deadline. `remaining` is the soonest of the per-chunk stall
-    // (from NOW) and the absolute wall-clock cap (from entry). A non-finite remaining ⇒ no timer
-    // (both guards disabled / Infinity) ⇒ a plain pull, no watchdog. The race interrupts the loser:
-    // if the timer wins, `aborter.abort()` cancels the in-flight CF fetch and we Effect.fail.
+    // One iterator step raced against a deadline. `remaining` is the soonest of the per-chunk idle
+    // guard (firstTokenMs before the first delta, stallMs after — from NOW) and the absolute
+    // wall-clock cap (from entry). A non-finite remaining ⇒ no timer (guards disabled / Infinity) ⇒
+    // a plain pull, no watchdog. The race interrupts the loser: if the timer wins, `aborter.abort()`
+    // cancels the in-flight CF fetch and we Effect.fail.
     const stepOnce: Effect.Effect<Pull, Error> = Effect.suspend(() => {
-      const stallDeadline = Date.now() + limits.stallMs // reset each chunk; Infinity ⇒ never
+      const idleMs = firstStep ? limits.firstTokenMs : limits.stallMs // first-token budget vs inter-chunk
+      const stallDeadline = Date.now() + idleMs // reset each chunk; Infinity ⇒ never
       const wallDeadline = wallStart + limits.turnMs // Infinity ⇒ +Infinity ⇒ never fires
       const deadline = Math.min(stallDeadline, wallDeadline)
       const remaining = deadline - Date.now()
@@ -88,11 +102,16 @@ export const drainWithWatchdogEffect = (
       )
       if (!Number.isFinite(remaining)) return pull
       const isWall = deadline === wallDeadline
+      const onFirst = firstStep
       const watchdog: Effect.Effect<Pull, Error> = Effect.sleep(Duration.millis(Math.max(0, remaining))).pipe(
         Effect.flatMap(() =>
           Effect.failSync(() => {
             aborter.abort() // cancel the in-flight CF fetch, not just the JS race
-            return new Error(isWall ? `turn exceeded ${limits.turnMs}ms` : `stream stalled >${limits.stallMs}ms`)
+            // Three distinct causes: the wall cap, the first-token (no chunk yet) budget, or the
+            // inter-chunk stall. The "stream stalled" wording stays the contract for the inter-chunk
+            // fire; the first-token fire gets its OWN message so the surfaced ⚠ names the right cause.
+            const idle = onFirst ? `no first token in ${limits.firstTokenMs}ms` : `stream stalled >${limits.stallMs}ms`
+            return new Error(isWall ? `turn exceeded ${limits.turnMs}ms` : idle)
           }),
         ),
       )
@@ -104,6 +123,7 @@ export const drainWithWatchdogEffect = (
 
     const loop: Effect.Effect<string, Error> = Effect.flatMap(stepOnce, (next) => {
       if ("done" in next) return Effect.succeed(reply)
+      firstStep = false // a chunk arrived → switch the idle guard from firstTokenMs to stallMs
       const delta = (next.value as StreamDelta).delta ?? {}
       if (delta.thought) emit({ kind: "thinkingDelta", text: delta.thought })
       if (delta.reply) {
