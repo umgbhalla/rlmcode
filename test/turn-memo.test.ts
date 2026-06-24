@@ -66,6 +66,25 @@ it.effect("isSettled + live-node never-settled", () =>
   }),
 )
 
+// FIRST-CLASS SETTLED BOUNDARY (W5.2, F12): isSettled now READS the assembly-stamped `settled` flag
+// when present (toTurns stamps it once via the shared turnSettled predicate) and only FALLS BACK to
+// re-deriving when it is absent (a raw fixture). Proves the memo no longer re-walks workflow.nodes on
+// every compare — the boundary is a property of the assembled turn, inferred at the single site.
+it.effect("isSettled reads the first-class settled stamp (F12), not a per-compare re-derivation", () =>
+  Effect.sync(() => {
+    // The stamp WINS over the raw signals: a turn whose raw signals say in-flight (a live workflow
+    // node) but carries settled:true reads settled — proving isSettled consults the stamp, not nodes.
+    expect(isSettled({ ...settledButLiveNode, settled: true }), "settled:true stamp ⇒ settled (no node re-walk)").toBe(true)
+    // And the inverse: a turn whose raw signals say settled but carries settled:false reads NOT settled.
+    expect(isSettled({ ...settled, settled: false }), "settled:false stamp ⇒ NOT settled (stamp wins)").toBe(false)
+    // ABSENT stamp ⇒ fall back to the shared predicate, identical to the old derivation (back-compat).
+    expect(isSettled(settled), "absent stamp ⇒ derived-settled (fallback to turnSettled)").toBe(true)
+    expect(isSettled(settledButLiveNode), "absent stamp + live node ⇒ derived NOT settled").toBe(false)
+    // The comparator honours the stamp end-to-end: two stamped-settled turns with equal content SKIP.
+    expect(turnPropsEqual(props({ ...settled, settled: true }), props({ ...settled, settled: true })), "stamped-settled equal turns ⇒ SKIP").toBe(true)
+  }),
+)
+
 it.effect("the perf win: a settled turn skips re-render on a pure spinner tick", () =>
   Effect.sync(() => {
     expect(turnPropsEqual(props(settled), props({ ...settled })), "settled turn: equal props ⇒ SKIP re-render").toBe(true)

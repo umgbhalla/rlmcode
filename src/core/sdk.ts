@@ -69,7 +69,7 @@ export interface Agent {
   info(): AgentInfo
 }
 
-const RLM_VERSION = "0.0.2"
+const RLM_VERSION = "0.0.3"
 const AX_VERSION = "22.0.5"
 
 // Resolve the tools option to a concrete AxFunction[] (the internal createAgent's input).

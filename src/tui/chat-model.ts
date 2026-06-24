@@ -32,7 +32,12 @@ export { groupSteps, groupSummary, type StepItem }
 //   - `rows` — the flattened+velocity-capped workflow Row[] (flatten() applied at assembly): the ONE
 //     stable Row[] per (orch, expNodes) shared by TurnView, the focus ring, and the memo comparator,
 //     replacing the old 3× flatten() per render. undefined when the turn carries no workflow.
-export type Turn = { idx: number; user: string; steps: Array<Msg>; items: Array<StepItem>; final: string | null; meta?: TurnMeta | undefined; thinking?: string | undefined; streaming?: boolean; workflow?: OrchTree | undefined; rows?: ReadonlyArray<OrchRow> | undefined }
+//   - `settled` — the FIRST-CLASS settled/committed boundary (W5.2, fixes F12): computed ONCE here at
+//     assembly from the three heterogeneous in-flight signals (a final reply exists + the reply is not
+//     the in-flight streaming one + the workflow has no still-RUNNING node). The memo comparator reads
+//     this flag instead of re-deriving it (and re-walking workflow.nodes) on every busy-tick compare —
+//     settledness is now a property of the assembled turn, inferred at the single assembly site.
+export type Turn = { idx: number; user: string; steps: Array<Msg>; items: Array<StepItem>; final: string | null; meta?: TurnMeta | undefined; thinking?: string | undefined; streaming?: boolean; settled: boolean; workflow?: OrchTree | undefined; rows?: ReadonlyArray<OrchRow> | undefined }
 
 export const oneLine = (s: string, n = 90): string => {
   const t = s.replace(/\s+/g, " ").trim()
@@ -87,7 +92,7 @@ export const statusBar = (busy: boolean, armed: boolean, note: string | null, wo
 export function toTurns(messages: ReadonlyArray<Msg>, orch?: OrchTree, expNodes: ReadonlySet<string> = EMPTY_SET): Array<Turn> {
   const turns: Array<Turn> = []
   for (const m of messages) {
-    if (m.kind === "you") turns.push({ idx: turns.length, user: m.text, steps: [], items: [], final: null })
+    if (m.kind === "you") turns.push({ idx: turns.length, user: m.text, steps: [], items: [], final: null, settled: false })
     else if (turns.length > 0) turns[turns.length - 1]!.steps.push(m)
   }
   // INLINE NODE-TREE: the session holds ONE OrchTree (the live fan-out). Attach it to the turn
@@ -126,9 +131,25 @@ export function toTurns(messages: ReadonlyArray<Msg>, orch?: OrchTree, expNodes:
     // products of assembly, identical no matter which surface consumes them — no out-of-order flicker.
     t.items = groupSteps(t.steps)
     if (t.workflow) t.rows = workflowRows(t.workflow, expNodes)
+    // SETTLED/COMMITTED BOUNDARY (W5.2, F12): the single assembly-site inference of settledness,
+    // collapsing the three heterogeneous in-flight signals into ONE first-class flag the memo
+    // comparator then reads (no re-walk of workflow.nodes per compare). A turn is settled iff a final
+    // reply exists, it is NOT the in-flight streaming reply, AND its workflow (if any) has no
+    // still-RUNNING node (a node glyph animates off `frame`, so a live node ⇒ not settled — else its
+    // spinner would freeze under the memo). turnSettled is the shared predicate (turn-memo.ts).
+    t.settled = turnSettled(t)
   }
   return turns
 }
+
+// THE settled predicate (W5.2, F12) — the SINGLE authority for "this turn is done and nothing in it
+// still animates". Called ONCE per turn at assembly (toTurns) to stamp Turn.settled; the memo
+// comparator reads the stamped flag rather than re-deriving here on every busy-tick compare. Pure
+// over the minimal shape (final/streaming/workflow), so turn-memo.ts's MemoTurn satisfies it too.
+export const turnSettled = (t: { readonly final: string | null; readonly streaming?: boolean | undefined; readonly workflow?: OrchTree | undefined }): boolean =>
+  t.final !== null &&
+  t.streaming !== true &&
+  !(t.workflow !== undefined && Object.values(t.workflow.nodes).some((n) => n.status === "running"))
 
 const EMPTY_SET: ReadonlySet<string> = new Set()
 

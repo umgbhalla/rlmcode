@@ -25,6 +25,7 @@
 //   `frame` is intentionally absent: a settled turn has no running glyph (its tools/nodes are all
 //   settled), so the spinner tick can't change its output — that's the whole perf win.
 import type { Msg, OrchTree } from "./atoms.ts"
+import { turnSettled } from "./chat-model.ts"
 import type { Row as OrchRow } from "./orch-tree.ts"
 
 // The TurnView render shape this module reasons about (kept in sync with chat.tsx's Turn). Only
@@ -39,19 +40,23 @@ export type MemoTurn = {
   readonly meta?: { readonly model: string; readonly ms: number; readonly tokens?: number | undefined; readonly finishReason?: string | undefined; readonly budget: boolean } | undefined
   readonly thinking?: string | undefined
   readonly streaming?: boolean | undefined
+  // FIRST-CLASS SETTLED BOUNDARY (W5.2, F12): the assembly-stamped settled flag (toTurns →
+  // Turn.settled). Optional so a raw MemoTurn (a test fixture / a hand-built shape) still works —
+  // isSettled below reads the stamp when present and falls back to the SHARED turnSettled predicate
+  // (the single authority in chat-model.ts) otherwise, so there is exactly ONE inference of the rule.
+  readonly settled?: boolean | undefined
   readonly workflow?: OrchTree | undefined
   readonly rows?: ReadonlyArray<OrchRow> | undefined
 }
 
 // SETTLED = the turn is done AND nothing in it still animates: a final reply exists, it is not the
-// in-flight streaming reply, AND its workflow (if any) has no still-RUNNING node. The last clause
-// matters because the orch tree is attached to the LAST turn (workflow.tsx); a turn can carry a
-// final reply while a node is left "running" (its glyph animates off `frame`). Memoizing such a
-// turn would FREEZE that spinner — so a turn with a live node is NOT settled and always re-renders.
-// (Tool steps always settle before the final reply, so the only animated glyph to guard is a node.)
-const hasRunningNode = (t: MemoTurn): boolean =>
-  t.workflow !== undefined && Object.values(t.workflow.nodes).some((n) => n.status === "running")
-export const isSettled = (t: MemoTurn): boolean => t.final !== null && t.streaming !== true && !hasRunningNode(t)
+// in-flight streaming reply, AND its workflow (if any) has no still-RUNNING node (the orch tree is
+// attached to the LAST turn; a turn can carry a final reply while a node is left "running" — its
+// glyph animates off `frame`, so memoizing it would FREEZE that spinner; a live node ⇒ NOT settled).
+// W5.2 (F12): this is now a FIRST-CLASS flag stamped ONCE at assembly (toTurns → Turn.settled), not
+// re-derived per memo compare. isSettled reads the stamp when present; absent (a raw fixture) it
+// defers to turnSettled — the SAME shared predicate the assembly site uses, so the rule lives once.
+export const isSettled = (t: MemoTurn): boolean => t.settled ?? turnSettled(t)
 
 // CONTENT KEY — a compact, frozen-content fingerprint proving two renders carry the SAME settled
 // turn. Cheap on purpose (no full JSON of tool results/args — those bodies are gated behind the

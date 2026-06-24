@@ -171,6 +171,17 @@ export const acquireSession = (id: string): Effect.Effect<SessionState, never, S
 export const setTurnEmit = (sessionId: string, sink: ActivitySink): void => {
   ensureSession(sessionId).emit = sink
 }
+// getTurnEmit (F10, NARROWED): the SOLE remaining sync-index recovery of `emit`, and it is reached
+// ONLY from the genuine out-of-fiber TOOL-HANDLER seam — the `workflow` tool func (workflow.ts) and
+// the mock feeds (mock.ts, RLM_MOCK). ax calls a tool func from its own async context (NOT the turn
+// fiber) forwarding only a fixed `extra`, so the handler cannot receive the per-turn `emit` via opts
+// and MUST recover it by sessionId here. Every IN-FIBER producer threads `emit` EXPLICITLY instead:
+// the main reply stream (drainWithWatchdog(emit) in agent.ts), the per-turn step logger
+// (makeLiveLogger(emit)), the node path (NodeOpts.emit → makeNodeLogger). So the workflow handler
+// recovers ONCE at its entry (workflow.ts:121) and threads it down to every prim explicitly — the
+// index is the boundary crossing, not an ambient sink. Absent ⇒ a no-op (a standalone call with no
+// live turn), never a crash. (The cell still owns ctx/aborter, which genuinely need out-of-fiber
+// recovery too; emit is the one narrowed to this single documented hop.)
 export const getTurnEmit = (sessionId: string | undefined): ActivitySink =>
   (sessionId !== undefined ? sessionsRT.get(sessionId)?.emit : undefined) ?? (() => {})
 

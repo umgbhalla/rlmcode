@@ -3,6 +3,52 @@
 All notable changes to rlmcode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## v0.0.3 — 2026-06-24
+
+Deep design-failure fixes — a waved, gated build closing the 12 architectural failures found by the
+adversarial audit (`.research/design-failures.md`), each grounded in a mature reference stack
+(codex-rs / opencode / motel / claude_code) and verified by a NEW captured-frame or unit assertion.
+
+### Live multi-phase render (was: tool-output splatter)
+- **Three-tier render (F1, CRITICAL).** The expanded `ToolBody` no longer dumps the full output
+  inline (`Number.MAX_SAFE_INTEGER`) — it stays bounded to a turn-aware budget with a `… +N more`
+  affordance, and a dedicated node DETAIL pane (`node-detail.tsx`) renders the focused node's status,
+  collapsed prompt, and last-N tool CALL one-liners (never the output). The node tree is now a compact
+  one-liner per node (status dot + label + model + right-aligned `tok · tools`) — structure + status,
+  detail strictly on demand (the motel `SpanDetailPane` tree-vs-detail split).
+- **Assembly-time tool grouping (F2/F3).** `groupSteps` runs ONCE at transcript assembly (`toTurns`),
+  not per render, and the grouped shape is a first-class product reused by both the main transcript
+  and a node's owned tools — the main-turn/node asymmetry is gone.
+- **Single flatten per render (F4).** The workflow tree is flattened ONCE into a stable `Row[]`
+  carried on the assembled turn, shared by the render, the focus ring, and the memo comparator
+  (was 3× `flatten()` per busy tick).
+- **Node error bubbling (F5) + turn-aware row budget (F6).** A node bubbles a `✗ N failed` badge +
+  warning color from its failed child tools; an expanded tool body is bounded to a viewport-derived
+  per-turn allocation, so one big `bash` can no longer blow the whole screen.
+
+### Streaming, watchdog & finalization
+- **Watchdog split (F7, KNOWN).** The single 60s stall threshold is split into a generous first-token
+  budget (`RLM_FIRST_TOKEN_MS`, default 300s) vs a tight inter-chunk stall (`RLM_STREAM_STALL_MS`,
+  default 60s), both backstopped by the wall-clock cap — no more false-positive aborts on slow
+  reasoning models.
+- **Per-node streaming seam (F8, latent-critical).** `replyDelta`/`thinkingDelta` now carry an
+  optional `nodeId`; `drainWithWatchdog` threads it so a node forwarding with `stream:true` grows its
+  OWN transient text instead of corrupting the main transcript. (`TurnEvent` widens by two optional
+  serializable fields — the SDK barrel + round-trip stay intact.)
+- **Live/committed split (F9).** The in-flight stream grows a transient `liveText` buffer; finalize
+  builds the committed message FRESH from the authoritative reply and clears `liveText` — a coarse
+  live stream is shown only transiently, never snapped over a stale committed message.
+
+### Structural cleanups
+- **Narrowed emit recovery (F10).** Every in-fiber producer (the main reply stream, the per-turn step
+  logger, the node path) threads `emit` EXPLICITLY; the synchronous session-index recovery
+  (`getTurnEmit`) is now documented + scoped to the SOLE out-of-fiber TOOL-HANDLER seam (ax calls a
+  tool func outside the turn fiber with only a fixed `extra`). The cell still owns `ctx`/`aborter`,
+  which genuinely need out-of-fiber recovery.
+- **First-class settled boundary (F12).** Settledness is inferred ONCE at assembly (`turnSettled` →
+  `Turn.settled`) and the memo comparator READS the stamp instead of re-deriving it (re-walking
+  `workflow.nodes`) on every compare — one authority for the in-flight/committed phase boundary.
+
 ## v0.0.2 — 2026-06-24
 
 Lint/quality-gate rework — the gate now "thinks like the Rust compiler": every rule lands at a
