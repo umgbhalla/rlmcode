@@ -24,6 +24,12 @@
   },
   "overrides": [
     {
+      "files": ["scripts/**"],
+      "rules": {
+        "no-console": "off"
+      }
+    },
+    {
       "files": ["scripts/**/*.test.ts"],
       "rules": {
         "no-await-in-loop": "off"

@@ -180,13 +180,13 @@ export const flatten = (orch: OrchTree, expNodes: ReadonlySet<string>, maxChildr
     // so the last-child connector flags are computed over them, not the full child list.
     const { shown, hidden } = capChildren(children, orch, maxChildren)
     const siblings: Array<string | null> = hidden > 0 ? [null, ...shown] : shown
-    siblings.forEach((cid, i) => {
+    for (const [i, cid] of siblings.entries()) {
       const isLastSib = i === siblings.length - 1
       if (cid === null) rows.push(moreRow(`${id}/__more`, prefixOf(childAncestors, isLastSib), hidden))
       else walk(cid, childAncestors, isLastSib, false)
-    })
+    }
   }
 
-  orch.roots.forEach((rid) => walk(rid, [], false, true))
+  for (const rid of orch.roots) walk(rid, [], false, true)
   return rows
 }

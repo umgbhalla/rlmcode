@@ -21,7 +21,7 @@ const createTicker = (): { subscribe: (listener: TickListener) => () => void } =
     if (intervalId) return
     intervalId = setInterval(() => {
       globalTick++
-      listeners.forEach((listener) => listener(globalTick))
+      for (const listener of listeners) listener(globalTick)
     }, BASE_INTERVAL_MS)
   }
 
